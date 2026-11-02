@@ -32,6 +32,13 @@ jobs:
         env:
           GITHUB_ACTIONS: true
           GITHUB_REPOSITORY: ${{ github.repository }}
+      - name: Inspect build output
+        run: |
+          echo "=== Generated index.html ==="
+          cat dist/index.html
+
+          echo "=== Generated files ==="
+          find dist -maxdepth 3 -type f
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
