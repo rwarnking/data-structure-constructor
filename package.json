@@ -1,0 +1,28 @@
+{
+  "name": "data-structure-constructor",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k -n api,web \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "node server.mjs",
+    "dev:web": "vite --host 127.0.0.1",
+    "build": "vue-tsc -b && vite build",
+    "preview": "vite preview",
+    "start": "node server.mjs --static"
+  },
+  "dependencies": {
+    "@lucide/vue": "^1.66.0",
+    "d3-hierarchy": "^3.1.2",
+    "peerjs": "^1.5.5",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@types/d3-hierarchy": "^3.1.7",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "concurrently": "^9.1.2",
+    "typescript": "~5.7.2",
+    "vite": "^6.0.7",
+    "vue-tsc": "^2.2.0"
+  }
+}
