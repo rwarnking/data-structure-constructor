@@ -74,6 +74,7 @@ const TREE_PADDING = 8
 const TREE_HEADER_HEIGHT = 28
 const MAP_PADDING = 12
 const MAP_GAP = 12
+const VERSION_TREEMAP_ASPECT = (CARD_WIDTH - 14) / (CARD_HEIGHT - 47)
 const MAP_ZOOM_MIN = 0.0001
 const MAP_ZOOM_MAX = 8
 const ZOOM_MAX = 4
@@ -145,7 +146,6 @@ const treeDrag = ref<{
   x: number
   y: number
   moved: boolean
-  targetBounds?: { id: string; left: number; right: number; top: number; bottom: number }
   space?: {
     scaleX: number
     scaleY: number
@@ -699,6 +699,14 @@ function childLayouts(node: TreeNode, positions?: Record<string, { x: number; y:
     return { node: child, x, y, ...size }
   })
 }
+function outerTreemapDimensions(node: TreeNode, positions?: Record<string, { x: number; y: number }>): { width: number; height: number } {
+  const size = treeDimensions(node, positions)
+  const width = Math.max(size.width, size.height * VERSION_TREEMAP_ASPECT)
+  return {
+    width,
+    height: Math.max(size.height, width / VERSION_TREEMAP_ASPECT),
+  }
+}
 function treeDimensions(node: TreeNode, positions?: Record<string, { x: number; y: number }>): { width: number; height: number } {
   if (!node.children.length) return { width: LEAF_TILE_WIDTH, height: LEAF_TILE_HEIGHT }
   const children = childLayouts(node, positions)
@@ -718,7 +726,7 @@ function mapGeometry(
   const defaults = defaultPositions(data, positions)
   const extents = data.map((node) => {
     const position = positions?.[node.id] ?? defaults[node.id]!
-    const size = treeDimensions(node, positions)
+    const size = outerTreemapDimensions(node, positions)
     const left = position.x * CARD_WIDTH
     const top = position.y * TREE_MAP_HEIGHT
     return { left, top, right: left + size.width, bottom: top + size.height }
@@ -737,10 +745,10 @@ function defaultPositions(
 ): Record<string, { x: number; y: number }> {
   const columns = Math.max(1, Math.ceil(Math.sqrt(data.length)))
   const columnWidths = Array.from({ length: Math.min(columns, data.length) }, (_, column) =>
-    Math.max(...data.filter((_, index) => index % columns === column).map((node) => treeDimensions(node, positions).width)))
+    Math.max(...data.filter((_, index) => index % columns === column).map((node) => outerTreemapDimensions(node, positions).width)))
   const rowCount = Math.ceil(data.length / columns)
   const rowHeights = Array.from({ length: rowCount }, (_, row) =>
-    Math.max(...data.slice(row * columns, (row + 1) * columns).map((node) => treeDimensions(node, positions).height)))
+    Math.max(...data.slice(row * columns, (row + 1) * columns).map((node) => outerTreemapDimensions(node, positions).height)))
   const columnOffsets = columnWidths.map((_, column) =>
     columnWidths.slice(0, column).reduce((sum, width) => sum + width + MAP_PADDING, MAP_PADDING))
   const rowOffsets = rowHeights.map((_, row) =>
@@ -780,7 +788,7 @@ function positionsForData(
     y: (viewport.height / 2 - view.panY) / view.zoom,
   }
   for (const node of newRoots) {
-    const size = treeDimensions(node)
+    const size = outerTreemapDimensions(node)
     const originTile = previousParents.has(node.id)
       ? tileForNode(previousData, previousPositions, node.id)
       : undefined
@@ -1356,7 +1364,7 @@ function tilesFor(
   positions?: Record<string, { x: number; y: number }>,
 ): Tile[] {
   const position = positions?.[root.id] ?? defaultPositions(forest, positions)[root.id]!
-  const size = treeDimensions(root)
+  const size = outerTreemapDimensions(root)
   const offsetX = position.x * CARD_WIDTH
   const offsetY = position.y * TREE_MAP_HEIGHT
   const tiles: Tile[] = []
@@ -1426,7 +1434,7 @@ function positionAt(version: Version, clientX: number, clientY: number, map: HTM
   if (!drag?.space) {
     const geometry = mapGeometry(version.data, version.positions, map.clientWidth, map.clientHeight)
     const dragged = drag ? findNode(version.data, drag.id) : undefined
-    const size = dragged ? treeDimensions(dragged) : { width: LEAF_TILE_WIDTH, height: LEAF_TILE_HEIGHT }
+    const size = dragged ? outerTreemapDimensions(dragged) : { width: LEAF_TILE_WIDTH, height: LEAF_TILE_HEIGHT }
     const x = ((clientX - rect.left) / zoom.value - view.panX) / view.zoom + size.width * 0.5
     const y = ((clientY - rect.top) / zoom.value - view.panY) / view.zoom + size.height * 0.5
     return {
@@ -1439,6 +1447,25 @@ function positionAt(version: Version, clientX: number, clientY: number, map: HTM
   const x = drag.space.rootId ? drag.space.rootPosition.x + deltaX : drag.space.pointer.x + deltaX
   const y = drag.space.rootId ? drag.space.rootPosition.y + deltaY : drag.space.pointer.y + deltaY
   return { x, y }
+}
+function treeNodeAt(clientX: number, clientY: number, map: HTMLElement) {
+  const versionId = map.closest('.version-card')?.getAttribute('data-version')
+  if (versionId !== active.value.id) return null
+  const rect = map.getBoundingClientRect()
+  const view = mapViewFor(active.value)
+  const localX = (clientX - rect.left) / zoom.value
+  const localY = (clientY - rect.top) / zoom.value
+  const x = (localX - view.panX) / view.zoom
+  const y = (localY - view.panY) / view.zoom
+  const source = treeDrag.value ? findNode(active.value.data, treeDrag.value.id) : undefined
+  const excluded = source ? new Set([source.id]) : new Set<string>()
+  const tiles = active.value.data.flatMap((root, index) => tilesFor(root, active.value.data, index, active.value.positions))
+  for (let index = tiles.length - 1; index >= 0; index -= 1) {
+    const tile = tiles[index]!
+    if (excluded.has(tile.id)) continue
+    if (x >= tile.x && x <= tile.x + tile.width && y >= tile.y && y <= tile.y + tile.height) return tile.id
+  }
+  return null
 }
 function placeRoot(version: Version, nodeId: string, position: { x: number; y: number }) {
   const defaults = defaultPositions(version.data, version.positions)
@@ -1455,7 +1482,7 @@ function spatialPreviewStyle(version: Version) {
   const map = document.querySelector<HTMLElement>(`.version-card[data-version="${version.id}"] .mini-map`)
   const view = mapViewFor(version)
   const node = findNode(active.value.data, spatialPreview.value.nodeId)
-  const size = node ? treeDimensions(node) : { width: LEAF_TILE_WIDTH, height: LEAF_TILE_HEIGHT }
+  const size = node ? outerTreemapDimensions(node) : { width: LEAF_TILE_WIDTH, height: LEAF_TILE_HEIGHT }
   const parentTile = spatialPreview.value.parentId
     ? tileForNode(cardData(version), cardPositions(version), spatialPreview.value.parentId)
     : undefined
@@ -1646,7 +1673,7 @@ function startTreeDrag(event: PointerEvent, id: string) {
   const root = roots.find((item) => descendants(item).includes(id))
   const defaults = defaultPositions(roots, active.value.positions)
   const rootPosition = root ? active.value.positions?.[root.id] ?? defaults[root.id]! : { x: 0, y: 0 }
-  const size = treeDimensions(findNode(active.value.data, id) ?? roots[0]!)
+  const size = outerTreemapDimensions(findNode(active.value.data, id) ?? roots[0]!)
   const pointer = rect ? {
     x: (((event.clientX - rect.left) / zoom.value - view.panX) / view.zoom - size.width / 2) / CARD_WIDTH,
     y: (((event.clientY - rect.top) / zoom.value - view.panY) / view.zoom - size.height / 2) / TREE_MAP_HEIGHT,
@@ -1668,27 +1695,12 @@ function moveTreeDrag(event: PointerEvent) {
   }
   if (!drag.moved) return
   const hit = document.elementFromPoint(event.clientX, event.clientY)
-  const target = hit?.closest<SVGRectElement>('.tree-tile')
-  let targetId = target?.getAttribute('data-node') ?? null
-  let targetVersion = target?.closest('.version-card')?.getAttribute('data-version')
-  const locked = drag.targetBounds
-  if (locked && event.clientX >= locked.left && event.clientX <= locked.right
-    && event.clientY >= locked.top && event.clientY <= locked.bottom) {
-    targetId = locked.id
-    targetVersion = active.value.id
-  } else {
-    drag.targetBounds = undefined
-    const sourceParent = findParent(active.value.data, drag.id)
-    if (target && targetId && targetVersion === active.value.id && sourceParent?.id !== targetId
-      && canAttach(drag.id, targetId)) {
-      const rect = target.getBoundingClientRect()
-      drag.targetBounds = { id: targetId, left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom }
-    }
-  }
+  const map = hit?.closest<HTMLElement>('.mini-map')
+  const targetId = map ? treeNodeAt(event.clientX, event.clientY, map) : null
+  const targetVersion = map?.closest('.version-card')?.getAttribute('data-version')
   if (targetId === drag.id) {
     overNode.value = null
     invalidNode.value = null
-    const map = target?.closest<HTMLElement>('.mini-map')
     if (active.value.data.some((node) => node.id === drag.id) && map) {
       spatialPreview.value = {
         ...positionAt(active.value, event.clientX, event.clientY, map),
@@ -1706,13 +1718,11 @@ function moveTreeDrag(event: PointerEvent) {
     return
   }
   overNode.value = null
-  invalidNode.value = targetId && targetVersion === active.value.id && !canAttach(drag.id, targetId)
-    ? targetId : null
+  invalidNode.value = targetId && targetVersion === active.value.id ? targetId : null
   if (targetId && targetVersion === active.value.id) {
     spatialPreview.value = null
     return
   }
-  const map = hit?.closest<HTMLElement>('.mini-map')
   const versionId = map?.closest('.version-card')?.getAttribute('data-version')
   if (map && versionId === active.value.id) {
     const point = positionAt(active.value, event.clientX, event.clientY, map)
@@ -1724,18 +1734,13 @@ function finishTreeDrag(event: PointerEvent) {
   if (!drag) return
   const target = document.elementFromPoint(event.clientX, event.clientY)
   const map = target?.closest<HTMLElement>('.mini-map')
-  const hitNode = target?.closest<SVGRectElement>('.tree-tile')?.getAttribute('data-node')
+  const hitNode = map ? treeNodeAt(event.clientX, event.clientY, map) : null
   const targetVersion = target?.closest('.version-card')?.getAttribute('data-version')
   const effectiveHitNode = hitNode === drag.id && spatialPreview.value ? null : hitNode
   const sourceParent = findParent(active.value.data, drag.id)
-  const locked = drag.targetBounds
-  const lockedTarget = locked && event.clientX >= locked.left && event.clientX <= locked.right
-    && event.clientY >= locked.top && event.clientY <= locked.bottom
-    ? locked.id : null
-  const candidateTarget = lockedTarget ?? (targetVersion === active.value.id
+  const candidateTarget = targetVersion === active.value.id
     ? (effectiveHitNode === drag.id ? overNode.value : effectiveHitNode)
     : null
-  )
   const targetNode = candidateTarget && sourceParent?.id !== candidateTarget && canAttach(drag.id, candidateTarget)
     ? candidateTarget : null
   let committed = false
