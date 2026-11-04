@@ -6,6 +6,10 @@ The retractable sidebar contains workspace status, editing actions, comparison, 
 
 Centering a version and fitting the graph are animated. Copying an entry between branches creates a connection arrow between the source and destination versions; double-click the arrow to navigate to the other version. At low graph zoom, versions switch to a read-only summary showing the action and entry/treemap counts.
 
+Open a version's **three-dots** menu to center and fit all of its treemaps, or pack them into a compact, overlap-free layout. **Compare** opens a linked side-by-side view that distinguishes additions, removals, edits, and hierarchy or position changes. Press **M** or choose **Merge** to select a source and target version, preview the combined result, resolve conflicts, and confirm or abort without changing either source branch. Merges preserve both histories and add connections from the source and target to the new version; merging into a non-latest target starts a new branch from that version.
+
+Use the **arrow keys** to move to the previous or next version on the current history path, or to the closest version on the branch above or below. **Ping** (or **P**) toggles Ping Mode; click the canvas to place a ping, and press **P** or **Esc** to exit. Canvas drags continue to pan without placing a ping.
+
 ## Shared sessions
 
 Enter the same room name on each client and choose **Host** on one client and **Join** on the others, or open a copied invite link to join automatically. All connected peers can edit and create branches, including from the root version. WebRTC carries shared edits and temporary user presence between peers; PeerJS's public signaling service is used to establish connections. Each participant has an independent active version and selection, highlighted using a stable user color. The host browser must remain open and connected for the room to remain available. Concurrent changes to different versions merge; simultaneous changes to the same version use deterministic last-writer-wins conflict resolution. Each browser retains a local copy in browser storage.

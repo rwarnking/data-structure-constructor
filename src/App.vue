@@ -14,6 +14,7 @@ type MapView = { zoom: number; panX: number; panY: number; manual: boolean }
 type Version = {
   id: string
   parentId: string | null
+  mergeSourceId?: string
   step: number
   lane: number
   branch: string
@@ -51,6 +52,15 @@ function fitMapViewToLayout(
 type Tile = { id: string; label: string; x: number; y: number; width: number; height: number; depth: number }
 type StoredState = { versions: Version[]; activeId: string; nextNode: number; nextVersion: number; nextLane: number; copyLinks: CopyLink[] }
 type EditorState = { mode: 'create' | 'rename'; parentId: string | null; nodeId: string | null; value: string; description: string }
+type MergeConflict = {
+  key: string
+  nodeId: string
+  kind: 'presence' | 'value' | 'description' | 'parent' | 'hierarchy'
+  label: string
+  sourceValue: string
+  targetValue: string
+}
+type FlatNode = { node: TreeNode; parentId: string | null; path: string; order: number }
 type Revision = { clock: number; actor: string }
 type VersionChange = { version: Version; revision: Revision }
 type VersionRemoval = { id: string; revision: Revision }
@@ -163,6 +173,9 @@ const deletionMode = ref<'subtree' | 'detach'>('subtree')
 const sidebarCollapsed = ref(false)
 const compareMode = ref(false)
 const compareIds = ref<string[]>([])
+const mergeMode = ref(false)
+const mergeResolutions = ref<Record<string, 'source' | 'target'>>({})
+const comparisonSelectedNode = ref<string | null>(null)
 const zoom = ref(1)
 const isReadOnly = computed(() => zoom.value <= 0.35)
 const pan = ref({ x: 40, y: 0 })
@@ -203,6 +216,7 @@ const mapViewTimers = new Map<string, number>()
 let suppressVersionClick = false
 let suppressTileClick = false
 let suppressPingClick = false
+let pingPointer: { id: number; x: number; y: number; moved: boolean } | null = null
 const menu = ref<{ x: number; y: number; nodeId: string | null; versionId?: string | null } | null>(null)
 const editor = ref<EditorState | null>(null)
 const clipboard = ref<ClipboardEntry | null>(readClipboard())
@@ -383,6 +397,7 @@ function isTreeNode(value: unknown): value is TreeNode {
 function isVersion(value: unknown): value is Version {
   if (!isRecord(value) || typeof value.id !== 'string'
     || !(typeof value.parentId === 'string' || value.parentId === null)
+    || (value.mergeSourceId !== undefined && typeof value.mergeSourceId !== 'string')
     || !Number.isFinite(value.step) || !Number.isFinite(value.lane)
     || typeof value.branch !== 'string' || typeof value.change !== 'string'
     || (value.createdBy !== undefined && typeof value.createdBy !== 'string')
@@ -421,6 +436,7 @@ function isStoredState(value: unknown): value is StoredState {
     if (version.id === 'v0') continue
     const parent = version.parentId ? byId.get(version.parentId) : undefined
     if (!parent || version.step !== parent.step + 1) return false
+    if (version.mergeSourceId && (!byId.has(version.mergeSourceId) || version.mergeSourceId === version.id)) return false
     const visited = new Set([version.id])
     let ancestor: Version | undefined = parent
     while (ancestor) {
@@ -519,8 +535,8 @@ function applySyncDelta(message: SyncDelta) {
     const validParent = change.version.id === 'v0'
       ? change.version.parentId === null && change.version.step === 0
       : !!parent && change.version.step === parent.step + 1
-    if (!validParent) {
-      notify('Ignored a shared version with a missing or invalid parent')
+    if (!validParent || (change.version.mergeSourceId && !versionsById.has(change.version.mergeSourceId))) {
+      notify('Ignored a shared version with a missing or invalid connection')
       continue
     }
     const currentRevision = collaborationMetadata.versions[change.version.id]
@@ -650,6 +666,19 @@ function showPing(ping: Ping) {
   }, 1600)
   playPingSound()
 }
+function sendPingAt(clientX: number, clientY: number) {
+  const rect = graphCanvas.value?.getBoundingClientRect()
+  if (!rect) return
+  const ping = {
+    id: `${CLIENT_ID}-${Date.now()}-${++pingSequence}`,
+    userId: CLIENT_ID,
+    x: (clientX - rect.left - pan.value.x) / zoom.value,
+    y: (clientY - rect.top - pan.value.y) / zoom.value,
+    createdAt: Date.now(),
+  }
+  showPing(ping)
+  peerRoom.send({ type: 'ping', ...ping })
+}
 function playPingSound() {
   try {
     const context = new window.AudioContext()
@@ -674,6 +703,12 @@ function playPingSound() {
   }
 }
 function handlePingPointer(event: PointerEvent) {
+  if (pingMode.value) {
+    if (event.button === 0 && !(event.target as HTMLElement).closest('.canvas-hotbar, button')) {
+      pingPointer = { id: event.pointerId, x: event.clientX, y: event.clientY, moved: false }
+    }
+    return
+  }
   if (!event.altKey || event.button !== 0
     || (event.target as HTMLElement).closest('.canvas-hotbar, button')) return
   event.preventDefault()
@@ -681,18 +716,25 @@ function handlePingPointer(event: PointerEvent) {
   suppressPingClick = true
   window.clearTimeout(pingClickTimer)
   pingClickTimer = window.setTimeout(() => { suppressPingClick = false }, 500)
-  const rect = graphCanvas.value?.getBoundingClientRect()
-  if (!rect) return
-  const ping = {
-    id: `${CLIENT_ID}-${Date.now()}-${++pingSequence}`,
-    userId: CLIENT_ID,
-    x: (event.clientX - rect.left - pan.value.x) / zoom.value,
-    y: (event.clientY - rect.top - pan.value.y) / zoom.value,
-    createdAt: Date.now(),
-  }
-  showPing(ping)
-  peerRoom.send({ type: 'ping', ...ping })
-  pingMode.value = false
+  sendPingAt(event.clientX, event.clientY)
+}
+function trackPingPointerMove(event: PointerEvent) {
+  if (pingPointer?.id === event.pointerId
+    && Math.hypot(event.clientX - pingPointer.x, event.clientY - pingPointer.y) > 5) pingPointer.moved = true
+}
+function clearPingPointer(event: PointerEvent) {
+  if (pingPointer?.id !== event.pointerId) return
+  window.setTimeout(() => {
+    if (pingPointer?.id === event.pointerId) pingPointer = null
+  }, 0)
+}
+function handlePingClick(event: MouseEvent) {
+  const pointer = pingPointer
+  pingPointer = null
+  if (!pingMode.value || event.button !== 0
+    || pointer?.moved
+    || (event.target as HTMLElement).closest('.canvas-hotbar, button')) return
+  sendPingAt(event.clientX, event.clientY)
 }
 function suppressPingClickEvent(event: MouseEvent) {
   if (!suppressPingClick) return
@@ -1350,35 +1392,283 @@ function flattenPaths(nodes: TreeNode[], parentId: string | null = null, parentP
   return result
 }
 
+function flattenNodes(nodes: TreeNode[], parentId: string | null = null, parentPath = ''): Map<string, FlatNode> {
+  const result = new Map<string, FlatNode>()
+  for (const [order, node] of nodes.entries()) {
+    const path = parentPath ? `${parentPath}/${node.value}` : node.value
+    result.set(node.id, { node, parentId, path, order })
+    for (const [id, info] of flattenNodes(node.children, node.id, path)) result.set(id, info)
+  }
+  return result
+}
+
 function chooseCompare(id: string) {
   if (compareIds.value.includes(id)) compareIds.value = compareIds.value.filter((item) => item !== id)
   else compareIds.value = [...compareIds.value.slice(-1), id]
+  mergeResolutions.value = {}
+  comparisonSelectedNode.value = null
   if (compareIds.value.length === 2) showOverview.value = true
 }
 
 const showOverview = ref(false)
+function startVersionSelection(mode: 'compare' | 'merge') {
+  compareMode.value = mode === 'compare'
+  mergeMode.value = mode === 'merge'
+  compareIds.value = []
+  mergeResolutions.value = {}
+  comparisonSelectedNode.value = null
+  showOverview.value = false
+}
+function closeVersionSelection() {
+  compareMode.value = false
+  mergeMode.value = false
+  showOverview.value = false
+  compareIds.value = []
+  mergeResolutions.value = {}
+  comparisonSelectedNode.value = null
+}
 const comparison = computed(() => {
   if (compareIds.value.length !== 2) return []
   const left = versions.value.find((item) => item.id === compareIds.value[0])
   const right = versions.value.find((item) => item.id === compareIds.value[1])
   if (!left || !right) return []
-  const a = flattenPaths(left.data)
-  const b = flattenPaths(right.data)
-  const changes: { kind: string; label: string }[] = []
+  const a = flattenNodes(left.data)
+  const b = flattenNodes(right.data)
+  const changes: { id: string; kind: string; label: string }[] = []
   for (const [id, item] of a) {
     const other = b.get(id)
-    if (!other) changes.push({ kind: 'Removed', label: item.path })
-    else {
-      if (item.value !== other.value) changes.push({ kind: 'Changed', label: `${item.path} → ${other.path}` })
-      if (item.parentId !== other.parentId) {
-        const kind = item.parentId === null ? 'Attached' : other.parentId === null ? 'Detached' : 'Moved'
-        changes.push({ kind, label: `${item.path} → ${other.path}` })
-      }
+    if (!other) changes.push({ id, kind: 'Removed', label: item.path })
+    else if (item.parentId !== other.parentId || item.order !== other.order
+      || (item.parentId === null && other.parentId === null
+        && (Math.abs((left.positions?.[id]?.x ?? 0) - (right.positions?.[id]?.x ?? 0)) > 0.002
+          || Math.abs((left.positions?.[id]?.y ?? 0) - (right.positions?.[id]?.y ?? 0)) > 0.002))) {
+      changes.push({ id, kind: 'Relocated', label: item.path === other.path ? `${item.path} (position or parent changed)` : `${item.path} → ${other.path}` })
+    }
+    else if (item.node.value !== other.node.value || item.node.description !== other.node.description) {
+      changes.push({ id, kind: 'Modified', label: `${item.path} → ${other.path}` })
     }
   }
-  for (const [id, item] of b) if (!a.has(id)) changes.push({ kind: 'Added', label: item.path })
+  for (const [id, item] of b) if (!a.has(id)) changes.push({ id, kind: 'Added', label: item.path })
   return changes
 })
+const comparisonStatus = computed(() => new Map(comparison.value.map((change) => [change.id, change.kind.toLowerCase()])))
+const mergePreview = computed(() => {
+  if (!mergeMode.value || compareIds.value.length !== 2) return null
+  const source = versions.value.find((item) => item.id === compareIds.value[0])
+  const target = versions.value.find((item) => item.id === compareIds.value[1])
+  if (!source || !target || source.id === target.id) return null
+  const sourceAncestors = new Set<string>()
+  let ancestor: Version | undefined = source
+  while (ancestor) {
+    sourceAncestors.add(ancestor.id)
+    const parentId: string | null = ancestor.parentId
+    ancestor = parentId ? versions.value.find((item) => item.id === parentId) : undefined
+  }
+  ancestor = target
+  while (ancestor && !sourceAncestors.has(ancestor.id)) {
+    const parentId: string | null = ancestor.parentId
+    ancestor = parentId ? versions.value.find((item) => item.id === parentId) : undefined
+  }
+  const base = ancestor ?? versions.value.find((item) => item.id === 'v0')!
+  const baseNodes = flattenNodes(base.data)
+  const sourceNodes = flattenNodes(source.data)
+  const targetNodes = flattenNodes(target.data)
+  const conflicts: MergeConflict[] = []
+  const addConflict = (nodeId: string, kind: MergeConflict['kind'], label: string, sourceValue: string, targetValue: string) => {
+    const key = `${nodeId}:${kind}`
+    if (!conflicts.some((conflict) => conflict.key === key)) {
+      conflicts.push({ key, nodeId, kind, label, sourceValue, targetValue })
+    }
+    return mergeResolutions.value[key]
+  }
+  const sameEntry = (left: FlatNode | undefined, right: FlatNode | undefined) =>
+    !left && !right || !!left && !!right && left.parentId === right.parentId && left.order === right.order
+    && left.node.value === right.node.value && (left.node.description ?? '') === (right.node.description ?? '')
+  const values = new Map<string, { value: string; description?: string; parentId: string | null; order: number }>()
+  const ids = [...new Set([...targetNodes.keys(), ...sourceNodes.keys(), ...baseNodes.keys()])]
+  for (const id of ids) {
+    const baseEntry = baseNodes.get(id)
+    const sourceEntry = sourceNodes.get(id)
+    const targetEntry = targetNodes.get(id)
+    if (!baseEntry && !sourceEntry && !targetEntry) continue
+    if (baseEntry && (!sourceEntry || !targetEntry)) {
+      if (!sourceEntry && !targetEntry) continue
+      const survivor = sourceEntry ?? targetEntry!
+      if (sameEntry(survivor, baseEntry)) continue
+      const choice = addConflict(id, 'presence', `Delete or keep ${baseEntry.node.value}`,
+        sourceEntry ? sourceEntry.path : 'Deleted', targetEntry ? targetEntry.path : 'Deleted')
+      const kept = choice === 'source' ? sourceEntry : targetEntry
+      if (!kept) continue
+      values.set(id, { value: kept.node.value, description: kept.node.description, parentId: kept.parentId, order: kept.order })
+      continue
+    }
+    if (!sourceEntry && !targetEntry) continue
+    const sourceValue = sourceEntry ?? targetEntry!
+    const targetValue = targetEntry ?? sourceEntry!
+    const pick = <T>(
+      kind: 'value' | 'description' | 'parent',
+      label: string,
+      sourceField: T,
+      targetField: T,
+      baseField: T | undefined,
+      sourceDisplay = String(sourceField ?? 'None'),
+      targetDisplay = String(targetField ?? 'None'),
+    ): T => {
+      if (!baseEntry) {
+        if (sourceField === targetField) return targetField
+        const choice = addConflict(id, kind, label, sourceDisplay, targetDisplay)
+        return (choice === 'source' ? sourceField : targetField)
+      }
+      const sourceFieldChanged = sourceField !== baseField
+      const targetFieldChanged = targetField !== baseField
+      if (sourceFieldChanged && targetFieldChanged && sourceField !== targetField) {
+        const choice = addConflict(id, kind, label, sourceDisplay, targetDisplay)
+        return (choice === 'source' ? sourceField : targetField)
+      }
+      if (sourceFieldChanged) return sourceField
+      if (targetFieldChanged) return targetField
+      return targetField
+    }
+    const value = pick('value', `Rename ${baseEntry?.node.value ?? sourceEntry?.node.value ?? targetEntry!.node.value}`,
+      sourceValue.node.value, targetValue.node.value, baseEntry?.node.value)
+    const description = pick('description', `Description for ${baseEntry?.node.value ?? sourceEntry?.node.value ?? targetEntry!.node.value}`,
+      sourceValue.node.description ?? '', targetValue.node.description ?? '', baseEntry?.node.description ?? '')
+    const placement = pick('parent', `Hierarchy position of ${baseEntry?.node.value ?? sourceEntry?.node.value ?? targetEntry!.node.value}`,
+      JSON.stringify([sourceValue.parentId, sourceValue.order]),
+      JSON.stringify([targetValue.parentId, targetValue.order]),
+      baseEntry ? JSON.stringify([baseEntry.parentId, baseEntry.order]) : undefined,
+      `${sourceValue.parentId ? sourceNodes.get(sourceValue.parentId)?.node.value ?? 'Entry' : 'Root'} · position ${sourceValue.order + 1}`,
+      `${targetValue.parentId ? targetNodes.get(targetValue.parentId)?.node.value ?? 'Entry' : 'Root'} · position ${targetValue.order + 1}`)
+    const [parentId, order] = JSON.parse(placement) as [string | null, number]
+    values.set(id, { value, ...(description ? { description } : {}), parentId, order })
+  }
+
+  const parentById = new Map([...values].map(([id, value]) => [id, value.parentId]))
+  const checked = new Set<string>()
+  for (const id of values.keys()) {
+    if (checked.has(id)) continue
+    const path: string[] = []
+    const pathSet = new Set<string>()
+    let current: string | null | undefined = id
+    while (current && values.has(current) && !checked.has(current)) {
+      if (pathSet.has(current)) {
+        const sourceParent = sourceNodes.get(current)?.parentId ?? null
+        const targetParent = targetNodes.get(current)?.parentId ?? null
+        const choice = addConflict(current, 'hierarchy', `Break hierarchy cycle at ${values.get(current)!.value}`,
+          sourceParent ?? 'Root', targetParent ?? 'Root')
+        let parentId = choice === 'source' ? sourceParent : targetParent
+        if (parentId && pathSet.has(parentId)) parentId = null
+        parentById.set(current, parentId)
+        break
+      }
+      path.push(current)
+      pathSet.add(current)
+      current = parentById.get(current)
+    }
+    path.forEach((item) => checked.add(item))
+  }
+
+  const nodes = new Map([...values].map(([id, value]) => [id, {
+    id, value: value.value, ...(value.description ? { description: value.description } : {}), children: [] as TreeNode[],
+  }]))
+  const roots: TreeNode[] = []
+  for (const id of [...values.keys()].sort((left, right) => values.get(left)!.order - values.get(right)!.order
+    || ids.indexOf(left) - ids.indexOf(right))) {
+    const node = nodes.get(id)
+    if (!node) continue
+    const parentId = parentById.get(id)
+    const parent = parentId ? nodes.get(parentId) : undefined
+    if (parent) parent.children.push(node)
+    else roots.push(node)
+  }
+  const positions = positionsForData(target.data, roots, target.positions, mapViewFor(target), mapViewport(target))
+  return { source, target, base, data: roots, positions, conflicts }
+})
+const mergeConflictsResolved = computed(() => !!mergePreview.value
+  && mergePreview.value.conflicts.every((conflict) => !!mergeResolutions.value[conflict.key]))
+const comparisonPanels = computed(() => {
+  if (compareIds.value.length !== 2) return []
+  const source = versions.value.find((item) => item.id === compareIds.value[0])
+  const target = versions.value.find((item) => item.id === compareIds.value[1])
+  if (!source || !target) return []
+  const panels = [
+    { id: source.id, label: 'Source', version: source, data: source.data, positions: source.positions, role: 'source' },
+    { id: target.id, label: 'Target', version: target, data: target.data, positions: target.positions, role: 'target' },
+  ]
+  if (mergePreview.value) {
+    panels.push({
+      id: 'merge-preview', label: 'Merged result', version: target, data: mergePreview.value.data,
+      positions: mergePreview.value.positions, role: 'result',
+    })
+  }
+  return panels.map((panel) => ({
+    ...panel,
+    tiles: panel.data.flatMap((root, index) => tilesFor(root, panel.data, index, panel.positions)),
+  }))
+})
+const comparisonViewBox = computed(() => {
+  const tiles = comparisonPanels.value.flatMap((panel) => panel.tiles)
+  if (!tiles.length) return '0 0 260 220'
+  const left = Math.min(...tiles.map((tile) => tile.x))
+  const top = Math.min(...tiles.map((tile) => tile.y))
+  const right = Math.max(...tiles.map((tile) => tile.x + tile.width))
+  const bottom = Math.max(...tiles.map((tile) => tile.y + tile.height))
+  return `${left - MAP_PADDING} ${top - MAP_PADDING} ${Math.max(1, right - left) + MAP_PADDING * 2} ${Math.max(1, bottom - top) + MAP_PADDING * 2}`
+})
+function comparisonKind(nodeId: string) {
+  return comparisonStatus.value.get(nodeId) ?? 'unchanged'
+}
+function comparisonGhosts(panelIndex: number) {
+  const counterpart = comparisonPanels.value[panelIndex === 0 ? 1 : 0]
+  const panel = comparisonPanels.value[panelIndex]
+  if (!panel || !counterpart) return []
+  const present = new Set(panel.tiles.map((tile) => tile.id))
+  return counterpart.tiles.filter((tile) => !present.has(tile.id))
+}
+function selectComparedNode(nodeId: string) {
+  comparisonSelectedNode.value = comparisonSelectedNode.value === nodeId ? null : nodeId
+}
+
+function confirmMerge() {
+  const preview = mergePreview.value
+  if (!preview || !mergeConflictsResolved.value || isReadOnly.value) return
+  const targetIsLatest = !versions.value.some((version) =>
+    version.branch === preview.target.branch && version.step > preview.target.step)
+  const siblings = versions.value.filter((version) => version.parentId === preview.target.id)
+  const nextVersionNumber = state.value.nextVersion++
+  const branchNumber = siblings.reduce((highest, version) => {
+    const suffix = version.branch.split('.').at(-1) ?? '0'
+    return Math.max(highest, Number(suffix.replace(/^B/, '')) || 0)
+  }, 0) + 1
+  const branch = preview.target.id === 'v0'
+    ? `B${branchNumber}`
+    : targetIsLatest ? preview.target.branch : `${preview.target.branch}.M${nextVersionNumber}`
+  const version: Version = {
+    id: `v${nextVersionNumber}-${CLIENT_ID}`,
+    parentId: preview.target.id,
+    mergeSourceId: preview.source.id,
+    step: preview.target.step + 1,
+    lane: preview.target.lane,
+    branch,
+    change: `Merge ${preview.source.branch} into ${preview.target.branch}`,
+    data: clone(preview.data),
+    positions: clone(preview.positions),
+    createdBy: CLIENT_ID,
+    createdAt: Date.now(),
+  }
+  const wasCentered = isVersionCentered(preview.target)
+  state.value.versions.push(version)
+  reflowLayout()
+  state.value.activeId = version.id
+  setSelectedNodes([])
+  mergeMode.value = false
+  compareMode.value = false
+  showOverview.value = false
+  compareIds.value = []
+  mergeResolutions.value = {}
+  notify(`Created merge ${displayVersionId(version.id)}`)
+  panToVersion(version, wasCentered)
+}
 
 function pruneVersion(id: string) {
   if (id === 'v0') return
@@ -1395,6 +1685,11 @@ function pruneVersion(id: string) {
   }
   if (state.value.copyLinks.some((link) => removeIds.has(link.sourceVersionId) || removeIds.has(link.targetVersionId))) {
     notify('Cannot prune versions referenced by copied entries')
+    return
+  }
+  if (versions.value.some((version) => !removeIds.has(version.id)
+    && version.mergeSourceId && removeIds.has(version.mergeSourceId))) {
+    notify('Cannot prune a version referenced by a merge')
     return
   }
   const fallbackId = versions.value.find((version) => version.id === id)?.parentId ?? 'v0'
@@ -1417,7 +1712,7 @@ function selectVersion(version: Version) {
     suppressVersionClick = false
     return
   }
-  if (compareMode.value) {
+  if (compareMode.value || mergeMode.value) {
     chooseCompare(version.id)
     return
   }
@@ -1427,7 +1722,7 @@ function selectVersion(version: Version) {
 }
 
 function activateVersionOnPointer(version: Version, event: PointerEvent) {
-  if (compareMode.value || (event.target as HTMLElement).closest('button')) return
+  if (compareMode.value || mergeMode.value || (event.target as HTMLElement).closest('button')) return
   state.value.activeId = version.id
 }
 
@@ -1441,7 +1736,7 @@ function onTileClick(version: Version, nodeId: string, event: MouseEvent) {
     suppressTileClick = false
     return
   }
-  if (compareMode.value) {
+  if (compareMode.value || mergeMode.value) {
     chooseCompare(version.id)
     return
   }
@@ -1507,6 +1802,19 @@ function connectionPath(version: Version) {
   const cornerX = startX + (endX - startX) / 2
   const radius = Math.min(GRAPH_GAP_X / 4, Math.abs(endY - startY) / 2)
   return `M ${startX} ${startY} H ${cornerX - radius} Q ${cornerX} ${startY} ${cornerX} ${startY + direction * radius} V ${endY - direction * radius} Q ${cornerX} ${endY} ${cornerX + radius} ${endY} H ${endX}`
+}
+function mergeConnectionPath(version: Version) {
+  const source = versions.value.find((item) => item.id === version.mergeSourceId)
+  if (!source) return ''
+  const sourcePosition = cardPosition(source)
+  const targetPosition = cardPosition(version)
+  const forward = targetPosition.x >= sourcePosition.x
+  const startX = sourcePosition.x + (forward ? CARD_WIDTH : 0)
+  const endX = targetPosition.x + (forward ? 0 : CARD_WIDTH)
+  const startY = sourcePosition.y + cardHeight(source) / 2
+  const endY = targetPosition.y + cardHeight(version) / 2
+  const bendX = (startX + endX) / 2
+  return `M ${startX} ${startY} C ${bendX} ${startY}, ${bendX} ${endY}, ${endX} ${endY}`
 }
 function isBranchCurve(version: Version) {
   const parent = versions.value.find((item) => item.id === version.parentId)
@@ -1644,6 +1952,94 @@ function mapViewFor(version: Version): MapView {
     panY: (viewport.height - geometry.height * scale) / 2 - geometry.minY * scale,
     manual: false,
   }
+}
+function centerVersionTreemaps(versionId: string) {
+  const version = versions.value.find((item) => item.id === versionId)
+  if (!version || !version.data.length) return
+  const positions = { ...defaultPositions(version.data, version.positions), ...version.positions }
+  const extents = version.data.map((node) => {
+    const position = positions[node.id]!
+    const size = outerTreemapDimensions(node, positions)
+    return {
+      left: position.x * CARD_WIDTH,
+      top: position.y * TREE_MAP_HEIGHT,
+      right: position.x * CARD_WIDTH + size.width,
+      bottom: position.y * TREE_MAP_HEIGHT + size.height,
+    }
+  })
+  const left = Math.min(...extents.map((item) => item.left))
+  const top = Math.min(...extents.map((item) => item.top))
+  const right = Math.max(...extents.map((item) => item.right))
+  const bottom = Math.max(...extents.map((item) => item.bottom))
+  const viewport = mapViewport(version)
+  const width = Math.max(1, right - left)
+  const height = Math.max(1, bottom - top)
+  const targetZoom = Math.max(MAP_ZOOM_MIN, Math.min(
+    MAP_ZOOM_MAX,
+    (viewport.width - MAP_PADDING * 2) / width,
+    (viewport.height - MAP_PADDING * 2) / height,
+  ))
+  const offsetX = (viewport.width / targetZoom - width) / 2 - left
+  const offsetY = (viewport.height / targetZoom - height) / 2 - top
+  version.positions = Object.fromEntries(version.data.map((node) => {
+    const position = positions[node.id]!
+    return [node.id, {
+      x: (position.x * CARD_WIDTH + offsetX) / CARD_WIDTH,
+      y: (position.y * TREE_MAP_HEIGHT + offsetY) / TREE_MAP_HEIGHT,
+    }]
+  }))
+  version.mapView = { zoom: targetZoom, panX: 0, panY: 0, manual: true }
+  notify('Treemaps centered and fitted')
+}
+function compactVersionTreemaps(versionId: string) {
+  const version = versions.value.find((item) => item.id === versionId)
+  if (!version || !version.data.length) return
+  const ordered = version.data.map((node, index) => ({
+    node, index, size: outerTreemapDimensions(node, version.positions),
+  })).sort((left, right) => right.size.height - left.size.height
+    || right.size.width - left.size.width || left.index - right.index)
+  const candidateWidths = [...new Set(ordered.reduce<number[]>((widths, item) => {
+    widths.push((widths.at(-1) ?? MAP_PADDING) + item.size.width + (widths.length ? MAP_GAP : 0))
+    return widths
+  }, []))]
+  let best: { area: number; aspectDelta: number; positions: Record<string, { x: number; y: number }> } | null = null
+  for (const targetWidth of candidateWidths) {
+    let x = MAP_PADDING
+    let y = MAP_PADDING
+    let rowHeight = 0
+    let maxRight = MAP_PADDING
+    let maxBottom = MAP_PADDING
+    const placed = new Map<string, { x: number; y: number }>()
+    for (const { node, size } of ordered) {
+      if (x > MAP_PADDING && x + size.width > MAP_PADDING + targetWidth) {
+        x = MAP_PADDING
+        y += rowHeight + MAP_GAP
+        rowHeight = 0
+      }
+      placed.set(node.id, { x, y })
+      x += size.width + MAP_GAP
+      rowHeight = Math.max(rowHeight, size.height)
+      maxRight = Math.max(maxRight, x - MAP_GAP)
+      maxBottom = Math.max(maxBottom, y + size.height)
+    }
+    const width = maxRight - MAP_PADDING
+    const height = maxBottom - MAP_PADDING
+    const area = width * height
+    const viewport = mapViewport(version)
+    const aspectDelta = Math.abs(Math.log((width / Math.max(1, height)) / (viewport.width / viewport.height)))
+    if (best && (area > best.area || (area === best.area && aspectDelta >= best.aspectDelta))) continue
+    best = {
+      area, aspectDelta,
+      positions: Object.fromEntries(version.data.map((node) => {
+        const position = placed.get(node.id)!
+        return [node.id, { x: position.x / CARD_WIDTH, y: position.y / TREE_MAP_HEIGHT }]
+      })),
+    }
+  }
+  if (!best) return
+  version.positions = best.positions
+  centerVersionTreemaps(version.id)
+  notify('Treemap layout compacted')
 }
 function commitMapView(versionId: string) {
   const view = transientMapViews.value[versionId]
@@ -2010,6 +2406,35 @@ function centerVersionById(versionId?: string | null) {
   const version = versions.value.find((item) => item.id === versionId)
   if (version) centerVersion(version)
 }
+function activateAndFocusVersion(version: Version) {
+  state.value.activeId = version.id
+  setSelectedNodes([])
+  menu.value = null
+  centerVersion(version)
+}
+function navigateVersion(direction: 'left' | 'right' | 'up' | 'down') {
+  let destination: Version | undefined
+  if (direction === 'left') {
+    destination = versions.value.find((version) => version.id === active.value.parentId)
+  } else if (direction === 'right') {
+    const children = versions.value.filter((version) => version.parentId === active.value.id)
+    destination = children.sort((left, right) =>
+      Number(right.branch === active.value.branch) - Number(left.branch === active.value.branch)
+      || Math.abs(left.lane - active.value.lane) - Math.abs(right.lane - active.value.lane)
+      || left.createdAt - right.createdAt || left.id.localeCompare(right.id))[0]
+  } else {
+    const lanes = [...new Set(versions.value.map((version) => version.lane)
+      .filter((lane) => direction === 'up' ? lane < active.value.lane : lane > active.value.lane))]
+      .sort((left, right) => direction === 'up' ? right - left : left - right)
+    const targetLane = lanes[0]
+    if (targetLane !== undefined) {
+      destination = versions.value.filter((version) => version.lane === targetLane)
+        .sort((left, right) => Math.abs(left.step - active.value.step) - Math.abs(right.step - active.value.step)
+          || left.step - right.step || left.createdAt - right.createdAt || left.id.localeCompare(right.id))[0]
+    }
+  }
+  if (destination) activateAndFocusVersion(destination)
+}
 function cancelPanAnimation() {
   if (panAnimationFrame !== null) cancelAnimationFrame(panAnimationFrame)
   panAnimationFrame = null
@@ -2189,13 +2614,27 @@ function onKeydown(event: KeyboardEvent) {
   if ((event.target as HTMLElement).matches('input, textarea, select')) return
   const key = event.key.toLowerCase()
   const modified = event.ctrlKey || event.metaKey
+  if (!modified && !event.altKey && !event.shiftKey && key === 'p' && !event.repeat) {
+    event.preventDefault()
+    pingMode.value = !pingMode.value
+  }
+  if (!modified && !event.altKey && !event.shiftKey && key === 'm' && !event.repeat) {
+    event.preventDefault()
+    if (mergeMode.value) closeVersionSelection()
+    else startVersionSelection('merge')
+  }
+  if (!modified && !event.altKey && !event.shiftKey
+    && ['arrowleft', 'arrowright', 'arrowup', 'arrowdown'].includes(key)) {
+    event.preventDefault()
+    navigateVersion(key.slice(5) as 'left' | 'right' | 'up' | 'down')
+  }
   if (!modified && key === 'n') { event.preventDefault(); createFreeEntry() }
   if (modified && event.key === 'Enter' && selectedNode.value) { event.preventDefault(); addEntry(selectedNode.value) }
   if (!modified && event.shiftKey && key === 'd' && selectedNode.value) { event.preventDefault(); detachEntry(selectedNode.value) }
   if (!modified && event.shiftKey && key === 'c') {
     event.preventDefault()
-    compareMode.value = !compareMode.value
-    compareIds.value = []
+    if (compareMode.value) closeVersionSelection()
+    else startVersionSelection('compare')
   }
   if (!modified && event.shiftKey && key === 'f') { event.preventDefault(); centerActive() }
   if (!modified && event.shiftKey && key === 'a') { event.preventDefault(); fitGraph() }
@@ -2209,7 +2648,7 @@ function onKeydown(event: KeyboardEvent) {
     event.preventDefault()
     pasteEntry()
   }
-  if (event.key === 'Escape') { menu.value = null; compareMode.value = false; compareIds.value = []; pingMode.value = false }
+  if (event.key === 'Escape') { menu.value = null; closeVersionSelection(); pingMode.value = false }
 }
 onMounted(() => {
   const measureCanvas = () => {
@@ -2258,8 +2697,7 @@ function pasteEntry() {
   const version = createVersion([...clone(active.value.data), newNode], `Paste ${newNode.value}`)
   if (!version) return
   const source = versions.value.find((item) => item.id === copied.sourceVersionId)
-  const sourceBranch = source?.branch.split('.')[0]
-  if (source && sourceBranch !== version.branch.split('.')[0]) {
+  if (source && source.branch !== version.branch) {
     const targetNode = version.data.find((node) => structureSignature([node]) === structureSignature([newNode]))
     if (!targetNode) return
     state.value.copyLinks = [...state.value.copyLinks, {
@@ -2329,13 +2767,14 @@ function resetWorkspace() {
       </aside>
 
       <section class="canvas-region">
-        <div ref="graphCanvas" class="graph-canvas" :class="{ 'ping-mode': pingMode }" @pointerdown.capture="handlePingPointer" @click="onCanvasClick" @pointerdown="startCanvasPan" @pointermove="moveCanvasPan" @pointerup="endCanvasPan" @pointercancel="endCanvasPan">
+        <div ref="graphCanvas" class="graph-canvas" :class="{ 'ping-mode': pingMode }" @pointerdown.capture="handlePingPointer" @pointermove.capture="trackPingPointerMove" @pointerup.capture="clearPingPointer" @pointercancel.capture="clearPingPointer" @click.capture="handlePingClick" @click="onCanvasClick" @pointerdown="startCanvasPan" @pointermove="moveCanvasPan" @pointerup="endCanvasPan" @pointercancel="endCanvasPan">
           <div class="canvas-grid"></div>
           <div class="graph-world" :style="{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }">
             <svg class="connection-layer" :width="graphBounds.width + 260" :height="graphBounds.height">
               <defs>
                 <marker id="arrow" viewBox="0 0 10 10" refX="0" refY="5" :markerWidth="TERMINAL_ARROW_SIZE" :markerHeight="TERMINAL_ARROW_SIZE" markerUnits="strokeWidth" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke" stroke="#f5f7f4" stroke-width="0.8" stroke-linejoin="round" /></marker>
                 <marker id="copy-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#cf7b32" /></marker>
+                <marker id="merge-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#8a5c83" /></marker>
               </defs>
               <template v-for="version in versions.filter((item) => item.parentId && !isBranchCurve(item))" :key="`edge-${version.id}`">
                 <path :d="connectionPath(version)" class="connection-outline" fill="none" stroke="#f5f7f4" :stroke-width="connectionWidth(version) + 10" stroke-linecap="round" stroke-linejoin="round" />
@@ -2345,6 +2784,12 @@ function resetWorkspace() {
                 <path :d="connectionPath(version)" class="connection-outline" fill="none" stroke="#f5f7f4" :stroke-width="connectionWidth(version) + 10" stroke-linecap="round" stroke-linejoin="round" />
                 <path :d="connectionPath(version)" fill="none" :stroke="versionColor(version)" :stroke-width="connectionWidth(version)" stroke-linecap="round" stroke-linejoin="round" :opacity="version.id === active.id || version.parentId === active.id ? 0.96 : 0.76" />
               </template>
+              <path v-for="version in versions.filter((item) => item.mergeSourceId)" :key="`merge-edge-${version.id}`"
+                :d="mergeConnectionPath(version)" class="merge-connection" fill="none" stroke="#8a5c83"
+                stroke-width="3" stroke-dasharray="8 5" marker-end="url(#merge-arrow)"
+                :opacity="version.id === active.id || version.mergeSourceId === active.id ? 0.98 : 0.7">
+                <title>Merge connection from {{ displayVersionId(version.mergeSourceId!) }}</title>
+              </path>
               <template v-for="version in versions.filter((item) => !versions.some((child) => child.parentId === item.id))" :key="`tail-${version.id}`">
                 <path :d="`M ${cardPosition(version).x + CARD_WIDTH} ${cardPosition(version).y + cardHeight(version) / 2} H ${cardPosition(version).x + CARD_WIDTH + terminalTailEnd(version)}`" class="connection-outline" fill="none" stroke="#f5f7f4" :stroke-width="connectionWidth(version) + 10" stroke-linecap="butt" />
                 <path :d="`M ${cardPosition(version).x + CARD_WIDTH} ${cardPosition(version).y + cardHeight(version) / 2} H ${cardPosition(version).x + CARD_WIDTH + terminalTailEnd(version)}`" fill="none" :stroke="versionColor(version)" :stroke-width="connectionWidth(version)" stroke-linecap="butt" marker-end="url(#arrow)" />
@@ -2440,15 +2885,17 @@ function resetWorkspace() {
           </div>
 
           <div class="canvas-controls" @pointerdown.stop @click.stop>
+            <div v-if="pingMode" class="ping-mode-banner" role="status">PING MODE · Click to place a ping · Press P or Esc to exit</div>
             <div v-if="isReadOnly" class="readonly-notice" role="status">READ ONLY · Zoom in to edit entries</div>
             <div class="canvas-hotbar" role="toolbar" aria-label="Quick actions">
             <button title="Create a free entry · N" aria-label="New free entry, N" :disabled="isReadOnly" @click="createFreeEntry"><Plus :size="16" /><span>New entry</span><kbd>N</kbd></button>
             <button title="Add a child to the selected entry · Ctrl/⌘+Enter" aria-label="Add child, Ctrl or Command+Enter" :disabled="isReadOnly || !selectedNode" @click="selectedNode && addEntry(selectedNode)"><GitBranch :size="16" /><span>Add child</span><kbd>Ctrl/⌘+↵</kbd></button>
             <button title="Detach the selected entry · Shift+D" aria-label="Detach selected, Shift+D" :disabled="isReadOnly || !selectedNode" @click="selectedNode && detachEntry(selectedNode)"><Unlink :size="16" /><span>Detach</span><kbd>Shift+D</kbd></button>
-            <button title="Compare two versions · Shift+C" aria-label="Compare versions, Shift+C" :class="{ selected: compareMode }" @click="compareMode = !compareMode; compareIds = []"><GitCompareArrows :size="16" /><span>Compare</span><kbd>Shift+C</kbd></button>
+            <button title="Compare two versions · Shift+C" aria-label="Compare versions, Shift+C" :class="{ selected: compareMode }" @click="compareMode ? closeVersionSelection() : startVersionSelection('compare')"><GitCompareArrows :size="16" /><span>Compare</span><kbd>Shift+C</kbd></button>
+            <button title="Merge two versions · M" aria-label="Merge versions, M" :class="{ selected: mergeMode }" @click="mergeMode ? closeVersionSelection() : startVersionSelection('merge')"><GitCompareArrows :size="16" /><span>Merge</span><kbd>M</kbd></button>
             <button title="Center the active version · Shift+F" aria-label="Center active version, Shift+F" @click="centerActive"><Maximize :size="16" /><span>Center</span><kbd>Shift+F</kbd></button>
             <button title="Fit all versions in view · Shift+A" aria-label="Fit all versions, Shift+A" @click="fitGraph"><Layers3 :size="16" /><span>Fit all</span><kbd>Shift+A</kbd></button>
-            <button title="Ping a position for collaborators · Alt+click" aria-label="Ping a position for collaborators, Alt+click" :class="{ selected: pingMode }" @click="pingMode = !pingMode"><Radio :size="16" /><span>{{ pingMode ? 'Alt+click to ping' : 'Ping' }}</span></button>
+            <button title="Toggle Ping Mode · P" aria-label="Toggle Ping Mode, P" :aria-pressed="pingMode" :class="{ selected: pingMode }" @click="pingMode = !pingMode"><Radio :size="16" /><span>{{ pingMode ? 'Ping mode on' : 'Ping' }}</span><kbd>P</kbd></button>
             <span class="hotbar-divider" aria-hidden="true"></span>
             <button title="Zoom out · -" aria-label="Zoom out, minus" @click="zoomOut"><ZoomOut :size="16" /><kbd>−</kbd></button>
             <button title="Zoom in · +" aria-label="Zoom in, plus" @click="zoomIn"><ZoomIn :size="16" /><kbd>+</kbd></button>
@@ -2458,21 +2905,86 @@ function resetWorkspace() {
       </section>
     </div>
 
-    <div v-if="compareMode || showOverview" class="compare-drawer" :class="{ open: compareIds.length === 2 }">
-      <div class="drawer-head"><div><span class="section-label">VERSION COMPARISON</span><strong>{{ compareIds.length === 2 ? `${compareIds[0]} ↔ ${compareIds[1]}` : 'Choose two versions' }}</strong></div><button class="quiet-icon" title="Close comparison" @click="compareMode = false; showOverview = false; compareIds = []"><X :size="17" /></button></div>
+    <div v-if="compareMode || mergeMode || showOverview" class="compare-drawer" :class="{ open: compareIds.length === 2, 'merge-view': mergeMode }">
+      <div class="drawer-head">
+        <div>
+          <span class="section-label">{{ mergeMode ? 'BRANCH MERGE' : 'VERSION COMPARISON' }}</span>
+          <strong>{{ compareIds.length === 2
+            ? `${displayVersionId(compareIds[0]!)} ${mergeMode ? '→' : '↔'} ${displayVersionId(compareIds[1]!)}`
+            : mergeMode ? 'Choose source, then target' : 'Choose two versions' }}</strong>
+        </div>
+        <button class="quiet-icon" title="Close comparison" aria-label="Abort and close" @click="closeVersionSelection"><X :size="17" /></button>
+      </div>
       <div v-if="compareIds.length === 2" class="comparison-content">
-        <div class="compare-summary"><span class="compare-count">{{ comparison.length }}</span><span>structural {{ comparison.length === 1 ? 'change' : 'changes' }}</span></div>
-        <div v-if="comparison.length" class="diff-list"><div v-for="(change, index) in comparison" :key="`${change.kind}-${index}`" class="diff-item" :class="change.kind.toLowerCase()"><span>{{ change.kind }}</span><strong>{{ change.label }}</strong></div></div>
+        <div class="compare-summary">
+          <span class="compare-count">{{ comparison.length }}</span>
+          <span>{{ comparison.length === 1 ? 'entry differs' : 'entries differ' }}</span>
+          <span class="comparison-hint">Click an entry to highlight its counterpart.</span>
+        </div>
+        <div class="comparison-panels" :class="{ 'three-panels': mergeMode }">
+          <section v-for="(panel, panelIndex) in comparisonPanels" :key="panel.id" class="comparison-panel">
+            <header><span>{{ panel.label }}</span><strong>{{ panel.version.branch }} · S{{ panel.version.step }}</strong></header>
+            <svg :viewBox="comparisonViewBox" role="img" :aria-label="`${panel.label} treemap comparison`">
+              <rect v-for="ghost in panelIndex < 2 ? comparisonGhosts(panelIndex) : []" :key="`ghost-${ghost.id}`"
+                :x="ghost.x" :y="ghost.y" :width="ghost.width" :height="ghost.height"
+                :data-node="ghost.id" role="button" tabindex="0"
+                :class="['comparison-ghost', panelIndex === 0 ? 'added' : 'removed', { linked: comparisonSelectedNode === ghost.id }]"
+                :aria-label="`${ghost.label} is absent from ${panel.label}`"
+                @click="selectComparedNode(ghost.id)"
+                @keydown.enter.prevent="selectComparedNode(ghost.id)" @keydown.space.prevent="selectComparedNode(ghost.id)" />
+              <rect v-for="tile in panel.tiles" :key="tile.id"
+                :x="tile.x" :y="tile.y" :width="tile.width" :height="tile.height"
+                :data-node="tile.id" role="button" tabindex="0"
+                :class="['comparison-tile', comparisonKind(tile.id), { linked: comparisonSelectedNode === tile.id, 'merge-conflict': mergePreview?.conflicts.some((conflict) => conflict.nodeId === tile.id) }]"
+                :aria-label="`${tile.label}, ${comparisonKind(tile.id)}`"
+                @click="selectComparedNode(tile.id)"
+                @keydown.enter.prevent="selectComparedNode(tile.id)" @keydown.space.prevent="selectComparedNode(tile.id)" />
+              <text v-for="tile in panel.tiles.filter((item) => item.width > 35 && item.height > 18)" :key="`label-${tile.id}`"
+                :x="tile.x + 5" :y="tile.y + 16" :class="['comparison-label', { linked: comparisonSelectedNode === tile.id }]">{{ tile.label }}</text>
+            </svg>
+          </section>
+        </div>
+        <div class="comparison-legend" aria-label="Difference legend">
+          <span class="unchanged">Unchanged</span><span class="added">Added</span><span class="removed">Removed</span>
+          <span class="modified">Modified</span><span class="relocated">Relocated / hierarchy changed</span>
+        </div>
+        <div v-if="mergeMode && mergePreview" class="merge-resolution">
+          <div class="merge-resolution-heading">
+            <strong>Merge preview</strong>
+            <span>{{ mergePreview.conflicts.length ? `${mergePreview.conflicts.length} conflict${mergePreview.conflicts.length === 1 ? '' : 's'} to resolve` : 'No conflicts · changes are combined' }}</span>
+          </div>
+          <div v-for="conflict in mergePreview.conflicts" :key="conflict.key" class="merge-conflict">
+            <div><strong>{{ conflict.label }}</strong><small>Source: {{ conflict.sourceValue }} · Target: {{ conflict.targetValue }}</small></div>
+            <div class="merge-conflict-actions">
+              <button :class="{ selected: mergeResolutions[conflict.key] === 'source' }" @click="mergeResolutions[conflict.key] = 'source'">Use source</button>
+              <button :class="{ selected: mergeResolutions[conflict.key] === 'target' }" @click="mergeResolutions[conflict.key] = 'target'">Use target</button>
+            </div>
+          </div>
+          <div class="merge-actions">
+            <button class="cancel-button" @click="closeVersionSelection">Abort merge</button>
+            <button class="primary-button" :disabled="!mergeConflictsResolved || isReadOnly" @click="confirmMerge">
+              <Check :size="15" /> Confirm merge
+            </button>
+          </div>
+        </div>
+        <div v-if="comparison.length" class="diff-list">
+          <div v-for="change in comparison" :key="change.id" class="diff-item" :class="change.kind.toLowerCase()"
+            @click="selectComparedNode(change.id)">
+            <span>{{ change.kind }}</span><strong>{{ change.label }}</strong>
+          </div>
+        </div>
         <div v-else class="no-diff"><Check :size="17" /> These versions are structurally identical.</div>
       </div>
-      <div v-else class="drawer-empty"><Search :size="18" /><span>Choose two version cards in the graph.</span></div>
+      <div v-else class="drawer-empty"><Search :size="18" /><span>Select the first version, then the second.</span></div>
     </div>
 
     <div v-if="menu" class="context-scrim" @click="menu = null"></div>
-    <div v-if="menu" class="context-menu" :style="{ left: `${Math.min(menu.x, window.innerWidth - 220)}px`, top: `${Math.min(menu.y, window.innerHeight - 230)}px` }" @click.stop>
+    <div v-if="menu" class="context-menu" :style="{ left: `${Math.min(menu.x, window.innerWidth - 230)}px`, top: `${Math.min(menu.y, window.innerHeight - 300)}px` }" @click.stop>
       <template v-if="menu.versionId">
         <div class="context-title">VERSION ACTIONS</div>
         <button @click="centerVersionById(menu.versionId); menu = null"><Maximize :size="15" /> Center version</button>
+        <button :disabled="!versions.find((version) => version.id === menu!.versionId)?.data.length" @click="centerVersionTreemaps(menu.versionId!); menu = null"><Maximize :size="15" /> Center all elements</button>
+        <button :disabled="!versions.find((version) => version.id === menu!.versionId)?.data.length" @click="compactVersionTreemaps(menu.versionId!); menu = null"><Layers3 :size="15" /> Compact layout</button>
         <div class="context-divider"></div>
         <button class="danger-action" @click="pruneVersion(menu.versionId!); menu = null"><Trash2 :size="15" /> Delete version and descendants</button>
       </template>
