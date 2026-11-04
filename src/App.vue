@@ -5,7 +5,7 @@ import { getClientId, PeerRoom, type RoomStatus } from './collaboration'
 import {
   GitBranch, GitCompareArrows, Plus, Maximize, Search, Copy, Trash2,
   Pencil, Unlink, ChevronDown, X, Check, Layers3, ClipboardPaste,
-  ZoomIn, ZoomOut, RotateCcw, MoreHorizontal,
+  ZoomIn, ZoomOut, RotateCcw, MoreHorizontal, Moon, Sun, Radio,
 } from '@lucide/vue'
 
 type TreeNode = { id: string; value: string; description?: string; children: TreeNode[] }
@@ -20,9 +20,34 @@ type Version = {
   branch: string
   change: string
   data: TreeNode[]
+  createdBy?: string
   positions?: Record<string, { x: number; y: number }>
   mapView?: MapView
   createdAt: number
+}
+function fitMapViewToLayout(
+  versionId: string,
+  data: TreeNode[],
+  positions: Record<string, { x: number; y: number }> | undefined,
+  view: MapView,
+): MapView {
+  const viewport = {
+    width: versionId === 'v0' ? CARD_WIDTH - 2 : CARD_WIDTH - 14,
+    height: versionId === 'v0' ? Math.max(1, graphBounds.value.height - 2) : CARD_HEIGHT - 47,
+  }
+  const geometry = mapGeometry(data, positions, viewport.width, viewport.height)
+  const fit = Math.max(MAP_ZOOM_MIN, Math.min(
+    1,
+    (viewport.width - MAP_PADDING * 2) / geometry.width,
+    (viewport.height - MAP_PADDING * 2) / geometry.height,
+  ))
+  if (view.zoom <= fit) return view
+  return {
+    zoom: fit,
+    panX: (viewport.width - geometry.width * fit) / 2 - geometry.minX * fit,
+    panY: (viewport.height - geometry.height * fit) / 2 - geometry.minY * fit,
+    manual: true,
+  }
 }
 type Tile = { id: string; label: string; x: number; y: number; width: number; height: number; depth: number }
 type StoredState = { versions: Version[]; activeId: string; nextNode: number; nextVersion: number; nextLane: number; copyLinks: CopyLink[] }
@@ -56,6 +81,8 @@ type CollaborationMetadata = {
   active: Revision
   copyLinks: Revision
 }
+type RemoteUser = { activeVersionId: string; selectedNodeIds: string[]; lastSeen: number }
+type Ping = { id: string; userId: string; x: number; y: number; createdAt: number }
 
 const STORAGE_KEY = 'canopy-data-structure-v1'
 const CLIENT_ID = getClientId()
@@ -126,6 +153,12 @@ const state = ref<StoredState>(readState())
 const versions = computed(() => state.value.versions)
 const active = computed(() => versions.value.find((version) => version.id === state.value.activeId) ?? versions.value[0]!)
 const selectedNode = ref<string | null>(null)
+const selectedNodes = ref<string[]>([])
+const remoteUsers = ref<Record<string, RemoteUser>>({})
+const hoveredNode = ref<string | null>(null)
+const pings = ref<Ping[]>([])
+const pingMode = ref(false)
+const darkMode = ref(localStorage.getItem('canopy-theme') === 'dark')
 const deletionMode = ref<'subtree' | 'detach'>('subtree')
 const sidebarCollapsed = ref(false)
 const compareMode = ref(false)
@@ -168,6 +201,7 @@ const transientMapViews = ref<Record<string, MapView>>({})
 const mapViewTimers = new Map<string, number>()
 let suppressVersionClick = false
 let suppressTileClick = false
+let suppressPingClick = false
 const menu = ref<{ x: number; y: number; nodeId: string | null; versionId?: string | null } | null>(null)
 const editor = ref<EditorState | null>(null)
 const clipboard = ref<ClipboardEntry | null>(readClipboard())
@@ -180,12 +214,26 @@ const collaborationLabel = computed(() => roomStatus.value.state === 'connected'
   ? `${roomStatus.value.peers} peer${roomStatus.value.peers === 1 ? '' : 's'}`
   : roomStatus.value.message)
 let toastTimer = 0
+let presenceTimer = 0
+let pingClickTimer = 0
+let pingSequence = 0
 let persistenceQueue = Promise.resolve()
 let skipNextPersist = false
 let collaborationRoom = ''
 let collaborationMetadata: CollaborationMetadata | null = null
 let lastObservedState = JSON.stringify(state.value)
 let applyingRemoteState = false
+
+watch(selectedNode, (nodeId) => {
+  if (!nodeId) selectedNodes.value = []
+  else if (!selectedNodes.value.includes(nodeId)) selectedNodes.value = [nodeId]
+})
+watch([selectedNodes, () => active.value.id], publishPresence, { deep: true })
+watch(() => active.value.data, (data) => {
+  const valid = selectedNodes.value.filter((id) => !!findNode(data, id))
+  if (valid.length !== selectedNodes.value.length) setSelectedNodes(valid)
+}, { deep: true })
+watch(darkMode, (enabled) => localStorage.setItem('canopy-theme', enabled ? 'dark' : 'light'))
 
 watch(state, (value) => {
   const snapshot = JSON.stringify(value)
@@ -283,14 +331,11 @@ function publishLocalChanges(value: StoredState) {
     delete collaborationMetadata.versions[version.id]
     removed.push({ id: version.id, revision })
   }
-  const active = previous.activeId !== value.activeId
-    ? (collaborationMetadata.active = revision, { id: value.activeId, revision })
-    : undefined
   const copyLinks = JSON.stringify(previous.copyLinks) !== JSON.stringify(value.copyLinks)
     ? (collaborationMetadata.copyLinks = revision, { links: value.copyLinks, revision })
     : undefined
   const delta: SyncDelta = {
-    type: 'sync-delta', versions: changed, removed, active, copyLinks,
+    type: 'sync-delta', versions: changed, removed, copyLinks,
     nextNode: value.nextNode, nextVersion: value.nextVersion, nextLane: value.nextLane,
   }
   persistCollaborationMetadata()
@@ -328,6 +373,7 @@ function isVersion(value: unknown): value is Version {
     || !(typeof value.parentId === 'string' || value.parentId === null)
     || !Number.isFinite(value.step) || !Number.isFinite(value.lane)
     || typeof value.branch !== 'string' || typeof value.change !== 'string'
+    || (value.createdBy !== undefined && typeof value.createdBy !== 'string')
     || !Number.isFinite(value.createdAt) || !Array.isArray(value.data)
     || !value.data.every(isTreeNode)) return false
   if (value.positions !== undefined
@@ -413,7 +459,11 @@ function applySyncSnapshot(message: SyncSnapshot) {
     active: message.active,
     copyLinks: message.copyLinks,
   }
+  const localActiveId = state.value.activeId
   state.value = normalizeState(message.state)
+  state.value.activeId = state.value.versions.some((version) => version.id === localActiveId)
+    ? localActiveId
+    : state.value.versions.find((version) => version.id === 'v0')!.id
   reflowLayout()
   lastObservedState = JSON.stringify(state.value)
   applyingRemoteState = true
@@ -484,14 +534,6 @@ function applySyncDelta(message: SyncDelta) {
       removedOrphan = true
     }
   }
-  if (message.active && typeof message.active.id === 'string' && isRevision(message.active.revision)
-    && versionsById.has(message.active.id)
-    && revisionIsNewer(message.active.revision, collaborationMetadata.active)) {
-    collaborationMetadata.clock = Math.max(collaborationMetadata.clock, message.active.revision.clock)
-    collaborationMetadata.active = message.active.revision
-    if (state.value.activeId !== message.active.id) changed = true
-    state.value.activeId = message.active.id
-  }
   if (message.copyLinks && Array.isArray(message.copyLinks.links)
     && message.copyLinks.links.every(isCopyLink) && isRevision(message.copyLinks.revision)) {
     collaborationMetadata.clock = Math.max(collaborationMetadata.clock, message.copyLinks.revision.clock)
@@ -540,7 +582,98 @@ function handleRoomMessage(message: unknown, reply: (message: unknown) => void) 
     applySyncSnapshot(packet as SyncSnapshot)
   } else if (packet.type === 'sync-delta') {
     applySyncDelta(packet as SyncDelta)
+  } else if (packet.type === 'presence') {
+    const presence = message as { userId?: unknown; activeVersionId?: unknown; selectedNodeIds?: unknown }
+    if (typeof presence.userId !== 'string' || !presence.userId || presence.userId === CLIENT_ID
+      || typeof presence.activeVersionId !== 'string'
+      || !Array.isArray(presence.selectedNodeIds)
+      || !presence.selectedNodeIds.every((id) => typeof id === 'string')) return
+    remoteUsers.value = {
+      ...remoteUsers.value,
+      [presence.userId]: {
+        activeVersionId: presence.activeVersionId,
+        selectedNodeIds: presence.selectedNodeIds,
+        lastSeen: Date.now(),
+      },
+    }
+  } else if (packet.type === 'ping') {
+    const ping = message as { id?: unknown; userId?: unknown; x?: unknown; y?: unknown }
+    if (typeof ping.id !== 'string' || typeof ping.userId !== 'string' || ping.userId === CLIENT_ID
+      || !Number.isFinite(ping.x) || !Number.isFinite(ping.y)) return
+    showPing({ id: ping.id, userId: ping.userId, x: ping.x as number, y: ping.y as number, createdAt: Date.now() })
   }
+}
+
+function userColor(userId: string) {
+  let hash = 2166136261
+  for (const character of userId) {
+    hash ^= character.charCodeAt(0)
+    hash = Math.imul(hash, 16777619)
+  }
+  const value = hash >>> 0
+  const hue = value % 360
+  const saturation = 58 + ((value >>> 9) % 22)
+  const lightness = 35 + ((value >>> 17) % 19)
+  return `hsl(${hue} ${saturation}% ${lightness}%)`
+}
+function selectionColor(userId: string, secondary = false) {
+  if (!secondary) return userColor(userId)
+  let hash = 2166136261
+  for (const character of userId) hash = Math.imul(hash ^ character.charCodeAt(0), 16777619)
+  return `hsl(${((hash >>> 0) + 52) % 360} 68% 46%)`
+}
+function publishPresence() {
+  if (!collaborationRoom) return
+  peerRoom.send({
+    type: 'presence',
+    userId: CLIENT_ID,
+    activeVersionId: active.value.id,
+    selectedNodeIds: selectedNodes.value,
+  })
+}
+function showPing(ping: Ping) {
+  pings.value = [...pings.value.filter((item) => item.id !== ping.id), ping]
+  window.setTimeout(() => {
+    pings.value = pings.value.filter((item) => item.id !== ping.id)
+  }, 1400)
+}
+function handlePingPointer(event: PointerEvent) {
+  if (!pingMode.value || event.button !== 0) return
+  event.preventDefault()
+  event.stopImmediatePropagation()
+  suppressPingClick = true
+  window.clearTimeout(pingClickTimer)
+  pingClickTimer = window.setTimeout(() => { suppressPingClick = false }, 500)
+  const rect = graphCanvas.value?.getBoundingClientRect()
+  if (!rect) return
+  const ping = {
+    id: `${CLIENT_ID}-${Date.now()}-${++pingSequence}`,
+    userId: CLIENT_ID,
+    x: (event.clientX - rect.left - pan.value.x) / zoom.value,
+    y: (event.clientY - rect.top - pan.value.y) / zoom.value,
+    createdAt: Date.now(),
+  }
+  showPing(ping)
+  peerRoom.send({ type: 'ping', ...ping })
+  pingMode.value = false
+}
+function suppressPingClickEvent(event: MouseEvent) {
+  if (!suppressPingClick) return
+  event.preventDefault()
+  event.stopImmediatePropagation()
+  suppressPingClick = false
+  window.clearTimeout(pingClickTimer)
+}
+function onRoomStatus(status: RoomStatus) {
+  roomStatus.value = status
+  if (status.state === 'connected' || status.state === 'hosting') publishPresence()
+  if (status.state === 'idle') remoteUsers.value = {}
+}
+function expireRemoteUsers() {
+  const cutoff = Date.now() - 15000
+  remoteUsers.value = Object.fromEntries(Object.entries(remoteUsers.value)
+    .filter(([, user]) => user.lastSeen >= cutoff))
+  publishPresence()
 }
 
 async function connectToRoom(mode: 'host' | 'join') {
@@ -551,8 +684,9 @@ async function connectToRoom(mode: 'host' | 'join') {
   }
   initializeCollaborationMetadata(room)
   try {
-    if (mode === 'host') await peerRoom.hostRoom(room, handleRoomMessage, (status) => { roomStatus.value = status })
-    else await peerRoom.joinRoom(room, handleRoomMessage, (status) => { roomStatus.value = status })
+    if (mode === 'host') await peerRoom.hostRoom(room, handleRoomMessage, onRoomStatus)
+    else await peerRoom.joinRoom(room, handleRoomMessage, onRoomStatus)
+    publishPresence()
     const url = new URL(location.href)
     url.searchParams.set('room', room)
     history.replaceState(null, '', url)
@@ -611,7 +745,11 @@ async function syncFromServer() {
     }
     skipNextPersist = true
     clearTransientMapViews()
+    const localActiveId = state.value.activeId
     state.value = normalizeState(payload.state)
+    state.value.activeId = state.value.versions.some((version) => version.id === localActiveId)
+      ? localActiveId
+      : state.value.versions.find((version) => version.id === 'v0')!.id
     reflowLayout()
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state.value))
     persistenceLabel.value = 'Saved on server'
@@ -766,7 +904,7 @@ function positionsAfterMove(
 ) {
   const defaults = defaultPositions(data, existing)
   if (!data.some((node) => node.id === nodeId)) return { ...defaults, ...existing }
-  return { ...defaults, ...existing, [nodeId]: position }
+  return resolveRootOverlaps(data, { ...defaults, ...existing, [nodeId]: position }, nodeId)
 }
 function positionsForData(
   previousData: TreeNode[],
@@ -798,7 +936,7 @@ function positionsForData(
     positions[node.id] = nearestFreePosition(preferred, size, occupied, positions)
     occupied.push(node)
   }
-  return positions
+  return resolveRootOverlaps(nextData, positions)
 }
 function nearestFreePosition(
   preferred: { x: number; y: number },
@@ -810,7 +948,7 @@ function nearestFreePosition(
   const stepY = size.height + MAP_GAP
   const isFree = (candidate: { x: number; y: number }) => !occupied.some((other) => {
     const position = positions[other.id] ?? { x: 0, y: 0 }
-    const otherSize = treeDimensions(other)
+    const otherSize = outerTreemapDimensions(other)
     return candidate.x < position.x * CARD_WIDTH + otherSize.width + MAP_GAP
       && candidate.x + size.width + MAP_GAP > position.x * CARD_WIDTH
       && candidate.y < position.y * TREE_MAP_HEIGHT + otherSize.height + MAP_GAP
@@ -838,6 +976,47 @@ function nearestFreePosition(
   const fallback = { ...preferred }
   while (!isFree(fallback)) fallback.x += stepX
   return { x: fallback.x / CARD_WIDTH, y: fallback.y / TREE_MAP_HEIGHT }
+}
+function resolveRootOverlaps(
+  data: TreeNode[],
+  positions: Record<string, { x: number; y: number }>,
+  fixedId?: string,
+) {
+  const resolved = { ...positions }
+  const ordered = fixedId
+    ? [...data].sort((left, right) => Number(right.id === fixedId) - Number(left.id === fixedId))
+    : data
+  const occupied: TreeNode[] = []
+  for (const node of ordered) {
+    const position = resolved[node.id] ?? { x: 0, y: 0 }
+    const size = outerTreemapDimensions(node)
+    if (!nearestPositionIsFree(position, size, occupied, resolved)) {
+      resolved[node.id] = nearestFreePosition(
+        { x: position.x * CARD_WIDTH, y: position.y * TREE_MAP_HEIGHT },
+        size,
+        occupied,
+        resolved,
+      )
+    }
+    occupied.push(node)
+  }
+  return resolved
+}
+function nearestPositionIsFree(
+  position: { x: number; y: number },
+  size: { width: number; height: number },
+  occupied: TreeNode[],
+  positions: Record<string, { x: number; y: number }>,
+) {
+  const candidate = { x: position.x * CARD_WIDTH, y: position.y * TREE_MAP_HEIGHT }
+  return !occupied.some((other) => {
+    const otherPosition = positions[other.id] ?? { x: 0, y: 0 }
+    const otherSize = outerTreemapDimensions(other)
+    return candidate.x < otherPosition.x * CARD_WIDTH + otherSize.width + MAP_GAP
+      && candidate.x + size.width + MAP_GAP > otherPosition.x * CARD_WIDTH
+      && candidate.y < otherPosition.y * TREE_MAP_HEIGHT + otherSize.height + MAP_GAP
+      && candidate.y + size.height + MAP_GAP > otherPosition.y * TREE_MAP_HEIGHT
+  })
 }
 function reflowLayout() {
   const graph = state.value.versions
@@ -922,10 +1101,11 @@ function createVersion(data: TreeNode[], change: string) {
   const viewport = mapViewport(parent)
   const currentMapView = mapViewFor(parent)
   const positions = positionsForData(parent.data, data, parent.positions, currentMapView, viewport)
+  const fittedMapView = fitMapViewToLayout('new-version', data, positions, currentMapView)
   const version: Version = {
     id: `v${state.value.nextVersion++}-${CLIENT_ID}`, parentId: parent.id, step: parent.step + 1,
-    lane, branch, change, data, positions,
-    ...(currentMapView.manual ? { mapView: clone(currentMapView) } : {}),
+    lane, branch, change, data, createdBy: CLIENT_ID, positions,
+    ...(currentMapView.manual ? { mapView: clone(fittedMapView) } : {}),
     createdAt: Date.now(),
   }
   state.value.versions.push(version)
@@ -1020,18 +1200,25 @@ const previewLayout = computed(() => {
     if (!source || !target) return null
     target.children.push(source)
     const positions = positionsForData(active.value.data, data, active.value.positions)
-    return { data, positions, kind: 'attach' as const }
+    return {
+      data,
+      positions,
+      view: fitMapViewToLayout(active.value.id, data, positions, mapViewFor(active.value)),
+      kind: 'attach' as const,
+    }
   }
   if (!spatialPreview.value) return null
   const data = clone(active.value.data)
   const isRoot = data.some((node) => node.id === draggedNode.value)
   if (isRoot) {
     const positions = clone(active.value.positions ?? defaultPositions(data))
+    const nextPositions = positionsAfterMove(data, positions, draggedNode.value, {
+        x: spatialPreview.value.x, y: spatialPreview.value.y,
+      })
     return {
       data,
-      positions: positionsAfterMove(data, positions, draggedNode.value, {
-        x: spatialPreview.value.x, y: spatialPreview.value.y,
-      }),
+      positions: nextPositions,
+      view: fitMapViewToLayout(active.value.id, data, nextPositions, mapViewFor(active.value)),
       kind: 'layout' as const,
     }
   }
@@ -1039,8 +1226,18 @@ const previewLayout = computed(() => {
   if (!detached) return null
   data.push(detached)
   const positions = positionsForData(active.value.data, data, active.value.positions, active.value.mapView, mapViewport(active.value))
-  positions[draggedNode.value] = { x: spatialPreview.value.x, y: spatialPreview.value.y }
-  return { data, positions, kind: 'detach' as const }
+  const resolvedPositions = positionsAfterMove(
+    data,
+    positions,
+    draggedNode.value,
+    { x: spatialPreview.value.x, y: spatialPreview.value.y },
+  )
+  return {
+    data,
+    positions: resolvedPositions,
+    view: fitMapViewToLayout(active.value.id, data, resolvedPositions, mapViewFor(active.value)),
+    kind: 'detach' as const,
+  }
 })
 
 function attachEntry(sourceId: string, targetId: string) {
@@ -1136,11 +1333,21 @@ function selectVersion(version: Version) {
     return
   }
   state.value.activeId = version.id
-  selectedNode.value = null
+  setSelectedNodes([])
   menu.value = null
 }
 
-function onTileClick(version: Version, nodeId: string) {
+function activateVersionOnPointer(version: Version, event: PointerEvent) {
+  if (compareMode.value || (event.target as HTMLElement).closest('button')) return
+  state.value.activeId = version.id
+}
+
+function setSelectedNodes(nodeIds: string[]) {
+  selectedNodes.value = [...new Set(nodeIds)]
+  selectedNode.value = selectedNodes.value[0] ?? null
+}
+
+function onTileClick(version: Version, nodeId: string, event: MouseEvent) {
   if (suppressTileClick) {
     suppressTileClick = false
     return
@@ -1150,7 +1357,22 @@ function onTileClick(version: Version, nodeId: string) {
     return
   }
   state.value.activeId = version.id
-  selectedNode.value = zoom.value * mapViewFor(version).zoom > 0.35 ? nodeId : null
+  if (zoom.value * mapViewFor(version).zoom <= 0.35) {
+    setSelectedNodes([])
+  } else if (event.shiftKey) {
+    const selection = selectedNodes.value.includes(nodeId)
+      ? selectedNodes.value.filter((id) => id !== nodeId)
+      : [...selectedNodes.value, nodeId]
+    setSelectedNodes(selection)
+  } else {
+    setSelectedNodes([nodeId])
+  }
+  menu.value = null
+}
+
+function onCanvasClick(event: MouseEvent) {
+  if ((event.target as HTMLElement).closest('.version-card, button')) return
+  setSelectedNodes([])
   menu.value = null
 }
 
@@ -1236,6 +1458,31 @@ function versionColor(version: Version) {
   const index = Math.max(0, Number(version.branch.match(/\d+/)?.[0] ?? 1) - 1)
   return branchColors[index % branchColors.length]!
 }
+function versionAuthorColor(version: Version) {
+  const author = version.createdBy ?? version.id.match(/-([a-f0-9]{12})$/)?.[1]
+  return author ? userColor(author) : '#7b8580'
+}
+function activeUsersFor(versionId: string) {
+  const users = []
+  if (active.value.id === versionId) users.push({ id: CLIENT_ID, color: userColor(CLIENT_ID) })
+  for (const [id, user] of Object.entries(remoteUsers.value)) {
+    if (user.activeVersionId === versionId) users.push({ id, color: userColor(id) })
+  }
+  return users
+}
+function tileSelectionHighlights(versionId: string, nodeId: string) {
+  const highlights: { id: string; color: string }[] = []
+  if (active.value.id === versionId) {
+    const localIndex = selectedNodes.value.indexOf(nodeId)
+    if (localIndex >= 0) highlights.push({ id: CLIENT_ID, color: selectionColor(CLIENT_ID, localIndex > 0) })
+  }
+  for (const [id, user] of Object.entries(remoteUsers.value)) {
+    if (user.activeVersionId === versionId && user.selectedNodeIds.includes(nodeId)) {
+      highlights.push({ id, color: userColor(id) })
+    }
+  }
+  return highlights
+}
 function descendantsCount(nodes: TreeNode[]) { return countNodes(nodes) }
 function treeDepth(nodes: TreeNode[]): number {
   return nodes.length ? 1 + Math.max(...nodes.map((node) => treeDepth(node.children))) : 0
@@ -1308,7 +1555,8 @@ watch(() => versions.value.map((version) => version.id).join(','), () => {
   void nextTick(initializeMapViews)
 }, { flush: 'post' })
 function mapTransform(version: Version) {
-  const view = mapViewFor(version)
+  const layout = version.id === active.value.id ? previewLayout.value : null
+  const view = layout?.view ?? mapViewFor(version)
   return `translate(${view.panX} ${view.panY}) scale(${view.zoom})`
 }
 const versionTiles = computed(() => {
@@ -1474,13 +1722,14 @@ function placeRoot(version: Version, nodeId: string, position: { x: number; y: n
     ? defaultPosition : position
   version.positions ??= {}
   version.positions = positionsAfterMove(version.data, version.positions, nodeId, normalizedPosition)
+  version.mapView = fitMapViewToLayout(version.id, version.data, version.positions, mapViewFor(version))
   notify('Treemap layout updated')
   return true
 }
 function spatialPreviewStyle(version: Version) {
   if (spatialPreview.value?.versionId !== version.id) return {}
   const map = document.querySelector<HTMLElement>(`.version-card[data-version="${version.id}"] .mini-map`)
-  const view = mapViewFor(version)
+  const view = previewLayout.value?.view ?? mapViewFor(version)
   const node = findNode(active.value.data, spatialPreview.value.nodeId)
   const size = node ? outerTreemapDimensions(node) : { width: LEAF_TILE_WIDTH, height: LEAF_TILE_HEIGHT }
   const parentTile = spatialPreview.value.parentId
@@ -1502,7 +1751,7 @@ function spatialPreviewStyle(version: Version) {
 
 function onTileContext(event: MouseEvent, nodeId: string) {
   event.preventDefault()
-  selectedNode.value = nodeId
+  setSelectedNodes([nodeId])
   menu.value = { x: event.clientX, y: event.clientY, nodeId }
 }
 function onCanvasContext(event: MouseEvent) {
@@ -1548,8 +1797,8 @@ function zoomMap(event: WheelEvent, version: Version) {
 }
 function startMapPan(event: PointerEvent, version: Version) {
   if (!event.shiftKey || event.button !== 0) return
-  event.preventDefault()
   event.stopPropagation()
+  state.value.activeId = version.id
   const view = mapViewFor(version)
   const timer = mapViewTimers.get(version.id)
   if (timer !== undefined) window.clearTimeout(timer)
@@ -1565,18 +1814,20 @@ function startMapPan(event: PointerEvent, version: Version) {
   }
 }
 function startMapTileGesture(event: PointerEvent, version: Version, nodeId: string) {
+  state.value.activeId = version.id
   if (event.shiftKey) {
     startMapPan(event, version)
     return
   }
-  if (version.id === active.value.id) startTreeDrag(event, nodeId)
+  startTreeDrag(event, nodeId)
 }
 function moveMapPan(event: PointerEvent) {
   const drag = mapPanDrag.value
   if (!drag || drag.pointerId !== event.pointerId) return
   const version = versions.value.find((item) => item.id === drag.versionId)
   if (!version) return
-  if (!drag.moved && Math.hypot(event.clientX - drag.x, event.clientY - drag.y) > 3) drag.moved = true
+  if (!drag.moved && Math.hypot(event.clientX - drag.x, event.clientY - drag.y) <= 3) return
+  drag.moved = true
   transientMapViews.value[version.id] = {
     ...mapViewFor(version),
     panX: drag.panX + (event.clientX - drag.x) / zoom.value,
@@ -1588,15 +1839,15 @@ function endMapPan(event: PointerEvent) {
   if (mapPanDrag.value?.pointerId !== event.pointerId) return
   const { versionId, moved } = mapPanDrag.value
   mapPanDrag.value = null
-  commitMapView(versionId)
   if (moved) {
+    commitMapView(versionId)
     suppressVersionClick = true
     suppressTileClick = true
     window.setTimeout(() => {
       suppressVersionClick = false
       suppressTileClick = false
     }, 0)
-  }
+  } else if (transientMapViews.value[versionId]) scheduleMapViewCommit(versionId)
 }
 function centerVersion(version: Version) {
   cancelPanAnimation()
@@ -1793,7 +2044,7 @@ function onKeydown(event: KeyboardEvent) {
     event.preventDefault()
     pasteEntry()
   }
-  if (event.key === 'Escape') { menu.value = null; compareMode.value = false; compareIds.value = [] }
+  if (event.key === 'Escape') { menu.value = null; compareMode.value = false; compareIds.value = []; pingMode.value = false }
 }
 onMounted(() => {
   const measureCanvas = () => {
@@ -1807,6 +2058,7 @@ onMounted(() => {
   window.addEventListener('pointermove', moveMapPan)
   window.addEventListener('pointerup', finishTreeDrag)
   window.addEventListener('pointerup', endMapPan)
+  presenceTimer = window.setInterval(expireRemoteUsers, 5000)
   void syncFromServer().then(() => {
     if (roomInput.value) return connectToRoom('join')
   })
@@ -1821,6 +2073,7 @@ onUnmounted(() => {
   window.removeEventListener('pointermove', moveMapPan)
   window.removeEventListener('pointerup', finishTreeDrag)
   window.removeEventListener('pointerup', endMapPan)
+  window.clearInterval(presenceTimer)
 })
 
 function createFreeEntry() { addEntry() }
@@ -1858,7 +2111,7 @@ function resetWorkspace() {
 </script>
 
 <template>
-  <main class="app-shell" @contextmenu="onCanvasContext" @wheel="onWheel">
+  <main class="app-shell" :class="{ dark: darkMode }" @click.capture="suppressPingClickEvent" @contextmenu="onCanvasContext" @wheel="onWheel">
     <div class="workspace">
       <aside class="sidebar" :class="{ collapsed: sidebarCollapsed }">
         <div class="sidebar-head">
@@ -1890,17 +2143,21 @@ function resetWorkspace() {
         </section>
         <section class="side-section active-section">
           <div class="section-label">ACTIVE VERSION</div>
-          <div class="active-version-card">
+          <button type="button" class="active-version-card" title="Center active version" @click="centerActive">
             <div class="active-version-top"><span class="version-pip" :style="{ background: versionColor(active) }"></span><span> Branch {{ active.branch }} | {{ displayVersionId(active.id) }} | Step {{ active.step }}</span></div>
             <strong>{{ active.change }}</strong>
             <div class="active-meta"><span>Entries</span><strong>{{ activeNodes }}</strong></div>
             <div class="active-meta"><span>Current step</span><strong>{{ String(active.step).padStart(2, '0') }}</strong></div>
             <div class="active-meta"><span>Paths from here</span><strong>{{ activeChildren }}</strong></div>
-          </div>
+          </button>
         </section>
         <section class="side-section settings-section">
           <div class="section-label">DELETE BEHAVIOR</div>
           <label class="select-wrap"><select v-model="deletionMode" aria-label="Deletion behavior"><option value="subtree">Delete entire subtree</option><option value="detach">Keep children detached</option></select><ChevronDown :size="14" /></label>
+          <button type="button" class="theme-toggle" @click="darkMode = !darkMode">
+            <component :is="darkMode ? Sun : Moon" :size="15" />
+            <span>{{ darkMode ? 'Light mode' : 'Dark mode' }}</span>
+          </button>
         </section>
         <section v-if="zoom <= 0.35" class="side-section lod-section">
           <span class="lod-badge">READ ONLY</span>
@@ -1909,7 +2166,7 @@ function resetWorkspace() {
       </aside>
 
       <section class="canvas-region">
-        <div ref="graphCanvas" class="graph-canvas" @pointerdown="startCanvasPan" @pointermove="moveCanvasPan" @pointerup="endCanvasPan" @pointercancel="endCanvasPan">
+        <div ref="graphCanvas" class="graph-canvas" :class="{ 'ping-mode': pingMode }" @pointerdown.capture="handlePingPointer" @click="onCanvasClick" @pointerdown="startCanvasPan" @pointermove="moveCanvasPan" @pointerup="endCanvasPan" @pointercancel="endCanvasPan">
           <div class="canvas-grid"></div>
           <div class="graph-world" :style="{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }">
             <svg class="connection-layer" :width="graphBounds.width + 260" :height="graphBounds.height" aria-hidden="true">
@@ -1936,8 +2193,11 @@ function resetWorkspace() {
             </svg>
 
             <article v-for="version in versions" :key="version.id" class="version-card" :class="{ active: version.id === active.id, compared: compareIds.includes(version.id), 'compare-pick': compareMode, compact: zoom < 0.66, previewing: isPreviewing(version), 'root-version': version.id === 'v0' }"
-              :data-version="version.id" :style="{ left: `${cardPosition(version).x}px`, top: `${cardPosition(version).y}px`, width: `${CARD_WIDTH}px`, height: `${cardHeight(version)}px`, '--branch-color': versionColor(version) }"
+              :data-version="version.id" :style="{ left: `${cardPosition(version).x}px`, top: `${cardPosition(version).y}px`, width: `${CARD_WIDTH}px`, height: `${cardHeight(version)}px`, '--branch-color': versionColor(version), '--user-color': userColor(CLIENT_ID), '--author-color': versionAuthorColor(version) }"
+              @pointerdown="activateVersionOnPointer(version, $event)"
               @click="selectVersion(version)" @dblclick.stop="centerVersion(version)" :data-over="overNode === version.id">
+              <span v-for="(user, index) in activeUsersFor(version.id)" :key="`active-${user.id}`"
+                class="version-user-outline" :style="{ borderColor: user.color, inset: `${-2 - index * 3}px` }"></span>
               <div v-if="version.id !== 'v0'" class="version-card-head">
                 <span class="branch-mark" :style="{ background: versionColor(version) }"></span>
                 <span class="version-header-id">{{ version.branch }} | {{ displayVersionId(version.id).replace(/^v/, 'V') }} | S{{ version.step }} |</span>
@@ -1961,14 +2221,28 @@ function resetWorkspace() {
                     <g :transform="mapTransform(version)">
                       <rect v-for="tile in versionTiles.get(version.id) ?? []" :key="tile.id"
                         :x="tile.x" :y="tile.y" :width="tile.width" :height="tile.height"
-                        :class="['tree-tile', `depth-${tile.depth}`, { 'is-selected': selectedNode === tile.id && version.id === active.id, 'is-source': draggedNode === tile.id, 'is-over': overNode === tile.id, 'is-invalid': invalidNode === tile.id }]"
+                        :class="['tree-tile', `depth-${tile.depth}`, { 'is-selected': selectedNodes.includes(tile.id) && version.id === active.id, 'is-source': draggedNode === tile.id, 'is-over': overNode === tile.id, 'is-invalid': invalidNode === tile.id, 'is-hovered': hoveredNode === tile.id }]"
                         :data-node="tile.id" :fill="tile.depth === 0 ? '#deebe4' : tile.depth % 2 ? '#c1d9cc' : '#a9cab9'"
                         @pointerdown.stop="startMapTileGesture($event, version, tile.id)"
-                        @click.stop="onTileClick(version, tile.id)" @contextmenu="version.id === active.id && zoom * mapViewFor(version).zoom > 0.35 && onTileContext($event, tile.id)">
+                        @pointerenter="hoveredNode = tile.id" @pointerleave="hoveredNode = null"
+                        @click.stop="onTileClick(version, tile.id, $event)" @contextmenu="version.id === active.id && zoom * mapViewFor(version).zoom > 0.35 && onTileContext($event, tile.id)">
                         <title v-if="findNode(cardData(version), tile.id)?.description">{{ findNode(cardData(version), tile.id)?.description }}</title>
                       </rect>
                       <text v-for="tile in (versionTiles.get(version.id) ?? []).filter((item) => labelFontSize(item) >= 7)" :key="`label-${tile.id}`"
                         :x="tile.x + 5" :y="tile.y + labelFontSize(tile) + 4" :font-size="labelFontSize(tile)" class="tile-label">{{ tile.label }}</text>
+                      <template v-for="tile in versionTiles.get(version.id) ?? []" :key="`hover-${tile.id}`">
+                        <rect v-if="hoveredNode === tile.id || overNode === tile.id"
+                          :x="tile.x + 1" :y="tile.y + 1" :width="tile.width - 2" :height="tile.height - 2"
+                          stroke="#00a8ff" stroke-width="2.5" vector-effect="non-scaling-stroke"
+                          fill="none" pointer-events="none"></rect>
+                      </template>
+                      <template v-for="tile in versionTiles.get(version.id) ?? []" :key="`selection-${tile.id}`">
+                        <rect v-for="(highlight, index) in tileSelectionHighlights(version.id, tile.id)" :key="highlight.id"
+                          :x="tile.x - index * 2" :y="tile.y - index * 2"
+                          :width="tile.width + index * 4" :height="tile.height + index * 4"
+                          :stroke="highlight.color" stroke-width="2.5" vector-effect="non-scaling-stroke"
+                          fill="none" pointer-events="none"></rect>
+                      </template>
                     </g>
                   </svg>
                 </template>
@@ -1981,6 +2255,8 @@ function resetWorkspace() {
                 </div>
               </div>
             </article>
+            <span v-for="ping in pings" :key="ping.id" class="ping-ripple"
+              :style="{ left: `${ping.x}px`, top: `${ping.y}px`, '--ping-color': userColor(ping.userId) }"></span>
           </div>
 
           <div class="canvas-hotbar" role="toolbar" aria-label="Quick actions" @pointerdown.stop @click.stop>
@@ -1990,6 +2266,7 @@ function resetWorkspace() {
             <button title="Compare versions (Shift+C)" aria-label="Compare versions, Shift+C" :class="{ selected: compareMode }" @click="compareMode = !compareMode; compareIds = []"><GitCompareArrows :size="16" /><span>Compare</span><kbd>Shift+C</kbd></button>
             <button title="Center active version (Shift+F)" aria-label="Center active version, Shift+F" @click="centerActive"><Maximize :size="16" /><span>Center</span><kbd>Shift+F</kbd></button>
             <button title="Fit all versions (Shift+A)" aria-label="Fit all versions, Shift+A" @click="fitGraph"><Layers3 :size="16" /><span>Fit all</span><kbd>Shift+A</kbd></button>
+            <button title="Ping a position for collaborators" aria-label="Ping a position for collaborators" :class="{ selected: pingMode }" @click="pingMode = !pingMode"><Radio :size="16" /><span>{{ pingMode ? 'Click to ping' : 'Ping' }}</span></button>
             <span class="hotbar-divider" aria-hidden="true"></span>
             <button title="Zoom out (-)" aria-label="Zoom out, minus" @click="zoomOut"><ZoomOut :size="16" /><kbd>−</kbd></button>
             <button title="Zoom in (+)" aria-label="Zoom in, plus" @click="zoomIn"><ZoomIn :size="16" /><kbd>+</kbd></button>
