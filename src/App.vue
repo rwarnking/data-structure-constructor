@@ -52,14 +52,6 @@ function fitMapViewToLayout(
 type Tile = { id: string; label: string; x: number; y: number; width: number; height: number; depth: number }
 type StoredState = { versions: Version[]; activeId: string; nextNode: number; nextVersion: number; nextLane: number; copyLinks: CopyLink[] }
 type EditorState = { mode: 'create' | 'rename'; parentId: string | null; nodeId: string | null; value: string; description: string }
-type MergeConflict = {
-  key: string
-  nodeId: string
-  kind: 'presence' | 'value' | 'description' | 'parent' | 'hierarchy'
-  label: string
-  sourceValue: string
-  targetValue: string
-}
 type FlatNode = { node: TreeNode; parentId: string | null; path: string; order: number }
 type Revision = { clock: number; actor: string }
 type VersionChange = { version: Version; revision: Revision }
@@ -174,7 +166,8 @@ const sidebarCollapsed = ref(false)
 const compareMode = ref(false)
 const compareIds = ref<string[]>([])
 const mergeMode = ref(false)
-const mergeResolutions = ref<Record<string, 'source' | 'target'>>({})
+const mergeDecisions = ref<Record<string, 'combine' | 'source' | 'target' | 'omit'>>({})
+const mergeParentOverrides = ref<Record<string, string>>({})
 const comparisonSelectedNode = ref<string | null>(null)
 const zoom = ref(1)
 const isReadOnly = computed(() => zoom.value <= 0.35)
@@ -733,7 +726,7 @@ function handlePingClick(event: MouseEvent) {
   pingPointer = null
   if (!pingMode.value || event.button !== 0
     || pointer?.moved
-    || (event.target as HTMLElement).closest('.canvas-hotbar, button')) return
+    || (event.target as HTMLElement).closest('.canvas-hotbar, button, .copy-link, .copy-link-hit')) return
   sendPingAt(event.clientX, event.clientY)
 }
 function suppressPingClickEvent(event: MouseEvent) {
@@ -1405,7 +1398,8 @@ function flattenNodes(nodes: TreeNode[], parentId: string | null = null, parentP
 function chooseCompare(id: string) {
   if (compareIds.value.includes(id)) compareIds.value = compareIds.value.filter((item) => item !== id)
   else compareIds.value = [...compareIds.value.slice(-1), id]
-  mergeResolutions.value = {}
+  mergeDecisions.value = {}
+  mergeParentOverrides.value = {}
   comparisonSelectedNode.value = null
   if (compareIds.value.length === 2) showOverview.value = true
 }
@@ -1415,7 +1409,8 @@ function startVersionSelection(mode: 'compare' | 'merge') {
   compareMode.value = mode === 'compare'
   mergeMode.value = mode === 'merge'
   compareIds.value = []
-  mergeResolutions.value = {}
+  mergeDecisions.value = {}
+  mergeParentOverrides.value = {}
   comparisonSelectedNode.value = null
   showOverview.value = false
 }
@@ -1424,7 +1419,8 @@ function closeVersionSelection() {
   mergeMode.value = false
   showOverview.value = false
   compareIds.value = []
-  mergeResolutions.value = {}
+  mergeDecisions.value = {}
+  mergeParentOverrides.value = {}
   comparisonSelectedNode.value = null
 }
 const comparison = computed(() => {
@@ -1452,117 +1448,52 @@ const comparison = computed(() => {
   return changes
 })
 const comparisonStatus = computed(() => new Map(comparison.value.map((change) => [change.id, change.kind.toLowerCase()])))
-const mergePreview = computed(() => {
+const mergeResult = computed(() => {
   if (!mergeMode.value || compareIds.value.length !== 2) return null
   const source = versions.value.find((item) => item.id === compareIds.value[0])
   const target = versions.value.find((item) => item.id === compareIds.value[1])
   if (!source || !target || source.id === target.id) return null
-  const sourceAncestors = new Set<string>()
-  let ancestor: Version | undefined = source
-  while (ancestor) {
-    sourceAncestors.add(ancestor.id)
-    const parentId: string | null = ancestor.parentId
-    ancestor = parentId ? versions.value.find((item) => item.id === parentId) : undefined
-  }
-  ancestor = target
-  while (ancestor && !sourceAncestors.has(ancestor.id)) {
-    const parentId: string | null = ancestor.parentId
-    ancestor = parentId ? versions.value.find((item) => item.id === parentId) : undefined
-  }
-  const base = ancestor ?? versions.value.find((item) => item.id === 'v0')!
-  const baseNodes = flattenNodes(base.data)
   const sourceNodes = flattenNodes(source.data)
   const targetNodes = flattenNodes(target.data)
-  const conflicts: MergeConflict[] = []
-  const addConflict = (nodeId: string, kind: MergeConflict['kind'], label: string, sourceValue: string, targetValue: string) => {
-    const key = `${nodeId}:${kind}`
-    if (!conflicts.some((conflict) => conflict.key === key)) {
-      conflicts.push({ key, nodeId, kind, label, sourceValue, targetValue })
-    }
-    return mergeResolutions.value[key]
-  }
-  const sameEntry = (left: FlatNode | undefined, right: FlatNode | undefined) =>
-    !left && !right || !!left && !!right && left.parentId === right.parentId && left.order === right.order
-    && left.node.value === right.node.value && (left.node.description ?? '') === (right.node.description ?? '')
   const values = new Map<string, { value: string; description?: string; parentId: string | null; order: number }>()
-  const ids = [...new Set([...targetNodes.keys(), ...sourceNodes.keys(), ...baseNodes.keys()])]
+  const ids = [...new Set([...targetNodes.keys(), ...sourceNodes.keys()])]
   for (const id of ids) {
-    const baseEntry = baseNodes.get(id)
     const sourceEntry = sourceNodes.get(id)
     const targetEntry = targetNodes.get(id)
-    if (!baseEntry && !sourceEntry && !targetEntry) continue
-    if (baseEntry && (!sourceEntry || !targetEntry)) {
-      if (!sourceEntry && !targetEntry) continue
-      const survivor = sourceEntry ?? targetEntry!
-      if (sameEntry(survivor, baseEntry)) continue
-      const choice = addConflict(id, 'presence', `Delete or keep ${baseEntry.node.value}`,
-        sourceEntry ? sourceEntry.path : 'Deleted', targetEntry ? targetEntry.path : 'Deleted')
-      const kept = choice === 'source' ? sourceEntry : targetEntry
-      if (!kept) continue
-      values.set(id, { value: kept.node.value, description: kept.node.description, parentId: kept.parentId, order: kept.order })
-      continue
-    }
-    if (!sourceEntry && !targetEntry) continue
-    const sourceValue = sourceEntry ?? targetEntry!
-    const targetValue = targetEntry ?? sourceEntry!
-    const pick = <T>(
-      kind: 'value' | 'description' | 'parent',
-      label: string,
-      sourceField: T,
-      targetField: T,
-      baseField: T | undefined,
-      sourceDisplay = String(sourceField ?? 'None'),
-      targetDisplay = String(targetField ?? 'None'),
-    ): T => {
-      if (!baseEntry) {
-        if (sourceField === targetField) return targetField
-        const choice = addConflict(id, kind, label, sourceDisplay, targetDisplay)
-        return (choice === 'source' ? sourceField : targetField)
-      }
-      const sourceFieldChanged = sourceField !== baseField
-      const targetFieldChanged = targetField !== baseField
-      if (sourceFieldChanged && targetFieldChanged && sourceField !== targetField) {
-        const choice = addConflict(id, kind, label, sourceDisplay, targetDisplay)
-        return (choice === 'source' ? sourceField : targetField)
-      }
-      if (sourceFieldChanged) return sourceField
-      if (targetFieldChanged) return targetField
-      return targetField
-    }
-    const value = pick('value', `Rename ${baseEntry?.node.value ?? sourceEntry?.node.value ?? targetEntry!.node.value}`,
-      sourceValue.node.value, targetValue.node.value, baseEntry?.node.value)
-    const description = pick('description', `Description for ${baseEntry?.node.value ?? sourceEntry?.node.value ?? targetEntry!.node.value}`,
-      sourceValue.node.description ?? '', targetValue.node.description ?? '', baseEntry?.node.description ?? '')
-    const placement = pick('parent', `Hierarchy position of ${baseEntry?.node.value ?? sourceEntry?.node.value ?? targetEntry!.node.value}`,
-      JSON.stringify([sourceValue.parentId, sourceValue.order]),
-      JSON.stringify([targetValue.parentId, targetValue.order]),
-      baseEntry ? JSON.stringify([baseEntry.parentId, baseEntry.order]) : undefined,
-      `${sourceValue.parentId ? sourceNodes.get(sourceValue.parentId)?.node.value ?? 'Entry' : 'Root'} · position ${sourceValue.order + 1}`,
-      `${targetValue.parentId ? targetNodes.get(targetValue.parentId)?.node.value ?? 'Entry' : 'Root'} · position ${targetValue.order + 1}`)
-    const [parentId, order] = JSON.parse(placement) as [string | null, number]
-    values.set(id, { value, ...(description ? { description } : {}), parentId, order })
+    const decision = mergeDecisions.value[id]
+    if (decision === 'omit') continue
+    const selected = decision === 'source' ? sourceEntry : decision === 'target' ? targetEntry : targetEntry ?? sourceEntry
+    if (!selected) continue
+    values.set(id, {
+      value: selected.node.value,
+      description: selected.node.description,
+      parentId: selected.parentId,
+      order: selected.order,
+    })
   }
 
   const parentById = new Map([...values].map(([id, value]) => [id, value.parentId]))
+  for (const [id, parentId] of Object.entries(mergeParentOverrides.value)) {
+    if (!values.has(id) || (parentId && !values.has(parentId))) continue
+    parentById.set(id, parentId || null)
+  }
+  for (const [id, parentId] of parentById) {
+    if (parentId && !values.has(parentId)) parentById.set(id, null)
+  }
   const checked = new Set<string>()
   for (const id of values.keys()) {
     if (checked.has(id)) continue
     const path: string[] = []
-    const pathSet = new Set<string>()
+    const pathIndex = new Map<string, number>()
     let current: string | null | undefined = id
     while (current && values.has(current) && !checked.has(current)) {
-      if (pathSet.has(current)) {
-        const sourceParent = sourceNodes.get(current)?.parentId ?? null
-        const targetParent = targetNodes.get(current)?.parentId ?? null
-        const choice = addConflict(current, 'hierarchy', `Break hierarchy cycle at ${values.get(current)!.value}`,
-          sourceParent ?? 'Root', targetParent ?? 'Root')
-        let parentId = choice === 'source' ? sourceParent : targetParent
-        if (parentId && pathSet.has(parentId)) parentId = null
-        parentById.set(current, parentId)
+      const cycleStart = pathIndex.get(current)
+      if (cycleStart !== undefined) {
+        for (const cycleId of path.slice(cycleStart)) parentById.set(cycleId, null)
         break
       }
+      pathIndex.set(current, path.length)
       path.push(current)
-      pathSet.add(current)
       current = parentById.get(current)
     }
     path.forEach((item) => checked.add(item))
@@ -1582,10 +1513,60 @@ const mergePreview = computed(() => {
     else roots.push(node)
   }
   const positions = positionsForData(target.data, roots, target.positions, mapViewFor(target), mapViewport(target))
-  return { source, target, base, data: roots, positions, conflicts }
+  return { source, target, data: roots, positions }
 })
-const mergeConflictsResolved = computed(() => !!mergePreview.value
-  && mergePreview.value.conflicts.every((conflict) => !!mergeResolutions.value[conflict.key]))
+const mergeRows = computed(() => {
+  const merged = mergeResult.value
+  if (!merged) return []
+  const source = flattenNodes(merged.source.data)
+  const target = flattenNodes(merged.target.data)
+  const result = flattenNodes(merged.data)
+  const ids = new Set([...source.keys(), ...target.keys()])
+  const depth = (id: string, entries: Map<string, FlatNode>) => {
+    let value = 0
+    let parentId = entries.get(id)?.parentId
+    while (parentId && entries.has(parentId)) {
+      value += 1
+      parentId = entries.get(parentId)?.parentId ?? null
+    }
+    return value
+  }
+  return [...ids].map((id) => {
+    const sourceEntry = source.get(id)
+    const targetEntry = target.get(id)
+    return {
+      id, sourceEntry, targetEntry, resultEntry: result.get(id),
+      label: sourceEntry?.node.value ?? targetEntry!.node.value,
+      shared: !!sourceEntry && !!targetEntry,
+      depth: Math.max(sourceEntry ? depth(id, source) : 0, targetEntry ? depth(id, target) : 0),
+    }
+  }).sort((left, right) => Number(left.shared) - Number(right.shared)
+    || left.depth - right.depth || left.label.localeCompare(right.label))
+})
+function mergeParentOptions(nodeId: string) {
+  const data = mergeResult.value?.data ?? []
+  const entry = findNode(data, nodeId)
+  const excluded = new Set(entry ? descendants(entry) : [nodeId])
+  return [...flattenNodes(data)].filter(([id]) => !excluded.has(id))
+}
+function setMergeParent(nodeId: string, parentId: string) {
+  const validParent = !parentId || mergeParentOptions(nodeId).some(([id]) => id === parentId)
+  if (!validParent) return
+  mergeParentOverrides.value = { ...mergeParentOverrides.value, [nodeId]: parentId }
+}
+function mergeDecisionFor(row: { id: string; sourceEntry?: FlatNode; targetEntry?: FlatNode }) {
+  return mergeDecisions.value[row.id]
+    ?? (row.sourceEntry && row.targetEntry ? 'combine' : row.sourceEntry ? 'source' : 'target')
+}
+function setMergeDecision(nodeId: string, decision: 'combine' | 'source' | 'target' | 'omit') {
+  mergeDecisions.value = { ...mergeDecisions.value, [nodeId]: decision }
+  const overrides = { ...mergeParentOverrides.value }
+  delete overrides[nodeId]
+  mergeParentOverrides.value = overrides
+}
+function onMergeParentChange(nodeId: string, event: Event) {
+  setMergeParent(nodeId, (event.target as HTMLSelectElement).value)
+}
 const comparisonPanels = computed(() => {
   if (compareIds.value.length !== 2) return []
   const source = versions.value.find((item) => item.id === compareIds.value[0])
@@ -1595,12 +1576,6 @@ const comparisonPanels = computed(() => {
     { id: source.id, label: 'Source', version: source, data: source.data, positions: source.positions, role: 'source' },
     { id: target.id, label: 'Target', version: target, data: target.data, positions: target.positions, role: 'target' },
   ]
-  if (mergePreview.value) {
-    panels.push({
-      id: 'merge-preview', label: 'Merged result', version: target, data: mergePreview.value.data,
-      positions: mergePreview.value.positions, role: 'result',
-    })
-  }
   return panels.map((panel) => ({
     ...panel,
     tiles: panel.data.flatMap((root, index) => tilesFor(root, panel.data, index, panel.positions)),
@@ -1630,34 +1605,35 @@ function selectComparedNode(nodeId: string) {
 }
 
 function confirmMerge() {
-  const preview = mergePreview.value
-  if (!preview || !mergeConflictsResolved.value || isReadOnly.value) return
+  const result = mergeResult.value
+  if (!result) return
   const targetIsLatest = !versions.value.some((version) =>
-    version.branch === preview.target.branch && version.step > preview.target.step)
-  const siblings = versions.value.filter((version) => version.parentId === preview.target.id)
+    version.branch === result.target.branch && version.step > result.target.step)
+  const siblings = versions.value.filter((version) => version.parentId === result.target.id)
   const nextVersionNumber = state.value.nextVersion++
   const branchNumber = siblings.reduce((highest, version) => {
     const suffix = version.branch.split('.').at(-1) ?? '0'
     return Math.max(highest, Number(suffix.replace(/^B/, '')) || 0)
   }, 0) + 1
-  const branch = preview.target.id === 'v0'
+  const branch = result.target.id === 'v0'
     ? `B${branchNumber}`
-    : targetIsLatest ? preview.target.branch : `${preview.target.branch}.M${nextVersionNumber}`
+    : targetIsLatest ? result.target.branch : `${result.target.branch}.M${nextVersionNumber}`
   const version: Version = {
     id: `v${nextVersionNumber}-${CLIENT_ID}`,
-    parentId: preview.target.id,
-    mergeSourceId: preview.source.id,
-    step: preview.target.step + 1,
-    lane: preview.target.lane,
+    parentId: result.target.id,
+    mergeSourceId: result.source.id,
+    step: result.target.step + 1,
+    lane: result.target.lane,
     branch,
-    change: `Merge ${preview.source.branch} into ${preview.target.branch}`,
-    data: clone(preview.data),
-    positions: clone(preview.positions),
+    change: `Merge ${result.source.branch} into ${result.target.branch}`,
+    data: clone(result.data),
+    positions: clone(result.positions),
     createdBy: CLIENT_ID,
     createdAt: Date.now(),
   }
-  const wasCentered = isVersionCentered(preview.target)
+  const wasCentered = isVersionCentered(result.target)
   state.value.versions.push(version)
+  compactVersionTreemaps(version.id, false)
   reflowLayout()
   state.value.activeId = version.id
   setSelectedNodes([])
@@ -1665,7 +1641,8 @@ function confirmMerge() {
   compareMode.value = false
   showOverview.value = false
   compareIds.value = []
-  mergeResolutions.value = {}
+  mergeDecisions.value = {}
+  mergeParentOverrides.value = {}
   notify(`Created merge ${displayVersionId(version.id)}`)
   panToVersion(version, wasCentered)
 }
@@ -1953,7 +1930,7 @@ function mapViewFor(version: Version): MapView {
     manual: false,
   }
 }
-function centerVersionTreemaps(versionId: string) {
+function centerVersionTreemaps(versionId: string, notifyUser = true) {
   const version = versions.value.find((item) => item.id === versionId)
   if (!version || !version.data.length) return
   const positions = { ...defaultPositions(version.data, version.positions), ...version.positions }
@@ -1989,9 +1966,9 @@ function centerVersionTreemaps(versionId: string) {
     }]
   }))
   version.mapView = { zoom: targetZoom, panX: 0, panY: 0, manual: true }
-  notify('Treemaps centered and fitted')
+  if (notifyUser) notify('Treemaps centered and fitted')
 }
-function compactVersionTreemaps(versionId: string) {
+function compactVersionTreemaps(versionId: string, notifyUser = true) {
   const version = versions.value.find((item) => item.id === versionId)
   if (!version || !version.data.length) return
   const ordered = version.data.map((node, index) => ({
@@ -2002,7 +1979,12 @@ function compactVersionTreemaps(versionId: string) {
     widths.push((widths.at(-1) ?? MAP_PADDING) + item.size.width + (widths.length ? MAP_GAP : 0))
     return widths
   }, []))]
-  let best: { area: number; aspectDelta: number; positions: Record<string, { x: number; y: number }> } | null = null
+  let best: {
+    area: number
+    aspectDelta: number
+    fitScale: number
+    positions: Record<string, { x: number; y: number }>
+  } | null = null
   for (const targetWidth of candidateWidths) {
     let x = MAP_PADDING
     let y = MAP_PADDING
@@ -2027,9 +2009,12 @@ function compactVersionTreemaps(versionId: string) {
     const area = width * height
     const viewport = mapViewport(version)
     const aspectDelta = Math.abs(Math.log((width / Math.max(1, height)) / (viewport.width / viewport.height)))
-    if (best && (area > best.area || (area === best.area && aspectDelta >= best.aspectDelta))) continue
+    const fitScale = Math.min(1, viewport.width / Math.max(1, width), viewport.height / Math.max(1, height))
+    if (best && (fitScale < best.fitScale
+      || (fitScale === best.fitScale && aspectDelta > best.aspectDelta)
+      || (fitScale === best.fitScale && aspectDelta === best.aspectDelta && area >= best.area))) continue
     best = {
-      area, aspectDelta,
+      area, aspectDelta, fitScale,
       positions: Object.fromEntries(version.data.map((node) => {
         const position = placed.get(node.id)!
         return [node.id, { x: position.x / CARD_WIDTH, y: position.y / TREE_MAP_HEIGHT }]
@@ -2038,8 +2023,8 @@ function compactVersionTreemaps(versionId: string) {
   }
   if (!best) return
   version.positions = best.positions
-  centerVersionTreemaps(version.id)
-  notify('Treemap layout compacted')
+  centerVersionTreemaps(version.id, false)
+  if (notifyUser) notify('Treemap layout compacted')
 }
 function commitMapView(versionId: string) {
   const view = transientMapViews.value[versionId]
@@ -2095,9 +2080,24 @@ function previewLabel() {
 function labelFontSize(tile: Tile): number {
   return Math.max(0, Math.min(24, tile.height - 6, (tile.width - 10) / (tile.label.length * 0.58)))
 }
-function nodeGraphPoint(versionId: string, nodeId: string) {
+function nodeGraphBounds(versionId: string, nodeId: string) {
   const version = versions.value.find((item) => item.id === versionId)
   if (!version) return null
+  const canvas = graphCanvas.value
+  const card = [...(canvas?.querySelectorAll<HTMLElement>('.version-card') ?? [])]
+    .find((item) => item.dataset.version === versionId)
+  const element = [...(card?.querySelectorAll<SVGGraphicsElement>('.tree-tile') ?? [])]
+    .find((item) => item.dataset.node === nodeId)
+  if (canvas && element) {
+    const tile = element.getBoundingClientRect()
+    const canvasRect = canvas.getBoundingClientRect()
+    const toGraphX = (value: number) => (value - canvasRect.left - pan.value.x) / zoom.value
+    const toGraphY = (value: number) => (value - canvasRect.top - pan.value.y) / zoom.value
+    return {
+      left: toGraphX(tile.left), right: toGraphX(tile.right),
+      top: toGraphY(tile.top), bottom: toGraphY(tile.bottom),
+    }
+  }
   const view = mapViewFor(version)
   for (const [index, root] of version.data.entries()) {
     const tile = tilesFor(root, version.data, index, version.positions).find((item) => item.id === nodeId)
@@ -2106,19 +2106,39 @@ function nodeGraphPoint(versionId: string, nodeId: string) {
     const mapLeft = version.id === 'v0' ? 1 : 6
     const mapTop = version.id === 'v0' ? 1 : 39
     return {
-      x: position.x + mapLeft + view.panX + (tile.x + tile.width / 2) * view.zoom,
-      y: position.y + mapTop + view.panY + (tile.y + tile.height / 2) * view.zoom,
+      left: position.x + mapLeft + view.panX + tile.x * view.zoom,
+      right: position.x + mapLeft + view.panX + (tile.x + tile.width) * view.zoom,
+      top: position.y + mapTop + view.panY + tile.y * view.zoom,
+      bottom: position.y + mapTop + view.panY + (tile.y + tile.height) * view.zoom,
     }
   }
   return null
 }
 function copyLinkPath(link: CopyLink) {
-  const source = nodeGraphPoint(link.sourceVersionId, link.sourceNodeId)
-  const target = nodeGraphPoint(link.targetVersionId, link.targetNodeId)
+  const source = nodeGraphBounds(link.sourceVersionId, link.sourceNodeId)
+  const target = nodeGraphBounds(link.targetVersionId, link.targetNodeId)
   if (!source || !target) return ''
-  const lift = Math.max(55, Math.abs(target.x - source.x) * 0.18)
-  const controlY = Math.min(source.y, target.y) - lift
-  return `M ${source.x} ${source.y} C ${source.x} ${controlY}, ${target.x} ${controlY}, ${target.x} ${target.y}`
+  const sourceCenter = { x: (source.left + source.right) / 2, y: (source.top + source.bottom) / 2 }
+  const targetCenter = { x: (target.left + target.right) / 2, y: (target.top + target.bottom) / 2 }
+  const dx = targetCenter.x - sourceCenter.x
+  const dy = targetCenter.y - sourceCenter.y
+  const distance = Math.max(1, Math.hypot(dx, dy))
+  const sourceScale = Math.min(
+    dx ? (source.right - source.left) / 2 / Math.abs(dx) : Infinity,
+    dy ? (source.bottom - source.top) / 2 / Math.abs(dy) : Infinity,
+  )
+  const targetScale = Math.min(
+    dx ? (target.right - target.left) / 2 / Math.abs(dx) : Infinity,
+    dy ? (target.bottom - target.top) / 2 / Math.abs(dy) : Infinity,
+  )
+  const start = { x: sourceCenter.x + dx * sourceScale, y: sourceCenter.y + dy * sourceScale }
+  const end = { x: targetCenter.x - dx * targetScale, y: targetCenter.y - dy * targetScale }
+  const bend = Math.min(90, Math.max(24, distance * 0.15))
+  const control = {
+    x: (start.x + end.x) / 2 - (dy / distance) * bend,
+    y: (start.y + end.y) / 2 + (dx / distance) * bend,
+  }
+  return `M ${start.x} ${start.y} Q ${control.x} ${control.y} ${end.x} ${end.y}`
 }
 function activateCopyLink(link: CopyLink) {
   const versionId = active.value.id === link.sourceVersionId
@@ -2127,8 +2147,10 @@ function activateCopyLink(link: CopyLink) {
   const version = versions.value.find((item) => item.id === versionId)
   if (!version) return
   state.value.activeId = version.id
-  setSelectedNodes([])
   centerVersion(version)
+}
+function handleCopyLinkClick(link: CopyLink, event: MouseEvent) {
+  if (event.detail === 2) activateCopyLink(link)
 }
 
 function tilesFor(
@@ -2301,7 +2323,8 @@ function onCanvasContext(event: MouseEvent) {
   menu.value = { x: event.clientX, y: event.clientY, nodeId: null }
 }
 function startCanvasPan(event: PointerEvent) {
-  if (event.button !== 0 || (event.target as HTMLElement).closest('button, .version-card, .tree-tile')) return
+  if (event.button !== 0
+    || (event.target as HTMLElement).closest('button, .version-card, .tree-tile, .copy-link-hit')) return
   cancelPanAnimation()
   draggingCanvas.value = true
   dragOrigin.value = { x: event.clientX, y: event.clientY, panX: pan.value.x, panY: pan.value.y }
@@ -2794,14 +2817,20 @@ function resetWorkspace() {
                 <path :d="`M ${cardPosition(version).x + CARD_WIDTH} ${cardPosition(version).y + cardHeight(version) / 2} H ${cardPosition(version).x + CARD_WIDTH + terminalTailEnd(version)}`" class="connection-outline" fill="none" stroke="#f5f7f4" :stroke-width="connectionWidth(version) + 10" stroke-linecap="butt" />
                 <path :d="`M ${cardPosition(version).x + CARD_WIDTH} ${cardPosition(version).y + cardHeight(version) / 2} H ${cardPosition(version).x + CARD_WIDTH + terminalTailEnd(version)}`" fill="none" :stroke="versionColor(version)" :stroke-width="connectionWidth(version)" stroke-linecap="butt" marker-end="url(#arrow)" />
               </template>
-              <path v-for="(link, index) in state.copyLinks" :key="`copy-${index}`" :d="copyLinkPath(link)"
-                class="copy-link" fill="none" stroke="#cf7b32" stroke-width="3" vector-effect="non-scaling-stroke" stroke-dasharray="7 4" marker-end="url(#copy-arrow)"
-                pointer-events="stroke" role="button" tabindex="0"
-                :aria-label="`Copied entry connection from ${displayVersionId(link.sourceVersionId)} to ${displayVersionId(link.targetVersionId)}. Double-click to switch versions.`"
-                @dblclick.stop="activateCopyLink(link)"
-                @keydown.enter.prevent="activateCopyLink(link)" @keydown.space.prevent="activateCopyLink(link)">
-                <title>Copied entry connection</title>
-              </path>
+              <g v-for="(link, index) in state.copyLinks" :key="`copy-${index}`">
+                <path :d="copyLinkPath(link)" class="copy-link" fill="none" stroke="#cf7b32"
+                  stroke-width="3" vector-effect="non-scaling-stroke" stroke-dasharray="7 4"
+                  marker-end="url(#copy-arrow)" pointer-events="none" />
+                <path :d="copyLinkPath(link)" class="copy-link-hit" fill="none" stroke="transparent"
+                  stroke-width="18" vector-effect="non-scaling-stroke" pointer-events="stroke"
+                  role="button" tabindex="0"
+                  :aria-label="`Copied entry connection from ${displayVersionId(link.sourceVersionId)} to ${displayVersionId(link.targetVersionId)}. Double-click to switch versions.`"
+                  @click.stop="handleCopyLinkClick(link, $event)"
+                  @keydown.enter.prevent.stop="activateCopyLink(link)"
+                  @keydown.space.prevent.stop="activateCopyLink(link)">
+                  <title>Copied entry connection</title>
+                </path>
+              </g>
             </svg>
 
             <article v-for="version in versions" :key="version.id" class="version-card" :class="{ active: version.id === active.id, compared: compareIds.includes(version.id), 'compare-pick': compareMode, compact: zoom < 0.66, previewing: isPreviewing(version), 'root-version': version.id === 'v0' }"
@@ -2919,9 +2948,58 @@ function resetWorkspace() {
         <div class="compare-summary">
           <span class="compare-count">{{ comparison.length }}</span>
           <span>{{ comparison.length === 1 ? 'entry differs' : 'entries differ' }}</span>
-          <span class="comparison-hint">Click an entry to highlight its counterpart.</span>
         </div>
-        <div class="comparison-panels" :class="{ 'three-panels': mergeMode }">
+        <div v-if="mergeMode" class="merge-workspace">
+          <div class="merge-view-head">
+            <strong>Source</strong><strong>Merged result</strong><strong>Target</strong>
+          </div>
+          <div v-for="row in mergeRows" :key="row.id" class="merge-view-row" :data-node="row.id"
+            :class="{ shared: row.shared, omitted: !row.resultEntry }">
+            <div class="merge-entry-cell" :style="{ paddingLeft: `${8 + (row.sourceEntry ? row.depth : 0) * 12}px` }">
+              <template v-if="row.sourceEntry">
+                <strong>{{ row.sourceEntry.node.value }}</strong>
+                <small>{{ row.sourceEntry.path }}</small>
+              </template>
+              <span v-else class="merge-empty">No source entry</span>
+            </div>
+            <div class="merge-result-cell">
+              <template v-if="row.resultEntry">
+                <strong>{{ row.resultEntry.node.value }}</strong>
+                <small class="merge-result-path">{{ row.resultEntry.path }}</small>
+              </template>
+              <span v-else class="merge-empty">Disregarded</span>
+              <div class="merge-entry-actions">
+                <button v-if="row.sourceEntry" :class="{ selected: mergeDecisionFor(row) === 'source' }"
+                  @click="setMergeDecision(row.id, 'source')">Source</button>
+                <button v-if="row.targetEntry" :class="{ selected: mergeDecisionFor(row) === 'target' }"
+                  @click="setMergeDecision(row.id, 'target')">Target</button>
+                <button v-if="row.shared" :class="{ selected: mergeDecisionFor(row) === 'combine' }"
+                  @click="setMergeDecision(row.id, 'combine')">Combine</button>
+                <button :class="{ selected: mergeDecisionFor(row) === 'omit' }"
+                  @click="setMergeDecision(row.id, 'omit')">Omit</button>
+              </div>
+              <label v-if="row.resultEntry" class="merge-parent-select">
+                Parent
+                <select :value="mergeParentOverrides[row.id] ?? row.resultEntry.parentId ?? ''"
+                  :aria-label="`Parent for ${row.resultEntry.node.value} in merged result`"
+                  @change="onMergeParentChange(row.id, $event)">
+                  <option value="">Root</option>
+                  <option v-for="[parentId, parent] in mergeParentOptions(row.id)" :key="parentId" :value="parentId">
+                    {{ parent.path }}
+                  </option>
+                </select>
+              </label>
+            </div>
+            <div class="merge-entry-cell" :style="{ paddingLeft: `${8 + (row.targetEntry ? row.depth : 0) * 12}px` }">
+              <template v-if="row.targetEntry">
+                <strong>{{ row.targetEntry.node.value }}</strong>
+                <small>{{ row.targetEntry.path }}</small>
+              </template>
+              <span v-else class="merge-empty">No target entry</span>
+            </div>
+          </div>
+        </div>
+        <div v-else class="comparison-panels">
           <section v-for="(panel, panelIndex) in comparisonPanels" :key="panel.id" class="comparison-panel">
             <header><span>{{ panel.label }}</span><strong>{{ panel.version.branch }} · S{{ panel.version.step }}</strong></header>
             <svg :viewBox="comparisonViewBox" role="img" :aria-label="`${panel.label} treemap comparison`">
@@ -2935,7 +3013,7 @@ function resetWorkspace() {
               <rect v-for="tile in panel.tiles" :key="tile.id"
                 :x="tile.x" :y="tile.y" :width="tile.width" :height="tile.height"
                 :data-node="tile.id" role="button" tabindex="0"
-                :class="['comparison-tile', comparisonKind(tile.id), { linked: comparisonSelectedNode === tile.id, 'merge-conflict': mergePreview?.conflicts.some((conflict) => conflict.nodeId === tile.id) }]"
+                :class="['comparison-tile', comparisonKind(tile.id), { linked: comparisonSelectedNode === tile.id }]"
                 :aria-label="`${tile.label}, ${comparisonKind(tile.id)}`"
                 @click="selectComparedNode(tile.id)"
                 @keydown.enter.prevent="selectComparedNode(tile.id)" @keydown.space.prevent="selectComparedNode(tile.id)" />
@@ -2944,25 +3022,14 @@ function resetWorkspace() {
             </svg>
           </section>
         </div>
-        <div class="comparison-legend" aria-label="Difference legend">
+        <div v-if="!mergeMode" class="comparison-legend" aria-label="Difference legend">
           <span class="unchanged">Unchanged</span><span class="added">Added</span><span class="removed">Removed</span>
           <span class="modified">Modified</span><span class="relocated">Relocated / hierarchy changed</span>
         </div>
-        <div v-if="mergeMode && mergePreview" class="merge-resolution">
-          <div class="merge-resolution-heading">
-            <strong>Merge preview</strong>
-            <span>{{ mergePreview.conflicts.length ? `${mergePreview.conflicts.length} conflict${mergePreview.conflicts.length === 1 ? '' : 's'} to resolve` : 'No conflicts · changes are combined' }}</span>
-          </div>
-          <div v-for="conflict in mergePreview.conflicts" :key="conflict.key" class="merge-conflict">
-            <div><strong>{{ conflict.label }}</strong><small>Source: {{ conflict.sourceValue }} · Target: {{ conflict.targetValue }}</small></div>
-            <div class="merge-conflict-actions">
-              <button :class="{ selected: mergeResolutions[conflict.key] === 'source' }" @click="mergeResolutions[conflict.key] = 'source'">Use source</button>
-              <button :class="{ selected: mergeResolutions[conflict.key] === 'target' }" @click="mergeResolutions[conflict.key] = 'target'">Use target</button>
-            </div>
-          </div>
+        <div v-if="mergeMode" class="merge-confirm-row">
           <div class="merge-actions">
             <button class="cancel-button" @click="closeVersionSelection">Abort merge</button>
-            <button class="primary-button" :disabled="!mergeConflictsResolved || isReadOnly" @click="confirmMerge">
+            <button class="primary-button" :disabled="!mergeResult" @click="confirmMerge">
               <Check :size="15" /> Confirm merge
             </button>
           </div>
