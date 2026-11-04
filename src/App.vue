@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { hierarchy, treemap } from 'd3-hierarchy'
 import { getClientId, PeerRoom, type RoomStatus } from './collaboration'
 import {
   GitBranch, GitCompareArrows, Plus, Maximize, Search, Copy, Trash2,
@@ -155,7 +154,8 @@ const active = computed(() => versions.value.find((version) => version.id === st
 const selectedNode = ref<string | null>(null)
 const selectedNodes = ref<string[]>([])
 const remoteUsers = ref<Record<string, RemoteUser>>({})
-const hoveredNode = ref<string | null>(null)
+const hoveredNode = ref<{ versionId: string; nodeId: string } | null>(null)
+const entryTooltip = ref<{ versionId: string; nodeId: string; description: string; x: number; y: number } | null>(null)
 const pings = ref<Ping[]>([])
 const pingMode = ref(false)
 const darkMode = ref(localStorage.getItem('canopy-theme') === 'dark')
@@ -164,6 +164,7 @@ const sidebarCollapsed = ref(false)
 const compareMode = ref(false)
 const compareIds = ref<string[]>([])
 const zoom = ref(1)
+const isReadOnly = computed(() => zoom.value <= 0.35)
 const pan = ref({ x: 40, y: 0 })
 const graphCanvas = ref<HTMLElement | null>(null)
 const canvasSize = ref({ width: window.innerWidth, height: Math.max(400, window.innerHeight - 209) })
@@ -217,6 +218,8 @@ let toastTimer = 0
 let presenceTimer = 0
 let pingClickTimer = 0
 let pingSequence = 0
+let tileTooltipTimer = 0
+let tilePointer = { x: 0, y: 0 }
 let persistenceQueue = Promise.resolve()
 let skipNextPersist = false
 let collaborationRoom = ''
@@ -229,6 +232,15 @@ watch(selectedNode, (nodeId) => {
   else if (!selectedNodes.value.includes(nodeId)) selectedNodes.value = [nodeId]
 })
 watch([selectedNodes, () => active.value.id], publishPresence, { deep: true })
+watch(isReadOnly, (readOnly) => {
+  if (!readOnly) return
+  setSelectedNodes([])
+  editor.value = null
+  treeDrag.value = null
+  draggedNode.value = null
+  overNode.value = null
+  spatialPreview.value = null
+})
 watch(() => active.value.data, (data) => {
   const valid = selectedNodes.value.filter((id) => !!findNode(data, id))
   if (valid.length !== selectedNodes.value.length) setSelectedNodes(valid)
@@ -635,10 +647,35 @@ function showPing(ping: Ping) {
   pings.value = [...pings.value.filter((item) => item.id !== ping.id), ping]
   window.setTimeout(() => {
     pings.value = pings.value.filter((item) => item.id !== ping.id)
-  }, 1400)
+  }, 1600)
+  playPingSound()
+}
+function playPingSound() {
+  try {
+    const context = new window.AudioContext()
+    const play = () => {
+      const oscillator = context.createOscillator()
+      const gain = context.createGain()
+      oscillator.type = 'sine'
+      oscillator.frequency.setValueAtTime(660, context.currentTime)
+      oscillator.frequency.exponentialRampToValueAtTime(440, context.currentTime + 0.11)
+      gain.gain.setValueAtTime(0.045, context.currentTime)
+      gain.gain.exponentialRampToValueAtTime(0.001, context.currentTime + 0.12)
+      oscillator.connect(gain)
+      gain.connect(context.destination)
+      oscillator.start()
+      oscillator.stop(context.currentTime + 0.12)
+      window.setTimeout(() => { void context.close().catch(() => undefined) }, 200)
+    }
+    if (context.state === 'suspended') void context.resume().then(play).catch(() => { void context.close() })
+    else play()
+  } catch {
+    // Audio is optional; the visual ping still works when browser audio is unavailable.
+  }
 }
 function handlePingPointer(event: PointerEvent) {
-  if (!pingMode.value || event.button !== 0) return
+  if (!event.altKey || event.button !== 0
+    || (event.target as HTMLElement).closest('.canvas-hotbar, button')) return
   event.preventDefault()
   event.stopImmediatePropagation()
   suppressPingClick = true
@@ -668,6 +705,31 @@ function onRoomStatus(status: RoomStatus) {
   roomStatus.value = status
   if (status.state === 'connected' || status.state === 'hosting') publishPresence()
   if (status.state === 'idle') remoteUsers.value = {}
+}
+function enterTile(event: PointerEvent, version: Version, nodeId: string) {
+  hoveredNode.value = { versionId: version.id, nodeId }
+  window.clearTimeout(tileTooltipTimer)
+  entryTooltip.value = null
+  if (treeDrag.value) return
+  const description = findNode(cardData(version), nodeId)?.description?.trim()
+  if (!description) return
+  tilePointer = { x: event.clientX, y: event.clientY }
+  tileTooltipTimer = window.setTimeout(() => {
+    if (hoveredNode.value?.versionId === version.id && hoveredNode.value.nodeId === nodeId) {
+      entryTooltip.value = { versionId: version.id, nodeId, description, ...tilePointer }
+    }
+  }, 2000)
+}
+function moveTileTooltip(event: PointerEvent, versionId: string, nodeId: string) {
+  tilePointer = { x: event.clientX, y: event.clientY }
+  if (entryTooltip.value?.versionId === versionId && entryTooltip.value.nodeId === nodeId) {
+    entryTooltip.value = { ...entryTooltip.value, x: event.clientX, y: event.clientY }
+  }
+}
+function leaveTile(versionId: string, nodeId: string) {
+  if (hoveredNode.value?.versionId === versionId && hoveredNode.value.nodeId === nodeId) hoveredNode.value = null
+  if (entryTooltip.value?.versionId === versionId && entryTooltip.value.nodeId === nodeId) entryTooltip.value = null
+  window.clearTimeout(tileTooltipTimer)
 }
 function expireRemoteUsers() {
   const cutoff = Date.now() - 15000
@@ -828,14 +890,37 @@ function displayVersionId(id: string) {
   return peerId ? `${peerId[1]}-${peerId[2]!.slice(0, 4)}` : id
 }
 function childLayouts(node: TreeNode, positions?: Record<string, { x: number; y: number }>) {
-  let nextX = 0
-  return node.children.map((child) => {
-    const size = treeDimensions(child, positions)
-    const x = nextX
-    const y = 0
-    nextX = Math.max(nextX, x + size.width)
-    return { node: child, x, y, ...size }
-  })
+  const children = node.children.map((child) => ({ node: child, ...treeDimensions(child, positions) }))
+  if (!children.length) return []
+
+  let best: { score: number; layouts: Array<typeof children[number] & { x: number; y: number }> } | null = null
+  for (let columns = 1; columns <= children.length; columns += 1) {
+    const rows = Math.ceil(children.length / columns)
+    const columnWidths = Array.from({ length: columns }, (_, column) =>
+      Math.max(...children.filter((_, index) => index % columns === column).map((child) => child.width)))
+    const rowHeights = Array.from({ length: rows }, (_, row) =>
+      Math.max(...children.slice(row * columns, (row + 1) * columns).map((child) => child.height)))
+    const columnOffsets = columnWidths.map((_, column) =>
+      columnWidths.slice(0, column).reduce((sum, width) => sum + width + TREE_PADDING, 0))
+    const rowOffsets = rowHeights.map((_, row) =>
+      rowHeights.slice(0, row).reduce((sum, height) => sum + height + TREE_PADDING, 0))
+    const width = columnWidths.reduce((sum, item) => sum + item, 0) + TREE_PADDING * (columns - 1) + TREE_PADDING * 2
+    const height = rowHeights.reduce((sum, item) => sum + item, 0)
+      + TREE_PADDING * (rows - 1) + TREE_PADDING * 2 + TREE_HEADER_HEIGHT
+    const childArea = children.reduce((sum, child) => sum + child.width * child.height, 0)
+    const waste = Math.max(0, (width * height - childArea) / Math.max(1, childArea))
+    const score = Math.abs(Math.log((width / height) / VERSION_TREEMAP_ASPECT)) + waste * 0.025
+    if (best && score >= best.score) continue
+    best = {
+      score,
+      layouts: children.map((child, index) => ({
+        ...child,
+        x: TREE_PADDING + columnOffsets[index % columns]!,
+        y: TREE_PADDING + TREE_HEADER_HEIGHT + rowOffsets[Math.floor(index / columns)]!,
+      })),
+    }
+  }
+  return best!.layouts
 }
 function outerTreemapDimensions(node: TreeNode, positions?: Record<string, { x: number; y: number }>): { width: number; height: number } {
   const size = treeDimensions(node, positions)
@@ -849,10 +934,8 @@ function treeDimensions(node: TreeNode, positions?: Record<string, { x: number; 
   if (!node.children.length) return { width: LEAF_TILE_WIDTH, height: LEAF_TILE_HEIGHT }
   const children = childLayouts(node, positions)
   return {
-    width: children.reduce((width, child) => width + child.width, 0)
-      + TREE_PADDING * Math.max(0, children.length - 1) + TREE_PADDING * 2,
-    height: Math.max(...children.map((child) => child.height))
-      + TREE_PADDING * 2 + TREE_HEADER_HEIGHT,
+    width: Math.max(...children.map((child) => child.x + child.width)) + TREE_PADDING,
+    height: Math.max(...children.map((child) => child.y + child.height)) + TREE_PADDING,
   }
 }
 function mapGeometry(
@@ -1074,6 +1157,7 @@ function reflowLayout() {
 }
 
 function createVersion(data: TreeNode[], change: string) {
+  if (isReadOnly.value) return null
   const parent = active.value
   const wasCentered = isVersionCentered(parent)
   const siblings = versions.value.filter((version) => version.parentId === parent.id)
@@ -1119,11 +1203,12 @@ function createVersion(data: TreeNode[], change: string) {
 }
 
 function addEntry(parentId: string | null = null) {
+  if (isReadOnly.value) return
   editor.value = { mode: 'create', parentId, nodeId: null, value: '', description: '' }
 }
 
 function commitEditor() {
-  if (!editor.value) return
+  if (isReadOnly.value || !editor.value) return
   const { mode, parentId, nodeId, value: rawValue, description: rawDescription } = editor.value
   const value = rawValue.trim()
   const description = rawDescription.trim()
@@ -1151,12 +1236,14 @@ function commitEditor() {
 }
 
 function renameEntry(id: string) {
+  if (isReadOnly.value) return
   const node = findNode(active.value.data, id)
   if (!node) return
   editor.value = { mode: 'rename', parentId: null, nodeId: id, value: node.value, description: node.description ?? '' }
 }
 
 function deleteEntry(id: string) {
+  if (isReadOnly.value) return
   const data = clone(active.value.data)
   const node = findNode(data, id)
   if (!node) return
@@ -1170,6 +1257,7 @@ function deleteEntry(id: string) {
 }
 
 function detachEntry(id: string, position?: { x: number; y: number }) {
+  if (isReadOnly.value) return
   const data = clone(active.value.data)
   const parent = findParent(data, id)
   if (!parent) return
@@ -1178,8 +1266,8 @@ function detachEntry(id: string, position?: { x: number; y: number }) {
     data.push(detached)
     const version = createVersion(data, `Detach ${detached.value}`)
     if (version && position) {
-      version.positions ??= {}
-      version.positions[id] = position
+      version.positions = positionsAfterMove(version.data, version.positions, id, position)
+      version.mapView = fitMapViewToLayout(version.id, version.data, version.positions, mapViewFor(version))
     }
   }
 }
@@ -1241,6 +1329,7 @@ const previewLayout = computed(() => {
 })
 
 function attachEntry(sourceId: string, targetId: string) {
+  if (isReadOnly.value) return
   if (!canAttach(sourceId, targetId)) return
   const parent = findParent(active.value.data, sourceId)
   if (parent?.id === targetId) return
@@ -1357,7 +1446,7 @@ function onTileClick(version: Version, nodeId: string, event: MouseEvent) {
     return
   }
   state.value.activeId = version.id
-  if (zoom.value * mapViewFor(version).zoom <= 0.35) {
+  if (isReadOnly.value) {
     setSelectedNodes([])
   } else if (event.shiftKey) {
     const selection = selectedNodes.value.includes(nodeId)
@@ -1446,12 +1535,11 @@ function zoomAt(nextZoom: number, x = canvasSize.value.width / 2, y = canvasSize
 function zoomIn() { zoomAt(zoom.value * 1.25) }
 function zoomOut() { zoomAt(zoom.value / 1.25) }
 function fitGraph() {
-  cancelPanAnimation()
-  zoom.value = fitZoom.value
-  pan.value = {
-    x: (canvasSize.value.width - graphBounds.value.width * zoom.value) / 2,
-    y: (canvasSize.value.height - graphBounds.value.height * zoom.value) / 2,
-  }
+  const targetZoom = fitZoom.value
+  animateCamera(targetZoom, {
+    x: (canvasSize.value.width - graphBounds.value.width * targetZoom) / 2,
+    y: (canvasSize.value.height - graphBounds.value.height * targetZoom) / 2,
+  })
 }
 function versionColor(version: Version) {
   if (version.id === 'v0') return '#7b8580'
@@ -1486,6 +1574,38 @@ function tileSelectionHighlights(versionId: string, nodeId: string) {
 function descendantsCount(nodes: TreeNode[]) { return countNodes(nodes) }
 function treeDepth(nodes: TreeNode[]): number {
   return nodes.length ? 1 + Math.max(...nodes.map((node) => treeDepth(node.children))) : 0
+}
+function versionAction(version: Version) {
+  const previous = version.parentId ? versions.value.find((item) => item.id === version.parentId) : undefined
+  if (!previous) return { label: 'root', symbol: '•' }
+  const before = flattenPaths(previous.data)
+  const after = flattenPaths(version.data)
+  const added = [...after.keys()].filter((id) => !before.has(id)).length
+  const removed = [...before.keys()].filter((id) => !after.has(id)).length
+  let renamed = 0
+  let modified = 0
+  for (const [id, item] of after) {
+    const old = before.get(id)
+    if (!old) continue
+    const oldNode = findNode(previous.data, id)
+    const newNode = findNode(version.data, id)
+    if (item.value !== old.value) renamed += 1
+    if ((oldNode?.description ?? '') !== (newNode?.description ?? '')) modified += 1
+  }
+  const moved = [...after].filter(([id, item]) => before.has(id) && before.get(id)!.parentId !== item.parentId)
+  if (added && !removed && !renamed && !modified) return { label: 'add', symbol: '+' }
+  if (removed && !added && !renamed && !modified) return { label: 'delete', symbol: '−' }
+  if (moved.length && !added && !removed && !renamed && !modified) {
+    const item = moved[0]!
+    const oldParent = before.get(item[0])!.parentId
+    if (oldParent === null) return { label: 'attach', symbol: '↳' }
+    if (item[1].parentId === null) return { label: 'detach', symbol: '↗' }
+    return { label: 'move', symbol: '↔' }
+  }
+  if ((renamed || modified) && !added && !removed && !moved.length) {
+    return renamed === 1 && modified === 0 ? { label: 'rename', symbol: '✎' } : { label: 'modify', symbol: '~' }
+  }
+  return { label: 'modify', symbol: '~' }
 }
 function cardData(version: Version): TreeNode[] {
   return version.id === active.value.id && previewLayout.value ? previewLayout.value.data : version.data
@@ -1604,6 +1724,16 @@ function copyLinkPath(link: CopyLink) {
   const controlY = Math.min(source.y, target.y) - lift
   return `M ${source.x} ${source.y} C ${source.x} ${controlY}, ${target.x} ${controlY}, ${target.x} ${target.y}`
 }
+function activateCopyLink(link: CopyLink) {
+  const versionId = active.value.id === link.sourceVersionId
+    ? link.targetVersionId
+    : link.sourceVersionId
+  const version = versions.value.find((item) => item.id === versionId)
+  if (!version) return
+  state.value.activeId = version.id
+  setSelectedNodes([])
+  centerVersion(version)
+}
 
 function tilesFor(
   root: TreeNode,
@@ -1622,41 +1752,13 @@ function tilesFor(
       x, y, width, height, depth,
     })
     if (!node.children.length) return
-    const innerWidth = width - TREE_PADDING * 2
-    const innerHeight = height - TREE_PADDING * 2 - TREE_HEADER_HEIGHT
-    const childSizes = new Map(node.children.map((child) => [child.id, treeDimensions(child)]))
-    const wrapper: TreeNode = {
-      id: `layout-${node.id}`, value: '', children: node.children.map((child) => ({ ...child, children: [] })),
-    }
-    const layout = treemap<TreeNode>()
-      .tile((parent, x0, y0, _x1, y1) => {
-        let nextX = x0
-        for (const child of parent.children ?? []) {
-          const childWidth = childSizes.get(child.data.id)?.width
-          if (childWidth === undefined) continue
-          child.x0 = nextX
-          child.x1 = nextX + childWidth
-          child.y0 = y0
-          child.y1 = y1
-          nextX = child.x1 + TREE_PADDING
-        }
-      })
-      .size([innerWidth, innerHeight])
-      .paddingInner(0)
-    const rootLayout = hierarchy(wrapper, (item) => item.children)
-      .sum((item) => {
-        const childSize = childSizes.get(item.id)
-        return childSize ? childSize.width * childSize.height : 0
-      })
-    for (const childLayout of layout(rootLayout).children ?? []) {
-      const child = node.children.find((item) => item.id === childLayout.data.id)
-      if (!child) continue
+    for (const childLayout of childLayouts(node)) {
       place(
-        child,
-        x + TREE_PADDING + childLayout.x0,
-        y + TREE_PADDING + TREE_HEADER_HEIGHT + childLayout.y0,
-        childLayout.x1 - childLayout.x0,
-        childLayout.y1 - childLayout.y0,
+        childLayout.node,
+        x + childLayout.x,
+        y + childLayout.y,
+        childLayout.width,
+        childLayout.height,
         depth + 1,
       )
     }
@@ -1675,6 +1777,10 @@ function tileForNode(
   }
   return undefined
 }
+const draggedOriginalTile = computed(() => {
+  if (!draggedNode.value || !previewLayout.value) return null
+  return tileForNode(active.value.data, active.value.positions, draggedNode.value) ?? null
+})
 function positionAt(version: Version, clientX: number, clientY: number, map: HTMLElement) {
   const drag = treeDrag.value
   const rect = map.getBoundingClientRect()
@@ -1715,7 +1821,45 @@ function treeNodeAt(clientX: number, clientY: number, map: HTMLElement) {
   }
   return null
 }
+function rootPositionIsAvailable(
+  version: Version,
+  nodeId: string,
+  position: { x: number; y: number },
+  map: HTMLElement,
+  data = version.data,
+  positions = version.positions,
+) {
+  const node = findNode(data, nodeId)
+  if (!node || !data.some((root) => root.id === nodeId)) return false
+  const view = mapViewFor(version)
+  const size = outerTreemapDimensions(node)
+  const left = position.x * CARD_WIDTH
+  const top = position.y * TREE_MAP_HEIGHT
+  const bounds = {
+    left: -view.panX / view.zoom + MAP_PADDING,
+    top: -view.panY / view.zoom + MAP_PADDING,
+    right: (map.clientWidth - view.panX) / view.zoom - MAP_PADDING,
+    bottom: (map.clientHeight - view.panY) / view.zoom - MAP_PADDING,
+  }
+  if (left < bounds.left || top < bounds.top
+    || left + size.width > bounds.right || top + size.height > bounds.bottom) return false
+  const occupied = data.filter((root) => root.id !== nodeId)
+  return nearestPositionIsFree(position, size, occupied, { ...positions, [nodeId]: position })
+}
+function canMoveToEmptySpace(version: Version, nodeId: string, position: { x: number; y: number }, map: HTMLElement) {
+  const data = clone(version.data)
+  let positions = version.positions
+  if (!data.some((root) => root.id === nodeId)) {
+    const detached = removeNode(data, nodeId)
+    if (!detached) return false
+    data.push(detached)
+    positions = positionsForData(version.data, data, version.positions, version.mapView, mapViewport(version))
+  }
+  return rootPositionIsAvailable(version, nodeId, position, map, data, positions)
+}
 function placeRoot(version: Version, nodeId: string, position: { x: number; y: number }) {
+  const map = document.querySelector<HTMLElement>(`.version-card[data-version="${version.id}"] .mini-map`)
+  if (isReadOnly.value || !map || !rootPositionIsAvailable(version, nodeId, position, map)) return false
   const defaults = defaultPositions(version.data, version.positions)
   const defaultPosition = defaults[nodeId]!
   const normalizedPosition = Math.abs(position.x - defaultPosition.x) < 0.002 && Math.abs(position.y - defaultPosition.y) < 0.002
@@ -1750,6 +1894,7 @@ function spatialPreviewStyle(version: Version) {
 }
 
 function onTileContext(event: MouseEvent, nodeId: string) {
+  if (isReadOnly.value) return
   event.preventDefault()
   setSelectedNodes([nodeId])
   menu.value = { x: event.clientX, y: event.clientY, nodeId }
@@ -1814,6 +1959,7 @@ function startMapPan(event: PointerEvent, version: Version) {
   }
 }
 function startMapTileGesture(event: PointerEvent, version: Version, nodeId: string) {
+  if (isReadOnly.value) return
   state.value.activeId = version.id
   if (event.shiftKey) {
     startMapPan(event, version)
@@ -1850,20 +1996,40 @@ function endMapPan(event: PointerEvent) {
   } else if (transientMapViews.value[versionId]) scheduleMapViewCommit(versionId)
 }
 function centerVersion(version: Version) {
-  cancelPanAnimation()
   const position = cardPosition(version)
   const availableWidth = Math.max(1, canvasSize.value.width - 100)
   const availableHeight = Math.max(1, canvasSize.value.height - 100)
-  zoom.value = Math.max(0.005, Math.min(ZOOM_MAX, availableWidth / CARD_WIDTH, availableHeight / cardHeight(version)))
-  pan.value = {
-    x: canvasSize.value.width / 2 - (position.x + CARD_WIDTH / 2) * zoom.value,
-    y: canvasSize.value.height / 2 - (position.y + cardHeight(version) / 2) * zoom.value,
-  }
+  const targetZoom = Math.max(0.005, Math.min(ZOOM_MAX, availableWidth / CARD_WIDTH, availableHeight / cardHeight(version)))
+  animateCamera(targetZoom, {
+    x: canvasSize.value.width / 2 - (position.x + CARD_WIDTH / 2) * targetZoom,
+    y: canvasSize.value.height / 2 - (position.y + cardHeight(version) / 2) * targetZoom,
+  }, 420)
 }
 function centerActive() { centerVersion(active.value) }
+function centerVersionById(versionId?: string | null) {
+  const version = versions.value.find((item) => item.id === versionId)
+  if (version) centerVersion(version)
+}
 function cancelPanAnimation() {
   if (panAnimationFrame !== null) cancelAnimationFrame(panAnimationFrame)
   panAnimationFrame = null
+}
+function animateCamera(targetZoom: number, targetPan: { x: number; y: number }, duration = 360) {
+  cancelPanAnimation()
+  const start = { zoom: zoom.value, panX: pan.value.x, panY: pan.value.y }
+  const startedAt = performance.now()
+  const animate = (time: number) => {
+    const progress = Math.min(1, (time - startedAt) / duration)
+    const eased = 1 - (1 - progress) ** 3
+    zoom.value = start.zoom + (targetZoom - start.zoom) * eased
+    pan.value = {
+      x: start.panX + (targetPan.x - start.panX) * eased,
+      y: start.panY + (targetPan.y - start.panY) * eased,
+    }
+    if (progress < 1) panAnimationFrame = requestAnimationFrame(animate)
+    else panAnimationFrame = null
+  }
+  panAnimationFrame = requestAnimationFrame(animate)
 }
 function isVersionCentered(version: Version) {
   const position = cardPosition(version)
@@ -1915,7 +2081,7 @@ function panToVersion(version: Version, centerImmediately: boolean) {
 }
 function startTreeDrag(event: PointerEvent, id: string) {
   if (event.button !== 0) return
-  if (zoom.value <= 0.35) return
+  if (isReadOnly.value) return
   event.preventDefault()
   const map = (event.currentTarget as SVGRectElement).closest<HTMLElement>('.mini-map')
   const rect = map?.getBoundingClientRect()
@@ -1952,13 +2118,10 @@ function moveTreeDrag(event: PointerEvent) {
   if (targetId === drag.id) {
     overNode.value = null
     invalidNode.value = null
-    if (active.value.data.some((node) => node.id === drag.id) && map) {
-      spatialPreview.value = {
-        ...positionAt(active.value, event.clientX, event.clientY, map),
-        versionId: active.value.id,
-        nodeId: drag.id,
-      }
-    } else spatialPreview.value = null
+    const position = map ? positionAt(active.value, event.clientX, event.clientY, map) : null
+    spatialPreview.value = position && map && canMoveToEmptySpace(active.value, drag.id, position, map)
+      ? { ...position, versionId: active.value.id, nodeId: drag.id }
+      : null
     return
   }
   const parent = findParent(active.value.data, drag.id)
@@ -1977,8 +2140,12 @@ function moveTreeDrag(event: PointerEvent) {
   const versionId = map?.closest('.version-card')?.getAttribute('data-version')
   if (map && versionId === active.value.id) {
     const point = positionAt(active.value, event.clientX, event.clientY, map)
-    spatialPreview.value = { ...point, versionId: active.value.id, nodeId: drag.id }
-  } else spatialPreview.value = null
+    spatialPreview.value = canMoveToEmptySpace(active.value, drag.id, point, map)
+      ? { ...point, versionId: active.value.id, nodeId: drag.id }
+      : null
+  } else {
+    spatialPreview.value = null
+  }
 }
 function finishTreeDrag(event: PointerEvent) {
   const drag = treeDrag.value
@@ -1998,14 +2165,12 @@ function finishTreeDrag(event: PointerEvent) {
   if (drag.moved && targetNode && canAttach(drag.id, targetNode)) {
     attachEntry(drag.id, targetNode)
     committed = true
-  } else if (drag.moved && !effectiveHitNode && map && targetVersion === active.value.id) {
+  } else if (drag.moved && spatialPreview.value?.nodeId === drag.id && map && targetVersion === active.value.id) {
     if (active.value.data.some((node) => node.id === drag.id)) {
-      const position = positionAt(active.value, event.clientX, event.clientY, map)
-      committed = placeRoot(active.value, drag.id, position)
+      committed = placeRoot(active.value, drag.id, spatialPreview.value)
     } else {
       if (sourceParent) {
-        const position = spatialPreview.value ?? positionAt(active.value, event.clientX, event.clientY, map)
-        detachEntry(drag.id, position)
+        detachEntry(drag.id, spatialPreview.value)
         committed = true
       }
     }
@@ -2067,6 +2232,7 @@ onUnmounted(() => {
   peerRoom.close()
   for (const versionId of mapViewTimers.keys()) commitMapView(versionId)
   cancelPanAnimation()
+  window.clearTimeout(tileTooltipTimer)
   canvasObserver?.disconnect()
   window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('pointermove', moveTreeDrag)
@@ -2085,7 +2251,7 @@ function copyEntry(nodeId: string) {
   notify(`Copied ${node.value}`)
 }
 function pasteEntry() {
-  if (!clipboard.value) return
+  if (isReadOnly.value || !clipboard.value) return
   const copied = clone(clipboard.value)
   const rekey = (node: TreeNode): TreeNode => ({ ...node, id: `n${state.value.nextNode++}-${CLIENT_ID}`, children: node.children.map(rekey) })
   const newNode = rekey(copied.node)
@@ -2159,9 +2325,6 @@ function resetWorkspace() {
             <span>{{ darkMode ? 'Light mode' : 'Dark mode' }}</span>
           </button>
         </section>
-        <section v-if="zoom <= 0.35" class="side-section lod-section">
-          <span class="lod-badge">READ ONLY</span>
-        </section>
         <div class="sidebar-fill"></div>
       </aside>
 
@@ -2169,7 +2332,7 @@ function resetWorkspace() {
         <div ref="graphCanvas" class="graph-canvas" :class="{ 'ping-mode': pingMode }" @pointerdown.capture="handlePingPointer" @click="onCanvasClick" @pointerdown="startCanvasPan" @pointermove="moveCanvasPan" @pointerup="endCanvasPan" @pointercancel="endCanvasPan">
           <div class="canvas-grid"></div>
           <div class="graph-world" :style="{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }">
-            <svg class="connection-layer" :width="graphBounds.width + 260" :height="graphBounds.height" aria-hidden="true">
+            <svg class="connection-layer" :width="graphBounds.width + 260" :height="graphBounds.height">
               <defs>
                 <marker id="arrow" viewBox="0 0 10 10" refX="0" refY="5" :markerWidth="TERMINAL_ARROW_SIZE" :markerHeight="TERMINAL_ARROW_SIZE" markerUnits="strokeWidth" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke" stroke="#f5f7f4" stroke-width="0.8" stroke-linejoin="round" /></marker>
                 <marker id="copy-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#cf7b32" /></marker>
@@ -2187,7 +2350,11 @@ function resetWorkspace() {
                 <path :d="`M ${cardPosition(version).x + CARD_WIDTH} ${cardPosition(version).y + cardHeight(version) / 2} H ${cardPosition(version).x + CARD_WIDTH + terminalTailEnd(version)}`" fill="none" :stroke="versionColor(version)" :stroke-width="connectionWidth(version)" stroke-linecap="butt" marker-end="url(#arrow)" />
               </template>
               <path v-for="(link, index) in state.copyLinks" :key="`copy-${index}`" :d="copyLinkPath(link)"
-                fill="none" stroke="#cf7b32" stroke-width="3" vector-effect="non-scaling-stroke" stroke-dasharray="7 4" marker-end="url(#copy-arrow)">
+                class="copy-link" fill="none" stroke="#cf7b32" stroke-width="3" vector-effect="non-scaling-stroke" stroke-dasharray="7 4" marker-end="url(#copy-arrow)"
+                pointer-events="stroke" role="button" tabindex="0"
+                :aria-label="`Copied entry connection from ${displayVersionId(link.sourceVersionId)} to ${displayVersionId(link.targetVersionId)}. Double-click to switch versions.`"
+                @dblclick.stop="activateCopyLink(link)"
+                @keydown.enter.prevent="activateCopyLink(link)" @keydown.space.prevent="activateCopyLink(link)">
                 <title>Copied entry connection</title>
               </path>
             </svg>
@@ -2206,12 +2373,15 @@ function resetWorkspace() {
                 <button class="card-menu quiet-icon" title="Version actions" @click.stop="menu = { x: $event.clientX, y: $event.clientY, nodeId: null, versionId: version.id }; selectedNode = null; state.activeId = version.id"><MoreHorizontal :size="17" /></button>
               </div>
               <div v-if="isPreviewing(version)" class="preview-badge">{{ previewLabel() }}</div>
-              <div v-if="zoom <= 0.35 && (version.id !== 'v0' || version.data.length)" class="overview-map">
-                <strong><span>{{ descendantsCount(version.data) }}</span><small>Entries</small></strong>
+              <div v-if="isReadOnly" class="overview-map">
+                <div class="overview-action">
+                  <span class="overview-action-symbol">{{ versionAction(version).symbol }}</span>
+                  <strong>{{ versionAction(version).label }}</strong>
+                </div>
+                <div v-if="version.change" class="overview-action-detail">{{ version.change }}</div>
                 <div class="overview-stats">
-                  <span>Depth <b>{{ treeDepth(version.data) }}</b></span>
-                  <span>Independent trees <b>{{ version.data.length }}</b></span>
-                  <span>Branch <b>{{ version.branch }}</b></span>
+                  <span><b>{{ descendantsCount(version.data) }}</b> entries</span>
+                  <span><b>{{ version.data.length }}</b> treemaps</span>
                 </div>
               </div>
               <div v-else class="mini-map" :class="{ empty: !cardData(version).length, 'root-map': version.id === 'v0' }"
@@ -2219,19 +2389,26 @@ function resetWorkspace() {
                 <template v-if="cardData(version).length">
                   <svg :viewBox="`0 0 ${mapViewport(version).width} ${mapViewport(version).height}`" class="treemap-svg">
                     <g :transform="mapTransform(version)">
+                      <rect v-if="version.id === active.id && draggedOriginalTile" class="drag-source-ghost"
+                        :x="draggedOriginalTile.x" :y="draggedOriginalTile.y"
+                        :width="draggedOriginalTile.width" :height="draggedOriginalTile.height"
+                        :rx="3" fill="#71877a" fill-opacity=".12" stroke="#71877a"
+                        stroke-dasharray="4 3" stroke-width="2" vector-effect="non-scaling-stroke"
+                        pointer-events="none"></rect>
                       <rect v-for="tile in versionTiles.get(version.id) ?? []" :key="tile.id"
                         :x="tile.x" :y="tile.y" :width="tile.width" :height="tile.height"
-                        :class="['tree-tile', `depth-${tile.depth}`, { 'is-selected': selectedNodes.includes(tile.id) && version.id === active.id, 'is-source': draggedNode === tile.id, 'is-over': overNode === tile.id, 'is-invalid': invalidNode === tile.id, 'is-hovered': hoveredNode === tile.id }]"
+                        :class="['tree-tile', `depth-${tile.depth}`, { 'is-selected': selectedNodes.includes(tile.id) && version.id === active.id, 'is-source': draggedNode === tile.id && version.id === active.id, 'is-over': overNode === tile.id && version.id === active.id, 'is-invalid': invalidNode === tile.id && version.id === active.id, 'is-hovered': hoveredNode?.versionId === version.id && hoveredNode.nodeId === tile.id }]"
                         :data-node="tile.id" :fill="tile.depth === 0 ? '#deebe4' : tile.depth % 2 ? '#c1d9cc' : '#a9cab9'"
                         @pointerdown.stop="startMapTileGesture($event, version, tile.id)"
-                        @pointerenter="hoveredNode = tile.id" @pointerleave="hoveredNode = null"
-                        @click.stop="onTileClick(version, tile.id, $event)" @contextmenu="version.id === active.id && zoom * mapViewFor(version).zoom > 0.35 && onTileContext($event, tile.id)">
-                        <title v-if="findNode(cardData(version), tile.id)?.description">{{ findNode(cardData(version), tile.id)?.description }}</title>
+                        @pointerenter="enterTile($event, version, tile.id)"
+                        @pointermove="moveTileTooltip($event, version.id, tile.id)"
+                        @pointerleave="leaveTile(version.id, tile.id)"
+                        @click.stop="onTileClick(version, tile.id, $event)" @contextmenu="version.id === active.id && !isReadOnly && onTileContext($event, tile.id)">
                       </rect>
                       <text v-for="tile in (versionTiles.get(version.id) ?? []).filter((item) => labelFontSize(item) >= 7)" :key="`label-${tile.id}`"
                         :x="tile.x + 5" :y="tile.y + labelFontSize(tile) + 4" :font-size="labelFontSize(tile)" class="tile-label">{{ tile.label }}</text>
                       <template v-for="tile in versionTiles.get(version.id) ?? []" :key="`hover-${tile.id}`">
-                        <rect v-if="hoveredNode === tile.id || overNode === tile.id"
+                        <rect v-if="(hoveredNode?.versionId === version.id && hoveredNode.nodeId === tile.id) || (overNode === tile.id && version.id === active.id)"
                           :x="tile.x + 1" :y="tile.y + 1" :width="tile.width - 2" :height="tile.height - 2"
                           stroke="#00a8ff" stroke-width="2.5" vector-effect="non-scaling-stroke"
                           fill="none" pointer-events="none"></rect>
@@ -2255,21 +2432,27 @@ function resetWorkspace() {
                 </div>
               </div>
             </article>
-            <span v-for="ping in pings" :key="ping.id" class="ping-ripple"
-              :style="{ left: `${ping.x}px`, top: `${ping.y}px`, '--ping-color': userColor(ping.userId) }"></span>
+            <span v-for="ping in pings" :key="ping.id" class="ping-origin"
+              :style="{ left: `${ping.x}px`, top: `${ping.y}px`, '--ping-color': userColor(ping.userId) }">
+              <span v-for="pulse in 3" :key="pulse" class="ping-ripple"
+                :style="{ animationDelay: `${(pulse - 1) * 180}ms` }"></span>
+            </span>
           </div>
 
-          <div class="canvas-hotbar" role="toolbar" aria-label="Quick actions" @pointerdown.stop @click.stop>
-            <button title="New free entry (N)" aria-label="New free entry, N" @click="createFreeEntry"><Plus :size="16" /><span>New entry</span><kbd>N</kbd></button>
-            <button title="Add child (Ctrl/⌘+Enter)" aria-label="Add child, Ctrl or Command+Enter" :disabled="!selectedNode" @click="selectedNode && addEntry(selectedNode)"><GitBranch :size="16" /><span>Add child</span><kbd>Ctrl/⌘+↵</kbd></button>
-            <button title="Detach selected (Shift+D)" aria-label="Detach selected, Shift+D" :disabled="!selectedNode" @click="selectedNode && detachEntry(selectedNode)"><Unlink :size="16" /><span>Detach</span><kbd>Shift+D</kbd></button>
-            <button title="Compare versions (Shift+C)" aria-label="Compare versions, Shift+C" :class="{ selected: compareMode }" @click="compareMode = !compareMode; compareIds = []"><GitCompareArrows :size="16" /><span>Compare</span><kbd>Shift+C</kbd></button>
-            <button title="Center active version (Shift+F)" aria-label="Center active version, Shift+F" @click="centerActive"><Maximize :size="16" /><span>Center</span><kbd>Shift+F</kbd></button>
-            <button title="Fit all versions (Shift+A)" aria-label="Fit all versions, Shift+A" @click="fitGraph"><Layers3 :size="16" /><span>Fit all</span><kbd>Shift+A</kbd></button>
-            <button title="Ping a position for collaborators" aria-label="Ping a position for collaborators" :class="{ selected: pingMode }" @click="pingMode = !pingMode"><Radio :size="16" /><span>{{ pingMode ? 'Click to ping' : 'Ping' }}</span></button>
+          <div class="canvas-controls" @pointerdown.stop @click.stop>
+            <div v-if="isReadOnly" class="readonly-notice" role="status">READ ONLY · Zoom in to edit entries</div>
+            <div class="canvas-hotbar" role="toolbar" aria-label="Quick actions">
+            <button title="Create a free entry · N" aria-label="New free entry, N" :disabled="isReadOnly" @click="createFreeEntry"><Plus :size="16" /><span>New entry</span><kbd>N</kbd></button>
+            <button title="Add a child to the selected entry · Ctrl/⌘+Enter" aria-label="Add child, Ctrl or Command+Enter" :disabled="isReadOnly || !selectedNode" @click="selectedNode && addEntry(selectedNode)"><GitBranch :size="16" /><span>Add child</span><kbd>Ctrl/⌘+↵</kbd></button>
+            <button title="Detach the selected entry · Shift+D" aria-label="Detach selected, Shift+D" :disabled="isReadOnly || !selectedNode" @click="selectedNode && detachEntry(selectedNode)"><Unlink :size="16" /><span>Detach</span><kbd>Shift+D</kbd></button>
+            <button title="Compare two versions · Shift+C" aria-label="Compare versions, Shift+C" :class="{ selected: compareMode }" @click="compareMode = !compareMode; compareIds = []"><GitCompareArrows :size="16" /><span>Compare</span><kbd>Shift+C</kbd></button>
+            <button title="Center the active version · Shift+F" aria-label="Center active version, Shift+F" @click="centerActive"><Maximize :size="16" /><span>Center</span><kbd>Shift+F</kbd></button>
+            <button title="Fit all versions in view · Shift+A" aria-label="Fit all versions, Shift+A" @click="fitGraph"><Layers3 :size="16" /><span>Fit all</span><kbd>Shift+A</kbd></button>
+            <button title="Ping a position for collaborators · Alt+click" aria-label="Ping a position for collaborators, Alt+click" :class="{ selected: pingMode }" @click="pingMode = !pingMode"><Radio :size="16" /><span>{{ pingMode ? 'Alt+click to ping' : 'Ping' }}</span></button>
             <span class="hotbar-divider" aria-hidden="true"></span>
-            <button title="Zoom out (-)" aria-label="Zoom out, minus" @click="zoomOut"><ZoomOut :size="16" /><kbd>−</kbd></button>
-            <button title="Zoom in (+)" aria-label="Zoom in, plus" @click="zoomIn"><ZoomIn :size="16" /><kbd>+</kbd></button>
+            <button title="Zoom out · -" aria-label="Zoom out, minus" @click="zoomOut"><ZoomOut :size="16" /><kbd>−</kbd></button>
+            <button title="Zoom in · +" aria-label="Zoom in, plus" @click="zoomIn"><ZoomIn :size="16" /><kbd>+</kbd></button>
+            </div>
           </div>
         </div>
       </section>
@@ -2289,7 +2472,7 @@ function resetWorkspace() {
     <div v-if="menu" class="context-menu" :style="{ left: `${Math.min(menu.x, window.innerWidth - 220)}px`, top: `${Math.min(menu.y, window.innerHeight - 230)}px` }" @click.stop>
       <template v-if="menu.versionId">
         <div class="context-title">VERSION ACTIONS</div>
-        <button @click="centerActive(); menu = null"><Maximize :size="15" /> Center version</button>
+        <button @click="centerVersionById(menu.versionId); menu = null"><Maximize :size="15" /> Center version</button>
         <div class="context-divider"></div>
         <button class="danger-action" @click="pruneVersion(menu.versionId!); menu = null"><Trash2 :size="15" /> Delete version and descendants</button>
       </template>
@@ -2319,6 +2502,10 @@ function resetWorkspace() {
         <textarea id="entry-description" v-model="editor.description" maxlength="400" rows="3" placeholder="Shown when you hover over this entry"></textarea>
         <div class="editor-actions"><button type="button" class="cancel-button" @click="editor = null">Cancel</button><button type="submit" class="primary-button" :disabled="!editor.value.trim()"><Check :size="15" /> Commit version</button></div>
       </form>
+    </div>
+    <div v-if="entryTooltip" class="entry-tooltip" role="tooltip"
+      :style="{ left: `${Math.min(entryTooltip.x + 14, window.innerWidth - 300)}px`, top: `${Math.min(entryTooltip.y + 16, window.innerHeight - 100)}px` }">
+      {{ entryTooltip.description }}
     </div>
     <div v-if="toast" class="toast"><span></span>{{ toast }}</div>
   </main>
