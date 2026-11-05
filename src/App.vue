@@ -2321,10 +2321,12 @@ const activeChildren = computed(() => versions.value.filter((version) => version
 function cardPosition(version: Version) {
   const { width, height } = windowDimensions.value
   const mainRow = canvasSize.value.height / 2 - height / 2
-  if (version.id === 'v0') return { x: 0, y: mainRow }
+  if (version.id === 'v0') return { x: 0, y: 0 }
   return { x: version.step * (width + GRAPH_GAP_X), y: mainRow + version.lane * (height + GRAPH_GAP_Y) }
 }
-function cardHeight(_version: Version) { return windowDimensions.value.height }
+function cardHeight(version: Version) {
+  return version.id === 'v0' ? graphBounds.value.height : windowDimensions.value.height
+}
 const graphBounds = computed(() => ({
   width: Math.max(windowDimensions.value.width, maxStep.value * (windowDimensions.value.width + GRAPH_GAP_X) + windowDimensions.value.width + 140),
   height: Math.max(
@@ -2498,11 +2500,18 @@ function cardPositions(version: Version) {
 const mapGeometries = computed(() => {
   const geometries = new Map<string, ReturnType<typeof mapGeometry>>()
   for (const version of versions.value) {
-    geometries.set(version.id, mapGeometry(cardData(version), cardPositions(version), CARD_WIDTH - 14, CARD_HEIGHT - 47))
+    const viewport = mapViewport(version)
+    geometries.set(version.id, mapGeometry(cardData(version), cardPositions(version), viewport.width, viewport.height))
   }
   return geometries
 })
 function mapViewport(version: Version) {
+  if (version.id === 'v0') {
+    return {
+      width: windowDimensions.value.width - 2,
+      height: cardHeight(version) - 2,
+    }
+  }
   return {
     width: CARD_WIDTH - 14,
     height: CARD_HEIGHT - 47,
@@ -2511,7 +2520,7 @@ function mapViewport(version: Version) {
 function mapViewFor(version: Version): MapView {
   const transient = transientMapViews.value[version.id]
   if (transient) return transient
-  if (version.mapView) return version.mapView
+  if (version.mapView && (version.id !== 'v0' || version.mapView.manual)) return version.mapView
   const geometry = mapGeometries.value.get(version.id) ?? mapGeometry(version.data, version.positions)
   const viewport = mapViewport(version)
   const fit = Math.min(1, (viewport.width - MAP_PADDING * 2) / geometry.width, (viewport.height - MAP_PADDING * 2) / geometry.height)
