@@ -181,7 +181,6 @@ const entryTooltip = ref<{ versionId: string; nodeId: string; description: strin
 const pings = ref<Ping[]>([])
 const pingMode = ref(false)
 const darkMode = ref(localStorage.getItem('canopy-theme') === 'dark')
-const deletionMode = ref<'subtree' | 'detach'>('subtree')
 const sidebarCollapsed = ref(false)
 const compareMode = ref(false)
 const compareIds = ref<string[]>([])
@@ -231,8 +230,33 @@ let suppressVersionClick = false
 let suppressTileClick = false
 let suppressPingClick = false
 let pingPointer: { id: number; x: number; y: number; moved: boolean } | null = null
-const menu = ref<{ x: number; y: number; nodeId: string | null; versionId?: string | null } | null>(null)
+const menu = ref<{
+  x: number
+  y: number
+  kind: 'entry' | 'version' | 'canvas'
+  nodeId?: string
+  versionId?: string
+} | null>(null)
+const contextMenuElement = ref<HTMLElement | null>(null)
+const contextMenuPosition = ref({ x: 0, y: 0 })
+watch(menu, async (value) => {
+  if (!value) return
+  await nextTick()
+  const element = contextMenuElement.value
+  if (!element) return
+  contextMenuPosition.value = {
+    x: Math.max(4, Math.min(value.x, window.innerWidth - element.offsetWidth - 4)),
+    y: Math.max(4, Math.min(value.y, window.innerHeight - element.offsetHeight - 4)),
+  }
+})
 const editor = ref<EditorState | null>(null)
+const entryValueInput = ref<HTMLInputElement | null>(null)
+watch(editor, async (value) => {
+  if (!value) return
+  await nextTick()
+  entryValueInput.value?.focus()
+  entryValueInput.value?.setSelectionRange(value.value.length, value.value.length)
+})
 const clipboard = ref<ClipboardEntry | null>(readClipboard())
 const toast = ref('')
 const persistenceLabel = ref('Saved locally')
@@ -1310,17 +1334,23 @@ function renameEntry(id: string) {
   editor.value = { mode: 'rename', parentId: null, nodeId: id, value: node.value, description: node.description ?? '' }
 }
 
-function deleteEntry(id: string) {
+function deleteEntry(id: string, mode: 'keep-children' | 'subtree' | 'detach-children') {
   if (isReadOnly.value) return
   const data = clone(active.value.data)
   const node = findNode(data, id)
   if (!node) return
-  if (deletionMode.value === 'detach' && node.children.length) {
-    const detached = clone(node.children)
-    node.children = []
-    removeNode(data, id)
+  if (mode === 'subtree' && node.children.length
+    && !window.confirm(`Delete ${node.value} and all ${countNodes(node.children)} descendant entries?`)) return
+  const parent = findParent(data, id)
+  const siblings = parent?.children ?? data
+  const index = siblings.findIndex((entry) => entry.id === id)
+  if (index < 0) return
+  if (mode === 'keep-children') siblings.splice(index, 1, ...node.children)
+  else if (mode === 'detach-children' && node.children.length) {
+    const detached = node.children
+    siblings.splice(index, 1)
     data.push(...detached)
-  } else removeNode(data, id)
+  } else siblings.splice(index, 1)
   createVersion(data, `Delete ${node.value}`)
 }
 
@@ -2305,7 +2335,7 @@ function activateCopyLink(link: CopyLink, event?: MouseEvent) {
   const version = versions.value.find((item) => item.id === versionId)
   if (!version) return
   state.value.activeId = version.id
-  centerVersion(version)
+  focusVersion(version)
 }
 
 function tilesFor(
@@ -2489,15 +2519,29 @@ function placeRoot(version: Version, nodeId: string, preview: SpatialPreview) {
   return true
 }
 function onTileContext(event: MouseEvent, nodeId: string) {
-  if (isReadOnly.value) return
+  if (isReadOnly.value || event.button !== 2) return
   event.preventDefault()
+  event.stopPropagation()
   setSelectedNodes([nodeId])
-  menu.value = { x: event.clientX, y: event.clientY, nodeId }
+  menu.value = { x: event.clientX, y: event.clientY, kind: 'entry', nodeId, versionId: active.value.id }
+}
+function onVersionContext(version: Version, event: MouseEvent) {
+  if (event.button !== 2) return
+  event.preventDefault()
+  event.stopPropagation()
+  menu.value = { x: event.clientX, y: event.clientY, kind: 'version', versionId: version.id }
 }
 function onCanvasContext(event: MouseEvent) {
-  if ((event.target as HTMLElement).closest('.tree-tile, .version-card')) return
+  if (event.button !== 2 || (event.target as HTMLElement).closest('.tree-tile, .version-card')) return
   event.preventDefault()
-  menu.value = { x: event.clientX, y: event.clientY, nodeId: null }
+  menu.value = { x: event.clientX, y: event.clientY, kind: 'canvas', versionId: active.value.id }
+}
+function handleAppClickCapture(event: MouseEvent) {
+  if (suppressPingClick) {
+    suppressPingClickEvent(event)
+    return
+  }
+  if (menu.value && !(event.target as HTMLElement).closest('.context-menu')) menu.value = null
 }
 function startCanvasPan(event: PointerEvent) {
   if (event.button !== 0
@@ -2591,7 +2635,7 @@ function endMapPan(event: PointerEvent) {
     }, 0)
   } else if (transientMapViews.value[versionId]) scheduleMapViewCommit(versionId)
 }
-function centerVersion(version: Version) {
+function focusVersion(version: Version) {
   const position = cardPosition(version)
   const availableWidth = Math.max(1, canvasSize.value.width - 100)
   const availableHeight = Math.max(1, canvasSize.value.height - 100)
@@ -2601,16 +2645,16 @@ function centerVersion(version: Version) {
     y: canvasSize.value.height / 2 - (position.y + cardHeight(version) / 2) * targetZoom,
   }, 420)
 }
-function centerActive() { centerVersion(active.value) }
-function centerVersionById(versionId?: string | null) {
+function focusActive() { focusVersion(active.value) }
+function focusVersionById(versionId?: string | null) {
   const version = versions.value.find((item) => item.id === versionId)
-  if (version) centerVersion(version)
+  if (version) focusVersion(version)
 }
 function activateAndFocusVersion(version: Version) {
   state.value.activeId = version.id
   setSelectedNodes([])
   menu.value = null
-  centerVersion(version)
+  focusVersion(version)
 }
 function navigateVersion(direction: 'left' | 'right' | 'up' | 'down') {
   let destination: Version | undefined
@@ -2842,7 +2886,7 @@ function onKeydown(event: KeyboardEvent) {
     if (compareMode.value) closeVersionSelection()
     else startVersionSelection('compare')
   }
-  if (!modified && event.shiftKey && key === 'f') { event.preventDefault(); centerActive() }
+  if (!modified && !event.altKey && !event.shiftKey && key === 'f') { event.preventDefault(); focusActive() }
   if (!modified && event.shiftKey && key === 'a') { event.preventDefault(); fitGraph() }
   if (!modified && (event.key === '+' || event.key === '=')) { event.preventDefault(); zoomIn() }
   if (!modified && event.key === '-') { event.preventDefault(); zoomOut() }
@@ -2888,6 +2932,10 @@ onUnmounted(() => {
 })
 
 function createFreeEntry() { addEntry() }
+function addEntryToVersion(versionId?: string) {
+  if (versionId) state.value.activeId = versionId
+  addEntry()
+}
 function copyEntry(nodeId: string) {
   const node = findNode(active.value.data, nodeId)
   if (!node) return
@@ -2912,6 +2960,10 @@ function pasteEntry() {
     }].sort(compareCopyLinks)
   }
 }
+function pasteEntryToVersion(versionId?: string) {
+  if (versionId) state.value.activeId = versionId
+  pasteEntry()
+}
 function resetWorkspace() {
   if (window.confirm('Reset all local versions?')) {
     clearTransientMapViews()
@@ -2921,7 +2973,7 @@ function resetWorkspace() {
 </script>
 
 <template>
-  <main class="app-shell" :class="{ dark: darkMode }" @click.capture="suppressPingClickEvent" @contextmenu="onCanvasContext" @wheel="onWheel">
+  <main class="app-shell" :class="{ dark: darkMode }" @click.capture="handleAppClickCapture" @wheel="onWheel">
     <div class="workspace">
       <aside class="sidebar" :class="{ collapsed: sidebarCollapsed }">
         <div class="sidebar-head">
@@ -2953,7 +3005,7 @@ function resetWorkspace() {
         </section>
         <section class="side-section active-section">
           <div class="section-label">ACTIVE VERSION</div>
-          <button type="button" class="active-version-card" title="Center active version" @click="centerActive">
+          <button type="button" class="active-version-card" title="Focus active version · F" @click="focusActive">
             <div class="active-version-top"><span class="version-pip" :style="{ background: versionColor(active) }"></span><span> Branch {{ active.branch }} | {{ displayVersionId(active.id) }} | Step {{ active.step }}</span></div>
             <strong>{{ active.change }}</strong>
             <div class="active-meta"><span>Entries</span><strong>{{ activeNodes }}</strong></div>
@@ -2962,8 +3014,6 @@ function resetWorkspace() {
           </button>
         </section>
         <section class="side-section settings-section">
-          <div class="section-label">DELETE BEHAVIOR</div>
-          <label class="select-wrap"><select v-model="deletionMode" aria-label="Deletion behavior"><option value="subtree">Delete entire subtree</option><option value="detach">Keep children detached</option></select><ChevronDown :size="14" /></label>
           <button type="button" class="theme-toggle" @click="darkMode = !darkMode">
             <component :is="darkMode ? Sun : Moon" :size="15" />
             <span>{{ darkMode ? 'Light mode' : 'Dark mode' }}</span>
@@ -2973,7 +3023,7 @@ function resetWorkspace() {
       </aside>
 
       <section class="canvas-region">
-        <div ref="graphCanvas" class="graph-canvas" :class="{ 'ping-mode': pingMode }" @pointerdown.capture="handlePingPointer" @pointermove.capture="trackPingPointerMove" @pointerup.capture="clearPingPointer" @pointercancel.capture="clearPingPointer" @click.capture="handlePingClick" @click="onCanvasClick" @pointerdown="startCanvasPan" @pointermove="moveCanvasPan" @pointerup="endCanvasPan" @pointercancel="endCanvasPan">
+        <div ref="graphCanvas" class="graph-canvas" :class="{ 'ping-mode': pingMode }" @contextmenu="onCanvasContext" @pointerdown.capture="handlePingPointer" @pointermove.capture="trackPingPointerMove" @pointerup.capture="clearPingPointer" @pointercancel.capture="clearPingPointer" @click.capture="handlePingClick" @click="onCanvasClick" @pointerdown="startCanvasPan" @pointermove="moveCanvasPan" @pointerup="endCanvasPan" @pointercancel="endCanvasPan">
           <div class="canvas-grid"></div>
           <div class="graph-world" :style="{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }">
             <svg class="connection-layer" :width="graphBounds.width + 260" :height="graphBounds.height">
@@ -3004,7 +3054,7 @@ function resetWorkspace() {
             <article v-for="version in versions" :key="version.id" class="version-card" :class="{ active: version.id === active.id, compared: compareIds.includes(version.id), 'compare-pick': compareMode, compact: zoom < 0.66, previewing: isPreviewing(version), 'root-version': version.id === 'v0' }"
               :data-version="version.id" :style="{ left: `${cardPosition(version).x}px`, top: `${cardPosition(version).y}px`, width: `${CARD_WIDTH}px`, height: `${cardHeight(version)}px`, '--branch-color': versionColor(version), '--user-color': userColor(CLIENT_ID), '--author-color': versionAuthorColor(version) }"
               @pointerdown="activateVersionOnPointer(version, $event)"
-              @click="selectVersion(version)" @dblclick.stop="centerVersion(version)" :data-over="overNode === version.id">
+              @click="selectVersion(version)" @dblclick.stop="focusVersion(version)" @contextmenu="onVersionContext(version, $event)" :data-over="overNode === version.id">
               <span v-for="(user, index) in activeUsersFor(version.id)" :key="`active-${user.id}`"
                 class="version-user-outline" :style="{ borderColor: user.color, inset: `${-2 - index * 3}px` }"></span>
               <div v-if="version.id !== 'v0'" class="version-card-head">
@@ -3012,7 +3062,7 @@ function resetWorkspace() {
                 <span class="version-header-id">{{ version.branch }} | {{ displayVersionId(version.id).replace(/^v/, 'V') }} | S{{ version.step }} |</span>
                 <strong class="version-action">{{ version.change }}</strong>
                 <span class="version-count">({{ descendantsCount(version.data) }} Entries)</span>
-                <button class="card-menu quiet-icon" title="Version actions" @click.stop="menu = { x: $event.clientX, y: $event.clientY, nodeId: null, versionId: version.id }; selectedNode = null; state.activeId = version.id"><MoreHorizontal :size="17" /></button>
+                <button class="card-menu quiet-icon" title="Version actions" @click.stop="menu = { x: $event.clientX, y: $event.clientY, kind: 'version', versionId: version.id }; selectedNode = null; state.activeId = version.id"><MoreHorizontal :size="17" /></button>
               </div>
               <div v-if="isPreviewing(version)" class="preview-badge">{{ previewLabel() }}</div>
               <div v-if="isReadOnly" class="overview-map">
@@ -3104,7 +3154,7 @@ function resetWorkspace() {
             <button title="Detach the selected entry · Shift+D" aria-label="Detach selected, Shift+D" :disabled="isReadOnly || !selectedNode" @click="selectedNode && detachEntry(selectedNode)"><Unlink :size="16" /><span>Detach</span><kbd>Shift+D</kbd></button>
             <button title="Compare two versions · Shift+C" aria-label="Compare versions, Shift+C" :class="{ selected: compareMode }" @click="compareMode ? closeVersionSelection() : startVersionSelection('compare')"><GitCompareArrows :size="16" /><span>Compare</span><kbd>Shift+C</kbd></button>
             <button title="Merge two versions · M" aria-label="Merge versions, M" :class="{ selected: mergeMode }" @click="mergeMode ? closeVersionSelection() : startVersionSelection('merge')"><GitCompareArrows :size="16" /><span>Merge</span><kbd>M</kbd></button>
-            <button title="Center the active version · Shift+F" aria-label="Center active version, Shift+F" @click="centerActive"><Maximize :size="16" /><span>Center</span><kbd>Shift+F</kbd></button>
+            <button title="Focus the active version · F" aria-label="Focus active version, F" @click="focusActive"><Maximize :size="16" /><span>Focus</span><kbd>F</kbd></button>
             <button title="Fit all versions in view · Shift+A" aria-label="Fit all versions, Shift+A" @click="fitGraph"><Layers3 :size="16" /><span>Fit all</span><kbd>Shift+A</kbd></button>
             <button title="Toggle Ping Mode · P" aria-label="Toggle Ping Mode, P" :aria-pressed="pingMode" :class="{ selected: pingMode }" @click="pingMode = !pingMode"><Radio :size="16" /><span>{{ pingMode ? 'Ping mode on' : 'Ping' }}</span><kbd>P</kbd></button>
             <span class="hotbar-divider" aria-hidden="true"></span>
@@ -3227,38 +3277,49 @@ function resetWorkspace() {
       <div v-else class="drawer-empty"><Search :size="18" /><span>Select the first version, then the second.</span></div>
     </div>
 
-    <div v-if="menu" class="context-scrim" @click="menu = null"></div>
-    <div v-if="menu" class="context-menu" :style="{ left: `${Math.min(menu.x, window.innerWidth - 230)}px`, top: `${Math.min(menu.y, window.innerHeight - 300)}px` }" @click.stop>
-      <template v-if="menu.versionId">
-        <div class="context-title">VERSION ACTIONS</div>
-        <button @click="centerVersionById(menu.versionId); menu = null"><Maximize :size="15" /> Center version</button>
-        <button :disabled="!versions.find((version) => version.id === menu!.versionId)?.data.length" @click="centerVersionTreemaps(menu.versionId!); menu = null"><Maximize :size="15" /> Center all elements</button>
-        <button :disabled="!versions.find((version) => version.id === menu!.versionId)?.data.length" @click="compactVersionTreemaps(menu.versionId!); menu = null"><Layers3 :size="15" /> Compact layout</button>
-        <div class="context-divider"></div>
-        <button class="danger-action" @click="pruneVersion(menu.versionId!); menu = null"><Trash2 :size="15" /> Delete version and descendants</button>
+    <div v-if="menu" ref="contextMenuElement" class="context-menu" :style="{ left: `${contextMenuPosition.x}px`, top: `${contextMenuPosition.y}px` }" @click.stop>
+      <template v-if="menu.kind === 'version'">
+        <div class="context-title">{{ menu.versionId === 'v0' ? 'ROOT ACTIONS' : 'VERSION ACTIONS' }}</div>
+        <button v-if="!isReadOnly" @click="addEntryToVersion(menu.versionId); menu = null"><Plus :size="15" /> Add Entry</button>
+        <button @click="focusActive(); menu = null"><Maximize :size="15" /> Focus active version</button>
+        <button v-if="versions.find((version) => version.id === menu!.versionId)?.data.length" @click="centerVersionTreemaps(menu.versionId!); menu = null"><Maximize :size="15" /> Center all elements</button>
+        <button v-if="!isReadOnly && versions.find((version) => version.id === menu!.versionId)?.data.length" @click="compactVersionTreemaps(menu.versionId!); menu = null"><Layers3 :size="15" /> Compact Layout</button>
+        <template v-if="menu.versionId !== 'v0'">
+          <div class="context-divider"></div>
+          <button class="danger-action" @click="pruneVersion(menu.versionId!); menu = null"><Trash2 :size="15" /> Delete version and descendants</button>
+        </template>
       </template>
-      <template v-else-if="menu.nodeId">
+      <template v-else-if="menu.kind === 'entry' && menu.nodeId">
         <div class="context-title">ENTRY ACTIONS</div>
-        <button @click="addEntry(menu.nodeId); menu = null"><Plus :size="15" /> Add child</button>
-        <button @click="renameEntry(menu.nodeId!); menu = null"><Pencil :size="15" /> Change value</button>
-        <button @click="detachEntry(menu.nodeId!); menu = null" :disabled="!findParent(active.data, menu.nodeId!)"><Unlink :size="15" /> Detach from parent</button>
-        <button class="danger-action" @click="deleteEntry(menu.nodeId!); menu = null"><Trash2 :size="15" /> Delete entry</button>
+        <template v-if="!isReadOnly">
+          <button @click="addEntry(menu.nodeId); menu = null"><Plus :size="15" /> Add child</button>
+          <button @click="renameEntry(menu.nodeId!); menu = null"><Pencil :size="15" /> Change value</button>
+          <button v-if="findParent(active.data, menu.nodeId!)" @click="detachEntry(menu.nodeId!); menu = null"><Unlink :size="15" /> Detach from parent</button>
+        </template>
+        <template v-if="!isReadOnly && !(findNode(active.data, menu.nodeId!)?.children.length)">
+          <button class="danger-action" @click="deleteEntry(menu.nodeId!, 'subtree'); menu = null"><Trash2 :size="15" /> Delete entry</button>
+        </template>
+        <template v-else-if="!isReadOnly">
+          <div class="context-divider"></div>
+          <button class="danger-action" @click="deleteEntry(menu.nodeId!, 'keep-children'); menu = null"><Trash2 :size="15" /> Delete selected entry, keep children</button>
+          <button class="danger-action" @click="deleteEntry(menu.nodeId!, 'subtree'); menu = null"><Trash2 :size="15" /> Delete selected entry and its children</button>
+          <button class="danger-action" @click="deleteEntry(menu.nodeId!, 'detach-children'); menu = null"><Trash2 :size="15" /> Delete selected entry, detach children</button>
+        </template>
         <div class="context-divider"></div>
         <button @click="copyEntry(menu.nodeId!); menu = null"><Copy :size="15" /> Copy entry and subtree</button>
-        <button v-if="clipboard" @click="pasteEntry(); menu = null"><ClipboardPaste :size="15" /> Add copied entry</button>
+        <button v-if="clipboard && !isReadOnly" @click="pasteEntryToVersion(menu.versionId); menu = null"><ClipboardPaste :size="15" /> Add copied entry</button>
       </template>
       <template v-else>
-        <div class="context-title">STRUCTURE ACTIONS</div>
-        <button @click="createFreeEntry(); menu = null"><Plus :size="15" /> New free entry</button>
-        <button v-if="clipboard" @click="pasteEntry(); menu = null"><ClipboardPaste :size="15" /> Add copied entry</button>
-        <button @click="centerActive(); menu = null"><Maximize :size="15" /> Center active version</button>
+        <div class="context-title">CANVAS ACTIONS</div>
+        <button @click="focusActive(); menu = null"><Maximize :size="15" /> Focus active version</button>
+        <button @click="fitGraph(); menu = null"><Layers3 :size="15" /> Fit all versions</button>
       </template>
     </div>
     <div v-if="editor" class="editor-scrim" @click.self="editor = null">
       <form class="entry-editor" @submit.prevent="commitEditor">
         <div class="editor-heading"><span class="section-label">{{ editor.mode === 'create' ? 'NEW ENTRY' : 'CHANGE VALUE' }}</span><button type="button" class="quiet-icon" title="Close" @click="editor = null"><X :size="17" /></button></div>
         <label class="editor-label" for="entry-value">{{ editor.mode === 'create' ? 'Entry name' : 'New value' }}</label>
-        <input id="entry-value" v-model="editor.value" autofocus maxlength="120" placeholder="e.g. Research notes" />
+        <input id="entry-value" ref="entryValueInput" v-model="editor.value" maxlength="120" placeholder="e.g. Research notes" />
         <label class="editor-label" for="entry-description">Description <span>optional</span></label>
         <textarea id="entry-description" v-model="editor.description" maxlength="400" rows="3" placeholder="Shown when you hover over this entry"></textarea>
         <div class="editor-actions"><button type="button" class="cancel-button" @click="editor = null">Cancel</button><button type="submit" class="primary-button" :disabled="!editor.value.trim()"><Check :size="15" /> Confirm</button></div>
