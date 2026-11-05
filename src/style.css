@@ -144,7 +144,6 @@ h1 { margin: 7px 0 0; font-size: 21px; line-height: 1.25; font-weight: 700; lett
 .version-count { flex: 0 0 auto; color: #8c9891; font: 7px var(--mono); white-space: nowrap; }
 .card-menu { flex: 0 0 auto; margin-left: auto; padding: 2px; }
 .preview-badge { position: absolute; right: 12px; top: 39px; z-index: 2; padding: 3px 5px; border-radius: 0 0 3px 3px; background: #d15a3b; color: white; font: 7px var(--mono); }
-.spatial-preview { position: absolute; z-index: 3; display: grid; place-items: center; overflow: hidden; border: 1px dashed #176b68; border-radius: 3px; background: #d7e9debd; color: #295e51; text-overflow: ellipsis; white-space: nowrap; font: 10px var(--mono); pointer-events: none; }
 .mini-map { min-height: 0; flex: 1; margin: 0 6px 6px; overflow: hidden; position: relative; border-radius: 3px; background: #f4f8f4; }
 .mini-map.empty { background-color: #f5f7f5; }
 .overview-map { min-height: 0; flex: 1; margin: 0 6px 6px; display: flex; flex-direction: column; justify-content: center; padding: 12px 15px; border-radius: 3px; background: #edf4ef; color: #64746b; }
@@ -156,14 +155,16 @@ h1 { margin: 7px 0 0; font-size: 21px; line-height: 1.25; font-weight: 700; lett
 .overview-stats b { color: #315d4e; font: 600 18px var(--mono); text-align: right; }
 .lod-badge { padding: 5px 7px; border: 1px solid #e1e8e2; border-radius: 4px; background: #fff; color: #75847b; font: 8px var(--mono); }
 .treemap-svg { display: block; width: 100%; height: 100%; overflow: hidden; }
-.tree-tile { stroke: none; cursor: grab; transition: filter .12s; }
+.tree-tile { stroke: var(--tile-stroke, #fff); stroke-width: var(--tile-stroke-width, 3px); cursor: grab; transition: stroke-width .12s, filter .12s; }
 .tree-tile:hover { filter: brightness(.92); }
 .tree-tile.is-selected { filter: none; }
-.tree-tile.is-source { opacity: .42; }
-.version-card.previewing .tree-tile.is-source { opacity: .48; }
+.tree-tile.is-source { opacity: .16; }
+.version-card.previewing .tree-tile.is-source { opacity: .2; }
 .tree-tile.is-over, .tree-tile.is-hovered { filter: none; }
 .tree-tile.is-invalid { filter: drop-shadow(0 0 4px #c34c43); }
-.drag-source-ghost { opacity: .8; }
+.drag-source-ghost { opacity: 1; }
+.dragged-overlay { opacity: .94; stroke: #f7faf7; stroke-width: 1.5; filter: drop-shadow(0 3px 4px #24352f55); }
+.dragged-overlay.depth-0 { stroke: #176b68; stroke-dasharray: 5 3; stroke-width: 3; }
 .tile-label { fill: #35534a; pointer-events: none; font-family: 'DM Mono', monospace; font-weight: 500; }
 .mini-map { overflow: hidden; overscroll-behavior: contain; touch-action: none; }
 .empty-map { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; gap: 8px; color: #9aa59f; font-size: 9px; }
@@ -331,7 +332,7 @@ h1 { margin: 7px 0 0; font-size: 21px; line-height: 1.25; font-weight: 700; lett
 .dark .tree-tile.depth-1 { fill: #426b55 !important; }
 .dark .tree-tile.depth-2 { fill: #50785f !important; }
 .dark .tree-tile.depth-3 { fill: #63866d !important; }
-.dark .drag-source-ghost { fill: #9eafa5; stroke: #b6c4bc; }
+.dark .tree-tile { --tile-stroke: #101713; }
 .dark .connection-outline { stroke: #151d19; }
 .dark .theme-toggle:hover, .dark .session-button:hover:not(:disabled),
 .dark .canvas-hotbar button:hover:not(:disabled), .dark .context-menu button:hover:not(:disabled) {
