@@ -117,8 +117,10 @@ type RemoteUser = { name: string; activeVersionId: string | null; selectedNodeId
 type Ping = { id: string; userId: string; x: number; y: number; createdAt: number }
 
 const STORAGE_KEY = 'canopy-data-structure-v1'
+const ROOMS_KEY = 'canopy-local-rooms-v1'
+const LAST_ROOM_KEY = 'canopy-last-room-v1'
+const LEGACY_MIGRATION_KEY = 'canopy-room-data-migrated-v1'
 const CLIENT_ID = getClientId()
-const DEV_WORKSPACE_API = import.meta.env.DEV
 const CARD_WIDTH = 260
 const CARD_HEIGHT = 260
 const GRAPH_GAP_X = 300
@@ -162,6 +164,67 @@ function readState(): StoredState {
   return structuredClone(seed)
 }
 
+function roomDataKey(room: string) {
+  return `canopy-room-data-v1-${encodeURIComponent(room)}`
+}
+
+function readLocalRooms() {
+  try {
+    const stored: unknown = JSON.parse(localStorage.getItem(ROOMS_KEY) ?? '[]')
+    return Array.isArray(stored)
+      ? [...new Set(stored.filter((room): room is string =>
+        typeof room === 'string' && !!room.trim() && room.length <= 80))]
+      : []
+  } catch {
+    return []
+  }
+}
+
+function persistLocalRooms(rooms: string[]) {
+  localStorage.setItem(ROOMS_KEY, JSON.stringify(rooms))
+}
+
+function createLocalRoomName() {
+  return `Room ${crypto.randomUUID().replace(/-/g, '').slice(0, 8)}`
+}
+
+function initializeLocalRooms() {
+  const rooms = readLocalRooms()
+  const requestedRoom = new URLSearchParams(location.search).get('room')?.trim()
+  const lastRoom = localStorage.getItem(LAST_ROOM_KEY)
+  const canMigrateLegacy = !requestedRoom && rooms.length === 0
+  const currentRoom = requestedRoom
+    || (lastRoom && rooms.includes(lastRoom) ? lastRoom : '')
+    || rooms[0]
+    || createLocalRoomName()
+  if (!rooms.includes(currentRoom)) rooms.push(currentRoom)
+  persistLocalRooms(rooms)
+  localStorage.setItem(LAST_ROOM_KEY, currentRoom)
+  return { rooms, currentRoom, canMigrateLegacy }
+}
+
+function readRoomState(room: string, migrateLegacy = false): StoredState {
+  const savedRoomState = localStorage.getItem(roomDataKey(room))
+  if (savedRoomState) {
+    try {
+      const parsed: unknown = JSON.parse(savedRoomState)
+      if (isStoredState(parsed)) return normalizeState(parsed)
+    } catch {
+      console.warn(`Could not load saved data for room "${room}"`)
+    }
+  }
+  if (migrateLegacy && localStorage.getItem(LEGACY_MIGRATION_KEY) !== 'true') {
+    const legacy = localStorage.getItem(STORAGE_KEY)
+    if (legacy) {
+      const migrated = readState()
+      localStorage.setItem(roomDataKey(room), JSON.stringify(migrated))
+      localStorage.setItem(LEGACY_MIGRATION_KEY, 'true')
+      return migrated
+    }
+  }
+  return structuredClone(seed)
+}
+
 function normalizeState(value: Partial<StoredState>): StoredState {
   const normalizedVersions = (value.versions ?? clone(seed.versions)).map((version) => {
     const positions = version.positions ?? {}
@@ -195,7 +258,10 @@ function normalizeState(value: Partial<StoredState>): StoredState {
   }
 }
 
-const state = ref<StoredState>(readState())
+const initialRooms = initializeLocalRooms()
+const localRooms = ref(initialRooms.rooms)
+const currentRoomName = ref(initialRooms.currentRoom)
+const state = ref<StoredState>(readRoomState(currentRoomName.value, initialRooms.canMigrateLegacy))
 const versions = computed(() => state.value.versions)
 const active = computed(() => versions.value.find((version) => version.id === state.value.activeId) ?? versions.value[0]!)
 const selectedNode = ref<string | null>(null)
@@ -233,6 +299,8 @@ const overNode = ref<string | null>(null)
 const invalidNode = ref<string | null>(null)
 const treeDrag = ref<{
   id: string
+  versionId: string
+  pointerId: number
   x: number
   y: number
   moved: boolean
@@ -282,6 +350,9 @@ watch(menu, async (value) => {
 })
 const editor = ref<EditorState | null>(null)
 const entryValueInput = ref<HTMLInputElement | null>(null)
+function setEntryValueInput(element: unknown) {
+  entryValueInput.value = element instanceof HTMLInputElement ? element : null
+}
 watch(editor, async (value) => {
   if (!value) return
   await nextTick()
@@ -300,22 +371,20 @@ const windowDimensions = computed(() => {
   const height = Math.min(440, width / aspect)
   return { width, height }
 })
-const clipboard = ref<ClipboardEntry | null>(readClipboard())
+const clipboard = ref<ClipboardEntry | null>(readClipboard(currentRoomName.value))
 const toast = ref('')
-const persistenceLabel = ref('Saved locally')
-const roomInput = ref(new URLSearchParams(location.search).get('room') ?? '')
+const roomDialogOpen = ref(false)
+const newRoomName = ref('')
 const roomStatus = ref<RoomStatus>({ state: 'idle', peers: 0, message: 'Not connected' })
 const peerRoom = new PeerRoom()
-const collaborationLabel = computed(() => roomStatus.value.state === 'connected' || roomStatus.value.state === 'hosting'
-  ? `${roomStatus.value.peers} peer${roomStatus.value.peers === 1 ? '' : 's'}`
-  : roomStatus.value.message)
 const connectedUsers = computed(() => {
-  if (roomStatus.value.state !== 'connected' && roomStatus.value.state !== 'hosting') return []
   return [
     { id: CLIENT_ID, name: userName.value.trim() || animalForUser(CLIENT_ID), activeVersionId: active.value.id },
-    ...Object.entries(remoteUsers.value).map(([id, user]) => ({
+    ...(roomStatus.value.state === 'connected' || roomStatus.value.state === 'hosting'
+      ? Object.entries(remoteUsers.value).map(([id, user]) => ({
       id, name: user.name, activeVersionId: user.activeVersionId,
-    })),
+      }))
+      : []),
   ]
 })
 const recentInteractions = computed(() => [...interactions.value]
@@ -328,8 +397,6 @@ let pingSequence = 0
 let interactionSequence = 0
 let tileTooltipTimer = 0
 let tilePointer = { x: 0, y: 0 }
-let persistenceQueue = Promise.resolve()
-let skipNextPersist = false
 let collaborationRoom = ''
 let collaborationMetadata: CollaborationMetadata | null = null
 let lastObservedState = JSON.stringify(state.value)
@@ -349,7 +416,7 @@ watch(interactions, (entries) => {
 watch(isReadOnly, (readOnly) => {
   if (!readOnly) return
   setSelectedNodes([])
-  editor.value = null
+  if (editor.value?.mode === 'rename') editor.value = null
   entryOperation.value = null
   bulkDeleteDialog.value = false
   treeDrag.value = null
@@ -367,21 +434,9 @@ watch(darkMode, (enabled) => localStorage.setItem('canopy-theme', enabled ? 'dar
 
 watch(state, (value) => {
   const snapshot = JSON.stringify(value)
-  localStorage.setItem(STORAGE_KEY, snapshot)
+  localStorage.setItem(roomDataKey(currentRoomName.value), snapshot)
   if (!applyingRemoteState && snapshot !== lastObservedState) publishLocalChanges(value)
   lastObservedState = snapshot
-  if (skipNextPersist) {
-    skipNextPersist = false
-    return
-  }
-  if (!DEV_WORKSPACE_API) return
-  persistenceQueue = persistenceQueue.then(async () => {
-    const response = await fetch('/api/state', {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: snapshot,
-    })
-    if (!response.ok) throw new Error('Server save failed')
-    persistenceLabel.value = 'Saved on server'
-  }).catch(() => { persistenceLabel.value = 'Saved locally' })
 }, { deep: true })
 
 function revisionIsNewer(candidate: Revision | undefined, current: Revision | undefined) {
@@ -433,7 +488,6 @@ function logInteraction(
   action: string,
   reference: { versionId?: string; nodeId?: string; nodeLabel?: string; ping?: { x: number; y: number } } = {},
 ) {
-  if (!collaborationRoom) return
   addInteraction({
     id: `${CLIENT_ID}-${Date.now()}-${++interactionSequence}`,
     actorId: CLIENT_ID,
@@ -663,7 +717,8 @@ function applySyncSnapshot(message: SyncSnapshot) {
   lastObservedState = JSON.stringify(state.value)
   applyingRemoteState = true
   persistCollaborationMetadata()
-  localStorage.setItem(STORAGE_KEY, lastObservedState)
+  localStorage.setItem(roomDataKey(currentRoomName.value), lastObservedState)
+  requestAnimationFrame(fitGraph)
   void nextTick(() => { applyingRemoteState = false })
 }
 
@@ -773,7 +828,7 @@ function applySyncDelta(message: SyncDelta) {
   lastObservedState = JSON.stringify(state.value)
   applyingRemoteState = true
   persistCollaborationMetadata()
-  localStorage.setItem(STORAGE_KEY, lastObservedState)
+  localStorage.setItem(roomDataKey(currentRoomName.value), lastObservedState)
   void nextTick(() => { applyingRemoteState = false })
 }
 
@@ -1001,34 +1056,71 @@ function expireRemoteUsers() {
   publishPresence()
 }
 
-async function connectToRoom(mode: 'host' | 'join') {
-  const room = roomInput.value.trim()
-  if (!room || room.length > 80) {
-    notify('Enter a room name of 1–80 characters')
-    return
-  }
+async function connectAutomatically(room: string) {
   initializeCollaborationMetadata(room)
   try {
-    if (mode === 'host') await peerRoom.hostRoom(room, handleRoomMessage, onRoomStatus)
-    else await peerRoom.joinRoom(room, handleRoomMessage, onRoomStatus)
+    await peerRoom.hostRoom(room, handleRoomMessage, onRoomStatus)
+  } catch {
+    try {
+      await peerRoom.joinRoom(room, handleRoomMessage, onRoomStatus)
+    } catch {
+      notify(`Could not connect to room "${room}": ${roomStatus.value.message}`)
+      return
+    }
+  }
+  if (roomStatus.value.state === 'hosting' || roomStatus.value.state === 'connected') {
     publishPresence()
     const url = new URL(location.href)
-    url.searchParams.set('room', room)
+    url.searchParams.set('room', currentRoomName.value)
     history.replaceState(null, '', url)
-  } catch {
-    notify(roomStatus.value.message)
+    requestAnimationFrame(fitGraph)
   }
 }
 
-async function createSharedSession() {
-  roomInput.value = crypto.randomUUID().replace(/-/g, '').slice(0, 10)
-  await connectToRoom('host')
-  if (roomStatus.value.state === 'hosting') await copySessionInvite()
+async function activateRoom(room: string, createEmpty = false) {
+  const name = room.trim()
+  if (!name || name.length > 80) {
+    notify('Room names must contain 1–80 characters')
+    return
+  }
+  peerRoom.send({ type: 'presence-leave', userId: CLIENT_ID })
+  peerRoom.close()
+  remoteUsers.value = {}
+  clearTransientMapViews()
+  setSelectedNodes([])
+  editor.value = null
+  entryOperation.value = null
+  bulkDeleteDialog.value = false
+  menu.value = null
+  collaborationRoom = ''
+  collaborationMetadata = null
+  if (!localRooms.value.includes(name)) {
+    localRooms.value = [...localRooms.value, name]
+    persistLocalRooms(localRooms.value)
+  }
+  currentRoomName.value = name
+  localStorage.setItem(LAST_ROOM_KEY, name)
+  const url = new URL(location.href)
+  url.searchParams.set('room', name)
+  history.replaceState(null, '', url)
+  const nextState = createEmpty ? clone(seed) : readRoomState(name)
+  clipboard.value = readClipboard(name)
+  lastObservedState = JSON.stringify(nextState)
+  state.value = nextState
+  await nextTick()
+  applyingRemoteState = false
+  initializeCollaborationMetadata(name)
+  localStorage.setItem(roomDataKey(name), JSON.stringify(state.value))
+  reflowLayout()
+  await nextTick(initializeMapViews)
+  roomDialogOpen.value = false
+  fitGraph()
+  await connectAutomatically(name)
 }
 
 async function copySessionInvite() {
   const url = new URL(location.href)
-  url.searchParams.set('room', roomInput.value.trim())
+  url.searchParams.set('room', currentRoomName.value)
   try {
     await navigator.clipboard.writeText(url.toString())
     notify('Invite link copied')
@@ -1037,55 +1129,34 @@ async function copySessionInvite() {
   }
 }
 
-function leaveSharedSession() {
-  peerRoom.send({ type: 'presence-leave', userId: CLIENT_ID })
-  peerRoom.close()
-  collaborationRoom = ''
-  collaborationMetadata = null
-  const url = new URL(location.href)
-  url.searchParams.delete('room')
-  history.replaceState(null, '', url)
+function deleteLocalRoom(room: string) {
+  if (room === currentRoomName.value) return
+  if (!window.confirm(`Delete room "${room}"? Its locally stored data will be removed.`)) return
+  localStorage.removeItem(roomDataKey(room))
+  localStorage.removeItem(metadataKey(room))
+  localStorage.removeItem(interactionStorageKey(room))
+  sessionStorage.removeItem(clipboardStorageKey(room))
+  localRooms.value = localRooms.value.filter((savedRoom) => savedRoom !== room)
+  persistLocalRooms(localRooms.value)
 }
 
-async function syncFromServer() {
-  if (!DEV_WORKSPACE_API) {
-    reflowLayout()
-    await nextTick(initializeMapViews)
+function createRoomFromDialog() {
+  const name = newRoomName.value.trim()
+  if (!name || name.length > 80) {
+    notify('Enter a room name of 1–80 characters')
     return
   }
-  try {
-    const response = await fetch('/api/state')
-    if (!response.ok) throw new Error('Server load failed')
-    const payload = await response.json() as { state: StoredState | null }
-    if (!payload.state) {
-      reflowLayout()
-      await nextTick(initializeMapViews)
-      const snapshot = JSON.stringify(state.value)
-      const saved = await fetch('/api/state', {
-        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: snapshot,
-      })
-      if (!saved.ok) throw new Error('Server save failed')
-      persistenceLabel.value = 'Saved on server'
-      requestAnimationFrame(fitGraph)
-      return
-    }
-    skipNextPersist = true
-    clearTransientMapViews()
-    const localActiveId = state.value.activeId
-    state.value = normalizeState(payload.state)
-    state.value.activeId = state.value.versions.some((version) => version.id === localActiveId)
-      ? localActiveId
-      : state.value.versions.find((version) => version.id === 'v0')!.id
-    reflowLayout()
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state.value))
-    persistenceLabel.value = 'Saved on server'
-    await nextTick(initializeMapViews)
-    requestAnimationFrame(fitGraph)
-  } catch {
-    reflowLayout()
-    await nextTick(initializeMapViews)
-    persistenceLabel.value = 'Saved locally'
-  }
+  newRoomName.value = ''
+  void activateRoom(name, !localRooms.value.includes(name))
+}
+
+async function initializeCurrentRoom() {
+  initializeCollaborationMetadata(currentRoomName.value)
+  localStorage.setItem(roomDataKey(currentRoomName.value), JSON.stringify(state.value))
+  reflowLayout()
+  await nextTick(initializeMapViews)
+  requestAnimationFrame(fitGraph)
+  await connectAutomatically(currentRoomName.value)
 }
 
 function notify(message: string) {
@@ -1095,9 +1166,13 @@ function notify(message: string) {
 }
 
 function clone<T>(value: T): T { return JSON.parse(JSON.stringify(value)) as T }
-function readClipboard(): ClipboardEntry | null {
+function clipboardStorageKey(room: string) {
+  return `canopy-copy-${encodeURIComponent(room)}`
+}
+
+function readClipboard(room: string): ClipboardEntry | null {
   try {
-    const stored = JSON.parse(sessionStorage.getItem('canopy-copy') ?? 'null') as ClipboardEntry | TreeNode | null
+    const stored = JSON.parse(sessionStorage.getItem(clipboardStorageKey(room)) ?? 'null') as ClipboardEntry | TreeNode | null
     if (!stored) return null
     if ('node' in stored) return stored
     return { sourceVersionId: state.value.activeId, node: stored }
@@ -1447,7 +1522,6 @@ function reflowLayout() {
 }
 
 function createVersion(data: TreeNode[], change: string, forceNew = false) {
-  if (isReadOnly.value) return null
   const parent = active.value
   const wasCentered = isVersionCentered(parent)
   const siblings = versions.value.filter((version) => version.parentId === parent.id)
@@ -1512,12 +1586,11 @@ function createVersion(data: TreeNode[], change: string, forceNew = false) {
 }
 
 function addEntry(parentId: string | null = null) {
-  if (isReadOnly.value) return
   editor.value = { mode: 'create', parentId, entries: [newEntryDraft()] }
 }
 
 function commitEditor() {
-  if (isReadOnly.value || !editor.value) return
+  if (!editor.value || (isReadOnly.value && editor.value.mode === 'rename')) return
   const currentEditor = editor.value
   if (currentEditor.mode === 'create') {
     const entries = currentEditor.entries.map((entry) => ({
@@ -2108,23 +2181,25 @@ function selectComparedNode(nodeId: string) {
 function confirmMerge() {
   const result = mergeResult.value
   if (!result) return
-  const targetIsLatest = !versions.value.some((version) =>
-    version.branch === result.target.branch && version.step > result.target.step)
-  const siblings = versions.value.filter((version) => version.parentId === result.target.id)
+  const isLatestOnBranch = (candidate: Version) => !versions.value.some((version) =>
+    version.branch === candidate.branch && version.step > candidate.step)
+  const sourceIsLatest = isLatestOnBranch(result.source)
+  const targetIsLatest = isLatestOnBranch(result.target)
+  const laneParent = sourceIsLatest && targetIsLatest
+    ? result.source.lane <= result.target.lane ? result.source : result.target
+    : sourceIsLatest ? result.source
+      : targetIsLatest ? result.target
+        : result.target
+  const mergeSource = laneParent.id === result.source.id ? result.target : result.source
   const nextVersionNumber = state.value.nextVersion++
-  const branchNumber = siblings.reduce((highest, version) => {
-    const suffix = version.branch.split('.').at(-1) ?? '0'
-    return Math.max(highest, Number(suffix.replace(/^B/, '')) || 0)
-  }, 0) + 1
-  const branch = result.target.id === 'v0'
-    ? `B${branchNumber}`
-    : targetIsLatest ? result.target.branch : `${result.target.branch}.M${nextVersionNumber}`
+  const needsMergeLane = !sourceIsLatest && !targetIsLatest
+  const branch = needsMergeLane ? `${result.target.branch}.M${nextVersionNumber}` : laneParent.branch
   const version: Version = {
     id: `v${nextVersionNumber}-${CLIENT_ID}`,
-    parentId: result.target.id,
-    mergeSourceId: result.source.id,
+    parentId: laneParent.id,
+    mergeSourceId: mergeSource.id,
     step: Math.max(result.source.step, result.target.step) + 1,
-    lane: result.target.lane,
+    lane: laneParent.lane,
     branch,
     change: `Merge ${result.source.branch} into ${result.target.branch}`,
     data: clone(result.data),
@@ -2270,7 +2345,7 @@ function connectionPath(version: Version) {
   if (!parent) return ''
   return versionConnectionPath(parent, version)
 }
-function versionConnectionPath(source: Version, destination: Version, endOffsetY = 0, routeRight = false) {
+function versionConnectionPath(source: Version, destination: Version, endOffsetY = 0) {
   const from = cardPosition(source)
   const to = cardPosition(destination)
   const startX = from.x + windowDimensions.value.width
@@ -2281,16 +2356,14 @@ function versionConnectionPath(source: Version, destination: Version, endOffsetY
   if (Math.abs(endY - startY) < 1) return `M ${startX} ${startY} H ${endX}`
   const direction = Math.sign(endY - startY)
   const maxRadius = Math.min(GRAPH_GAP_X / 4, Math.abs(endY - startY) / 2)
-  const cornerX = false ? endX - maxRadius : startX + (endX - startX) / 2
-  const radius = false
-    ? Math.min(maxRadius, (endX - startX) / 4)
-    : Math.min(maxRadius, cornerX - startX, endX - cornerX)
+  const cornerX = startX + (endX - startX) / 2
+  const radius = Math.min(maxRadius, cornerX - startX, endX - cornerX)
   return `M ${startX} ${startY} H ${cornerX - radius} Q ${cornerX} ${startY} ${cornerX} ${startY + direction * radius} V ${endY - direction * radius} Q ${cornerX} ${endY} ${cornerX + radius} ${endY} H ${endX}`
 }
 function mergeConnectionPath(version: Version) {
   const source = versions.value.find((item) => item.id === version.mergeSourceId)
   if (!source) return ''
-  return versionConnectionPath(source, version, 0, true)
+  return versionConnectionPath(source, version)
 }
 function mergeConnectionColor(version: Version) {
   const source = versions.value.find((item) => item.id === version.mergeSourceId)
@@ -2360,9 +2433,11 @@ function tileSelectionHighlights(versionId: string, nodeId: string) {
   return highlights
 }
 function tileStrokeColor(versionId: string, nodeId: string) {
+  const selectedColor = tileSelectionHighlights(versionId, nodeId)[0]?.color
+  if (selectedColor) return selectedColor
   if ((hoveredNode.value?.versionId === versionId && hoveredNode.value.nodeId === nodeId)
     || (versionId === active.value.id && overNode.value === nodeId)) return '#00a8ff'
-  return tileSelectionHighlights(versionId, nodeId)[0]?.color ?? (darkMode.value ? '#101713' : '#fff')
+  return darkMode.value ? '#101713' : '#fff'
 }
 function tileStrokeWidth(versionId: string, nodeId: string) {
   const isHighlighted = (hoveredNode.value?.versionId === versionId && hoveredNode.value.nodeId === nodeId)
@@ -2379,6 +2454,12 @@ function treeDepth(nodes: TreeNode[]): number {
 function versionAction(version: Version) {
   const previous = version.parentId ? versions.value.find((item) => item.id === version.parentId) : undefined
   if (!previous) return { label: 'root', symbol: '•' }
+  if (version.mergeSourceId || /^Merge \d+ entries into /.test(version.change)) {
+    return { label: 'merge', symbol: '⋈' }
+  }
+  if (/^Split .+ into \d+ entries$/.test(version.change)) {
+    return { label: 'split', symbol: 'Y' }
+  }
   const before = flattenPaths(previous.data)
   const after = flattenPaths(version.data)
   const added = [...after.keys()].filter((id) => !before.has(id)).length
@@ -3068,7 +3149,7 @@ function startMapTileGesture(event: PointerEvent, version: Version, nodeId: stri
     startMapPan(event, version)
     return
   }
-  startTreeDrag(event, nodeId)
+  startTreeDrag(event, version, nodeId)
 }
 function moveMapPan(event: PointerEvent) {
   const drag = mapPanDrag.value
@@ -3211,15 +3292,16 @@ function panToVersion(version: Version, centerImmediately: boolean) {
   }
   panAnimationFrame = requestAnimationFrame(animate)
 }
-function startTreeDrag(event: PointerEvent, id: string) {
+function startTreeDrag(event: PointerEvent, version: Version, id: string) {
   if (event.button !== 0) return
   if (isReadOnly.value) return
   event.preventDefault()
+  state.value.activeId = version.id
   const map = (event.currentTarget as SVGRectElement).closest<HTMLElement>('.mini-map')
   const rect = map?.getBoundingClientRect()
-  const view = mapViewFor(active.value)
-  const originalTile = tileForNode(active.value.data, active.value.positions, id)
-  const viewport = mapViewport(active.value)
+  const view = mapViewFor(version)
+  const originalTile = tileForNode(version.data, version.positions, id)
+  const viewport = mapViewport(version)
   const pointerX = rect
     ? (((event.clientX - rect.left) / zoom.value * viewport.width / (rect.width / zoom.value)) - view.panX) / view.zoom
     : 0
@@ -3227,7 +3309,8 @@ function startTreeDrag(event: PointerEvent, id: string) {
     ? (((event.clientY - rect.top) / zoom.value * viewport.height / (rect.height / zoom.value)) - view.panY) / view.zoom
     : 0
   treeDrag.value = {
-    id, x: event.clientX, y: event.clientY, moved: false,
+    id, versionId: version.id, pointerId: event.pointerId,
+    x: event.clientX, y: event.clientY, moved: false,
     space: rect && originalTile ? {
       grabX: (pointerX - originalTile.x) / originalTile.width,
       grabY: (pointerY - originalTile.y) / originalTile.height,
@@ -3235,12 +3318,15 @@ function startTreeDrag(event: PointerEvent, id: string) {
       height: originalTile.height,
     } : undefined,
   }
+  const tile = event.currentTarget as SVGRectElement
+  if (tile.setPointerCapture) tile.setPointerCapture(event.pointerId)
   draggedPosition.value = null
   dragPreviewView.value = clone(view)
 }
 function moveTreeDrag(event: PointerEvent) {
   const drag = treeDrag.value
-  if (!drag) return
+  if (!drag || drag.pointerId !== event.pointerId) return
+  if (active.value.id !== drag.versionId) state.value.activeId = drag.versionId
   if (!drag.moved && Math.hypot(event.clientX - drag.x, event.clientY - drag.y) > 5) {
     drag.moved = true
     draggedNode.value = drag.id
@@ -3285,7 +3371,8 @@ function moveTreeDrag(event: PointerEvent) {
 }
 function finishTreeDrag(event: PointerEvent) {
   const drag = treeDrag.value
-  if (!drag) return
+  if (!drag || drag.pointerId !== event.pointerId) return
+  if (active.value.id !== drag.versionId) state.value.activeId = drag.versionId
   if (drag.moved) moveTreeDrag(event)
   const sourceVersionId = active.value.id
   const previewView = dragPreviewView.value
@@ -3319,6 +3406,21 @@ function finishTreeDrag(event: PointerEvent) {
       suppressVersionClick = false
       suppressTileClick = false
     }, 0)
+  }
+  treeDrag.value = null
+  draggedNode.value = null
+  draggedPosition.value = null
+  dragPreviewView.value = null
+  overNode.value = null
+  invalidNode.value = null
+  spatialPreview.value = null
+}
+function cancelTreeDrag(event: PointerEvent) {
+  const drag = treeDrag.value
+  if (!drag || drag.pointerId !== event.pointerId) return
+  const version = versions.value.find((item) => item.id === drag.versionId)
+  if (version && dragPreviewView.value && dragPreviewView.value.zoom < mapViewFor(version).zoom) {
+    version.mapView = clone(dragPreviewView.value)
   }
   treeDrag.value = null
   draggedNode.value = null
@@ -3388,11 +3490,10 @@ onMounted(() => {
   window.addEventListener('pointermove', moveTreeDrag)
   window.addEventListener('pointermove', moveMapPan)
   window.addEventListener('pointerup', finishTreeDrag)
+  window.addEventListener('pointercancel', cancelTreeDrag)
   window.addEventListener('pointerup', endMapPan)
   presenceTimer = window.setInterval(expireRemoteUsers, 5000)
-  void syncFromServer().then(() => {
-    if (roomInput.value) return connectToRoom('join')
-  })
+  void initializeCurrentRoom()
 })
 onUnmounted(() => {
   peerRoom.close()
@@ -3405,6 +3506,7 @@ onUnmounted(() => {
   window.removeEventListener('pointermove', moveTreeDrag)
   window.removeEventListener('pointermove', moveMapPan)
   window.removeEventListener('pointerup', finishTreeDrag)
+  window.removeEventListener('pointercancel', cancelTreeDrag)
   window.removeEventListener('pointerup', endMapPan)
   window.clearInterval(presenceTimer)
 })
@@ -3418,7 +3520,7 @@ function copyEntry(nodeId: string) {
   const node = findNode(active.value.data, nodeId)
   if (!node) return
   clipboard.value = { sourceVersionId: active.value.id, node: clone(node) }
-  sessionStorage.setItem('canopy-copy', JSON.stringify(clipboard.value))
+  sessionStorage.setItem(clipboardStorageKey(currentRoomName.value), JSON.stringify(clipboard.value))
   logInteraction(`Copied ${node.value}`, { versionId: active.value.id, nodeId, nodeLabel: node.value })
   notify(`Copied ${node.value}`)
 }
@@ -3469,18 +3571,14 @@ function resetWorkspace() {
           </button>
         </section>
         <section class="side-section session-section">
-          <!-- <div class="section-label">SHARED SESSION</div> -->
-          <label class="session-label" for="session-room">Room name</label>
-          <input id="session-room" v-model="roomInput" maxlength="80" placeholder="Enter a room name" :disabled="roomStatus.state === 'connected' || roomStatus.state === 'hosting'" />
-          <!-- <div class="session-status" :class="`status-${roomStatus.state}`" role="status" aria-live="polite">{{ collaborationLabel }}</div> -->
-          <div v-if="roomStatus.state === 'idle' || roomStatus.state === 'error'" class="session-actions">
-            <button type="button" class="session-button" @click="createSharedSession">New room</button>
-            <button type="button" class="session-button" @click="connectToRoom('host')">Host</button>
-            <button type="button" class="session-button" :disabled="!roomInput.trim()" @click="connectToRoom('join')">Join</button>
+          <div class="section-label">CURRENT ROOM</div>
+          <div class="current-room-name" :title="currentRoomName">{{ currentRoomName }}</div>
+          <div class="session-status" :class="`status-${roomStatus.state}`" role="status" aria-live="polite">
+            {{ roomStatus.state === 'hosting' ? 'Hosting' : roomStatus.state === 'connected' ? 'Connected' : roomStatus.message }}
           </div>
-          <div v-else class="session-actions">
-            <button type="button" class="session-button" @click="copySessionInvite">Copy invite</button>
-            <button type="button" class="session-button secondary" @click="leaveSharedSession">Leave</button>
+          <div class="session-actions">
+            <button type="button" class="session-button" @click="roomDialogOpen = true">Change Room</button>
+            <button type="button" class="session-button secondary" @click="copySessionInvite">Copy Invite</button>
           </div>
         </section>
         <section class="side-section collaborators-section">
@@ -3493,13 +3591,12 @@ function resetWorkspace() {
               <span class="collaborator-avatar" :style="{ '--collaborator-color': userColor(user.id) }" aria-hidden="true">
                 <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4" /><path d="M4.5 21a7.5 7.5 0 0 1 15 0" /></svg>
               </span>
-              <span class="collaborator-info"><strong>{{ user.name }}</strong>
+              <span class="collaborator-info"><strong>{{ user.name }}<span v-if="user.id === CLIENT_ID"> (you)</span></strong>
                 <small>{{ user.activeVersionId && versions.some((version) => version.id === user.activeVersionId)
                   ? displayVersionId(user.activeVersionId)
                   : 'No active version' }}</small>
               </span>
             </button>
-            <span v-if="!connectedUsers.length" class="collaborator-empty">Join a shared room to see collaborators.</span>
           </div>
         </section>
         <div class="sidebar-fill"></div>
@@ -3523,7 +3620,7 @@ function resetWorkspace() {
               <span class="interaction-time">{{ new Date(entry.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</span>
             </li>
           </ol>
-          <span v-else class="interaction-empty">Collaborative actions appear here.</span>
+          <span v-else class="interaction-empty">Room actions appear here.</span>
         </section>
         <section class="side-section overview-section">
           <div class="section-label">ROOM OVERVIEW</div>
@@ -3552,16 +3649,16 @@ function resetWorkspace() {
               </defs>
               <template v-for="version in versions.filter((item) => item.parentId && !isBranchCurve(item))" :key="`edge-${version.id}`">
                 <path :d="connectionPath(version)" class="connection-outline" fill="none" stroke="#f5f7f4" :stroke-width="connectionWidth(version) + 10" stroke-linecap="round" stroke-linejoin="round" />
-                <path :d="connectionPath(version)" fill="none" :stroke="versionColor(version)" :stroke-width="connectionWidth(version)" stroke-linecap="round" stroke-linejoin="round" :opacity="version.id === active.id || version.parentId === active.id ? 0.96 : 0.76" />
+                <path :id="`version-connector-${version.id}`" :d="connectionPath(version)" fill="none" :stroke="versionColor(version)" :stroke-width="connectionWidth(version)" stroke-linecap="round" stroke-linejoin="round" :opacity="version.id === active.id || version.parentId === active.id ? 0.96 : 0.76" />
               </template>
               <template v-for="version in versions.filter((item) => item.parentId && isBranchCurve(item))" :key="`branch-edge-${version.id}`">
                 <path :d="connectionPath(version)" class="connection-outline" fill="none" stroke="#f5f7f4" :stroke-width="connectionWidth(version) + 10" stroke-linecap="round" stroke-linejoin="round" />
-                <path :d="connectionPath(version)" fill="none" :stroke="versionColor(version)" :stroke-width="connectionWidth(version)" stroke-linecap="round" stroke-linejoin="round" :opacity="version.id === active.id || version.parentId === active.id ? 0.96 : 0.76" />
+                <path :id="`version-connector-${version.id}`" :d="connectionPath(version)" fill="none" :stroke="versionColor(version)" :stroke-width="connectionWidth(version)" stroke-linecap="round" stroke-linejoin="round" :opacity="version.id === active.id || version.parentId === active.id ? 0.96 : 0.76" />
               </template>
               <template v-for="version in versions.filter((item) => item.mergeSourceId)" :key="`merge-edge-${version.id}`">
                 <path :d="mergeConnectionPath(version)" class="connection-outline" fill="none" stroke="#f5f7f4"
                   :stroke-width="connectionWidth(version) + 10" stroke-linecap="round" stroke-linejoin="round" />
-                <path :d="mergeConnectionPath(version)" fill="none" :stroke="mergeConnectionColor(version)"
+                <path :id="`merge-connector-${version.id}`" :d="mergeConnectionPath(version)" fill="none" :stroke="mergeConnectionColor(version)"
                   :stroke-width="connectionWidth(version)" stroke-linecap="round" stroke-linejoin="round"
                   :opacity="version.id === active.id || version.mergeSourceId === active.id ? 0.96 : 0.76" />
               </template>
@@ -3569,6 +3666,16 @@ function resetWorkspace() {
                 <path :d="`M ${cardPosition(version).x + windowDimensions.width} ${cardPosition(version).y + cardHeight(version) / 2} H ${cardPosition(version).x + windowDimensions.width + terminalTailEnd(version)}`" class="connection-outline" fill="none" stroke="#f5f7f4" :stroke-width="connectionWidth(version) + 10" stroke-linecap="butt" />
                 <path :d="`M ${cardPosition(version).x + windowDimensions.width} ${cardPosition(version).y + cardHeight(version) / 2} H ${cardPosition(version).x + windowDimensions.width + terminalTailEnd(version)}`" fill="none" :stroke="versionColor(version)" :stroke-width="connectionWidth(version)" stroke-linecap="butt" marker-end="url(#arrow)" />
               </template>
+              <text v-for="version in versions.filter((item) => item.parentId)" :key="`connector-symbol-${version.id}`"
+                class="connector-symbol" aria-hidden="true">
+                <textPath :href="`#version-connector-${version.id}`" startOffset="50%" text-anchor="middle">
+                  {{ versionAction(version).symbol }}
+                </textPath>
+              </text>
+              <text v-for="version in versions.filter((item) => item.mergeSourceId)" :key="`merge-symbol-${version.id}`"
+                class="connector-symbol" aria-hidden="true">
+                <textPath :href="`#merge-connector-${version.id}`" startOffset="50%" text-anchor="middle">⋈</textPath>
+              </text>
             </svg>
 
             <article v-for="version in versions" :key="version.id" class="version-card" :class="{ active: version.id === active.id, compared: compareIds.includes(version.id), 'compare-pick': compareMode, compact: zoom < 0.66, previewing: isPreviewing(version), 'root-version': version.id === 'v0' }"
@@ -3667,9 +3774,8 @@ function resetWorkspace() {
 
           <div class="canvas-controls" @pointerdown.stop @click.stop>
             <div v-if="pingMode" class="ping-mode-banner" role="status">PING MODE · Click to place a ping · Press P or Esc to exit</div>
-            <div v-if="isReadOnly" class="readonly-notice" role="status">READ ONLY · Zoom in to edit entries</div>
             <div class="canvas-hotbar" role="toolbar" aria-label="Quick actions">
-            <button title="Create a free entry · N" aria-label="New free entry, N" :disabled="isReadOnly" @click="createFreeEntry"><Plus :size="16" /><span>New entry</span><kbd>N</kbd></button>
+            <button title="Create a free entry · N" aria-label="New free entry, N" @click="createFreeEntry"><Plus :size="16" /><span>New entry</span><kbd>N</kbd></button>
             <button title="Add a child to the selected entry · Ctrl/⌘+Enter" aria-label="Add child, Ctrl or Command+Enter" :disabled="isReadOnly || !selectedNode" @click="selectedNode && addEntry(selectedNode)"><GitBranch :size="16" /><span>Add child</span><kbd>Ctrl/⌘+↵</kbd></button>
             <button title="Detach the selected entry · Shift+D" aria-label="Detach selected, Shift+D" :disabled="isReadOnly || !selectedNode" @click="selectedNode && detachEntry(selectedNode)"><Unlink :size="16" /><span>Detach</span><kbd>Shift+D</kbd></button>
             <button title="Compare two versions · Shift+C" aria-label="Compare versions, Shift+C" :class="{ selected: compareMode }" @click="compareMode ? closeVersionSelection() : startVersionSelection('compare')"><GitCompareArrows :size="16" /><span>Compare</span><kbd>Shift+C</kbd></button>
@@ -3808,7 +3914,7 @@ function resetWorkspace() {
     <div v-if="menu" ref="contextMenuElement" class="context-menu" :style="{ left: `${contextMenuPosition.x}px`, top: `${contextMenuPosition.y}px` }" @click.stop>
       <template v-if="menu.kind === 'version'">
         <div class="context-title">{{ menu.versionId === 'v0' ? 'ROOT ACTIONS' : 'VERSION ACTIONS' }}</div>
-        <button v-if="!isReadOnly" @click="addEntryToVersion(menu.versionId); menu = null"><Plus :size="15" /> Add Entry</button>
+        <button @click="addEntryToVersion(menu.versionId); menu = null"><Plus :size="15" /> Add Entry</button>
         <button @click="focusActive(); menu = null"><Maximize :size="15" /> Focus active version</button>
         <button v-if="versions.find((version) => version.id === menu!.versionId)?.data.length" @click="centerVersionTreemaps(menu.versionId!); menu = null"><Maximize :size="15" /> Center all elements</button>
         <button v-if="!isReadOnly && versions.find((version) => version.id === menu!.versionId)?.data.length" @click="compactVersionTreemaps(menu.versionId!); menu = null"><Layers3 :size="15" /> Compact Layout</button>
@@ -3853,7 +3959,7 @@ function resetWorkspace() {
           <div v-for="(entry, index) in editor.entries" :key="entry.id" class="entry-draft-row">
             <div class="entry-draft-heading"><strong>Entry {{ index + 1 }}</strong><button v-if="editor.entries.length > 1" type="button" class="quiet-icon" :aria-label="`Remove entry ${index + 1}`" @click="removeEditorEntryRow(entry.id)"><X :size="14" /></button></div>
             <label class="editor-label" :for="`entry-value-${entry.id}`">Entry name</label>
-            <input v-if="index === 0" :id="`entry-value-${entry.id}`" ref="entryValueInput" v-model="entry.value" maxlength="120" placeholder="e.g. Research notes" />
+            <input v-if="index === 0" :id="`entry-value-${entry.id}`" :ref="setEntryValueInput" v-model="entry.value" maxlength="120" placeholder="e.g. Research notes" />
             <input v-else :id="`entry-value-${entry.id}`" v-model="entry.value" maxlength="120" placeholder="e.g. Research notes" />
             <label class="editor-label" :for="`entry-description-${entry.id}`">Description <span>optional</span></label>
             <textarea :id="`entry-description-${entry.id}`" v-model="entry.description" maxlength="400" rows="2" placeholder="Shown when you hover over this entry"></textarea>
@@ -3863,7 +3969,7 @@ function resetWorkspace() {
         </template>
         <template v-else>
           <label class="editor-label" for="entry-value">New value</label>
-          <input id="entry-value" ref="entryValueInput" v-model="editor.value" maxlength="120" placeholder="e.g. Research notes" />
+          <input id="entry-value" :ref="setEntryValueInput" v-model="editor.value" maxlength="120" placeholder="e.g. Research notes" />
           <label class="editor-label" for="entry-description">Description <span>optional</span></label>
           <textarea id="entry-description" v-model="editor.description" maxlength="400" rows="3" placeholder="Shown when you hover over this entry"></textarea>
           <div class="editor-actions"><button type="button" class="cancel-button" @click="editor = null">Cancel</button><button type="submit" class="primary-button" :disabled="!editor.value.trim()"><Check :size="15" /> Confirm</button></div>
@@ -3919,6 +4025,35 @@ function resetWorkspace() {
           <div class="editor-actions"><button type="button" class="cancel-button" @click="entryOperation = null">Cancel</button><button type="submit" class="primary-button" :disabled="entryOperation.entries.some((entry) => !entry.value.trim())"><GitBranch :size="15" /> Split entry</button></div>
         </template>
       </form>
+    </div>
+    <div v-if="roomDialogOpen" class="editor-scrim room-manager-scrim" @click.self="roomDialogOpen = false">
+      <section class="entry-editor room-manager" role="dialog" aria-modal="true" aria-labelledby="room-manager-title">
+        <div class="editor-heading">
+          <span id="room-manager-title" class="section-label">CHANGE ROOM</span>
+          <button type="button" class="quiet-icon" title="Close" @click="roomDialogOpen = false"><X :size="17" /></button>
+        </div>
+        <p class="operation-note">Each room keeps its own branches, versions, entries, and interaction log on this device.</p>
+        <div class="local-room-list">
+          <div v-for="room in localRooms" :key="room" class="local-room-row">
+            <button type="button" class="local-room-select" :disabled="room === currentRoomName"
+              @click="activateRoom(room)">
+              <span>{{ room }}</span><small v-if="room === currentRoomName">Current</small>
+            </button>
+            <button v-if="room !== currentRoomName" type="button" class="local-room-delete"
+              :aria-label="`Delete locally saved room ${room}`" @click="deleteLocalRoom(room)">
+              <Trash2 :size="14" />
+            </button>
+          </div>
+        </div>
+        <form class="new-room-form" @submit.prevent="createRoomFromDialog">
+          <label class="editor-label" for="new-room-name">Create a new empty room</label>
+          <input id="new-room-name" v-model="newRoomName" maxlength="80" placeholder="Room name" />
+          <div class="editor-actions">
+            <button type="button" class="cancel-button" @click="roomDialogOpen = false">Cancel</button>
+            <button type="submit" class="primary-button" :disabled="!newRoomName.trim()">Create room</button>
+          </div>
+        </form>
+      </section>
     </div>
     <div v-if="entryTooltip" class="entry-tooltip" role="tooltip"
       :style="{ left: `${Math.min(entryTooltip.x + 14, window.innerWidth - 300)}px`, top: `${Math.min(entryTooltip.y + 16, window.innerHeight - 100)}px` }">

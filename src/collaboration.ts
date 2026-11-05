@@ -56,6 +56,35 @@ export class PeerRoom {
       if (this.peer === peer) this.publishStatus('error', 1, 'Connection to the host was closed')
     })
     connection.on('error', (error) => this.handleError(error))
+    await new Promise<void>((resolve, reject) => {
+      const timeout = window.setTimeout(() => {
+        cleanup()
+        this.publishStatus('error', 0, 'Timed out connecting to the room')
+        reject(new Error('Timed out connecting to the room'))
+      }, 15000)
+      const cleanup = () => {
+        window.clearTimeout(timeout)
+        connection.off('open', onOpen)
+        connection.off('error', onError)
+        connection.off('close', onClose)
+      }
+      const onOpen = () => {
+        cleanup()
+        resolve()
+      }
+      const onError = (error: Error) => {
+        cleanup()
+        reject(error)
+      }
+      const onClose = () => {
+        cleanup()
+        reject(new Error('Connection to the host was closed'))
+      }
+      connection.once('open', onOpen)
+      connection.once('error', onError)
+      connection.once('close', onClose)
+      if (connection.open) onOpen()
+    })
   }
 
   send(message: unknown) {

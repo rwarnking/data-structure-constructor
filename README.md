@@ -12,9 +12,11 @@ Open a version's **three-dots** menu to focus the version, center and fit all of
 
 Use **F** to focus the active version, and the **arrow keys** to move to the previous or next version on the current history path, or to the closest version on the branch above or below. **Ping** (or **P**) toggles Ping Mode; click the canvas to place a ping, and press **P** or **Esc** to exit. Canvas drags continue to pan without placing a ping.
 
-## Shared sessions
+## Rooms and shared sessions
 
-Enter the same room name on each client and choose **Host** on one client and **Join** on the others, or open a copied invite link to join automatically. All connected peers can edit and create branches, including from the root version. WebRTC carries shared edits and temporary user presence between peers; PeerJS's public signaling service is used to establish connections. Each participant has an independent active version and selection, highlighted using a stable user color. The host browser must remain open and connected for the room to remain available. Concurrent changes to different versions merge; simultaneous changes to the same version use deterministic last-writer-wins conflict resolution. Each browser retains a local copy in browser storage.
+At startup, Canopy opens the last locally saved room, or creates one if needed, and automatically hosts or joins it. **Change Room** lets you switch between saved rooms, create an empty room, or delete an inactive room after confirmation. **Copy Invite** copies a link that opens the same room for collaborators. Each room keeps its own versions, entries, interaction log, collaboration metadata, and copied-entry clipboard in browser storage. The current user appears in the Collaborators list and local actions are recorded in the Interaction Log even when no other users are connected.
+
+All connected peers can edit and create branches, including from the root version. WebRTC carries shared edits and temporary user presence between peers; PeerJS's public signaling service is used to establish connections. Each participant has an independent active version and selection, highlighted using a stable user color. The host browser must remain open and connected for the room to remain available. Concurrent changes to different versions merge; simultaneous changes to the same version use deterministic last-writer-wins conflict resolution.
 
 ## Run locally
 
@@ -23,7 +25,7 @@ npm install
 npm run dev
 ```
 
-The Vite UI runs at `http://127.0.0.1:5173`. During development, the accompanying workspace API saves its snapshot to `data/workspace.json`; the deployed static app uses browser storage and does not require that API.
+The Vite UI runs at `http://127.0.0.1:5173`. Room state is persisted in browser storage in both development and deployed builds; the local workspace API is not used for room data.
 
 For a production build, run `npm run build` followed by `npm start`. The production server serves the built UI and the same workspace API on port `4173`.
 
