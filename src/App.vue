@@ -33,8 +33,8 @@ function fitMapViewToLayout(
   padding = MAP_PADDING,
 ): MapView {
   const viewport = {
-    width: versionId === 'v0' ? CARD_WIDTH - 2 : CARD_WIDTH - 14,
-    height: versionId === 'v0' ? Math.max(1, graphBounds.value.height - 2) : CARD_HEIGHT - 47,
+    width: CARD_WIDTH - 14,
+    height: CARD_HEIGHT - 47,
   }
   const geometry = mapGeometry(data, positions, viewport.width, viewport.height)
   const fit = Math.max(MAP_ZOOM_MIN, Math.min(
@@ -63,7 +63,14 @@ type SpatialPreview = {
   view: MapView
 }
 type StoredState = { versions: Version[]; activeId: string; nextNode: number; nextVersion: number; nextLane: number; copyLinks: CopyLink[] }
-type EditorState = { mode: 'create' | 'rename'; parentId: string | null; nodeId: string | null; value: string; description: string }
+type EntryDraft = { id: string; value: string; description: string }
+type EditorState =
+  | { mode: 'create'; parentId: string | null; entries: EntryDraft[] }
+  | { mode: 'rename'; parentId: null; nodeId: string; value: string; description: string }
+type SplitDraft = { id: string; value: string; description: string }
+type EntryOperation =
+  | { mode: 'merge'; nodeIds: string[]; value: string; description: string }
+  | { mode: 'split'; nodeId: string; entries: SplitDraft[]; assignments: Record<string, string> }
 type FlatNode = { node: TreeNode; parentId: string | null; path: string; order: number }
 type Revision = { clock: number; actor: string }
 type VersionChange = { version: Version; revision: Revision }
@@ -114,9 +121,9 @@ const CLIENT_ID = getClientId()
 const DEV_WORKSPACE_API = import.meta.env.DEV
 const CARD_WIDTH = 260
 const CARD_HEIGHT = 260
-const GRAPH_GAP_X = 170
+const GRAPH_GAP_X = 300
 const GRAPH_GAP_Y = 72
-const TERMINAL_TAIL_LENGTH = 120
+const TERMINAL_TAIL_LENGTH = GRAPH_GAP_X
 const TERMINAL_ARROW_SIZE = 1.6
 const TERMINAL_ARROW_BASE_INSET = 0.3
 const TREE_MAP_HEIGHT = CARD_HEIGHT - 40
@@ -127,6 +134,7 @@ const TREE_HEADER_HEIGHT = 28
 const MAP_PADDING = 12
 const MAP_GAP = 12
 const VERSION_TREEMAP_ASPECT = (CARD_WIDTH - 14) / (CARD_HEIGHT - 47)
+const SIDEBAR_LAYOUT_WIDTH = 238
 const MAP_ZOOM_MIN = 0.0001
 const MAP_ZOOM_MAX = 8
 const ZOOM_MAX = 4
@@ -213,6 +221,7 @@ const isReadOnly = computed(() => zoom.value <= 0.35)
 const pan = ref({ x: 40, y: 0 })
 const graphCanvas = ref<HTMLElement | null>(null)
 const canvasSize = ref({ width: window.innerWidth, height: Math.max(400, window.innerHeight - 209) })
+const browserViewport = ref({ width: window.innerWidth, height: window.innerHeight })
 let canvasObserver: ResizeObserver | null = null
 let panAnimationFrame: number | null = null
 const draggingCanvas = ref(false)
@@ -242,6 +251,8 @@ const mapPanDrag = ref<{
   y: number
   panX: number
   panY: number
+  scaleX: number
+  scaleY: number
   moved: boolean
 } | null>(null)
 const transientMapViews = ref<Record<string, MapView>>({})
@@ -275,7 +286,19 @@ watch(editor, async (value) => {
   if (!value) return
   await nextTick()
   entryValueInput.value?.focus()
-  entryValueInput.value?.setSelectionRange(value.value.length, value.value.length)
+  const text = value.mode === 'create' ? value.entries[0]?.value ?? '' : value.value
+  entryValueInput.value?.setSelectionRange(text.length, text.length)
+})
+const entryOperation = ref<EntryOperation | null>(null)
+const bulkDeleteMode = ref<'keep-children' | 'subtree' | 'detach-children'>('keep-children')
+const bulkDeleteDialog = ref(false)
+const windowDimensions = computed(() => {
+  const viewportWidth = Math.max(320, browserViewport.value.width - SIDEBAR_LAYOUT_WIDTH)
+  const viewportHeight = Math.max(300, browserViewport.value.height)
+  const aspect = viewportWidth / viewportHeight
+  const width = Math.max(240, Math.min(460, viewportWidth * 0.36, viewportHeight * 0.48 * aspect))
+  const height = Math.min(440, width / aspect)
+  return { width, height }
 })
 const clipboard = ref<ClipboardEntry | null>(readClipboard())
 const toast = ref('')
@@ -327,6 +350,8 @@ watch(isReadOnly, (readOnly) => {
   if (!readOnly) return
   setSelectedNodes([])
   editor.value = null
+  entryOperation.value = null
+  bulkDeleteDialog.value = false
   treeDrag.value = null
   draggedNode.value = null
   draggedPosition.value = null
@@ -1409,9 +1434,7 @@ function reflowLayout() {
       continue
     }
 
-    const lane = parent.lane === source.lane
-      ? parent.lane + 1
-      : Math.max(parent.lane, source.lane)
+    const lane = Math.min(parent.lane, source.lane) + 1
     for (const other of graph) {
       if (!mergeLineIds.has(other.id) && other.lane >= lane) other.lane += 1
     }
@@ -1490,27 +1513,37 @@ function createVersion(data: TreeNode[], change: string, forceNew = false) {
 
 function addEntry(parentId: string | null = null) {
   if (isReadOnly.value) return
-  editor.value = { mode: 'create', parentId, nodeId: null, value: '', description: '' }
+  editor.value = { mode: 'create', parentId, entries: [newEntryDraft()] }
 }
 
 function commitEditor() {
   if (isReadOnly.value || !editor.value) return
-  const { mode, parentId, nodeId, value: rawValue, description: rawDescription } = editor.value
+  const currentEditor = editor.value
+  if (currentEditor.mode === 'create') {
+    const entries = currentEditor.entries.map((entry) => ({
+      value: entry.value.trim(),
+      description: entry.description.trim(),
+    }))
+    if (!entries.length || entries.some((entry) => !entry.value)) return
+    const data = clone(active.value.data)
+    const nodes = entries.map((entry) => makeNode(entry.value, entry.description))
+    if (currentEditor.parentId) {
+      const parent = findNode(data, currentEditor.parentId)
+      if (!parent) return
+      parent.children.push(...nodes)
+    } else data.push(...nodes)
+    editor.value = null
+    const operation = currentEditor.parentId ? 'Add' : 'Create'
+    const summary = nodes.length === 1
+      ? `${operation} ${entries[0]!.value}`
+      : `${operation} ${entries.length} entries: ${entries.map((entry) => entry.value).join(', ')}`
+    createVersion(data, summary, nodes.length > 1)
+    return
+  }
+  const { nodeId, value: rawValue, description: rawDescription } = currentEditor
   const value = rawValue.trim()
   const description = rawDescription.trim()
   if (!value) return
-  if (mode === 'create') {
-    const data = clone(active.value.data)
-    const node = makeNode(value, description)
-    if (parentId) {
-      const parent = findNode(data, parentId)
-      if (!parent) return
-      parent.children.push(node)
-    } else data.push(node)
-    editor.value = null
-    createVersion(data, parentId ? `Add ${value}` : `Create ${value}`)
-    return
-  }
   const data = clone(active.value.data)
   const node = nodeId ? findNode(data, nodeId) : undefined
   if (!node || (node.value === value && (node.description ?? '') === description)) { editor.value = null; return }
@@ -1526,6 +1559,20 @@ function renameEntry(id: string) {
   const node = findNode(active.value.data, id)
   if (!node) return
   editor.value = { mode: 'rename', parentId: null, nodeId: id, value: node.value, description: node.description ?? '' }
+}
+
+function newEntryDraft(): EntryDraft {
+  return { id: `draft-${crypto.randomUUID()}`, value: '', description: '' }
+}
+
+function addEditorEntryRow() {
+  if (editor.value?.mode === 'create') editor.value.entries.push(newEntryDraft())
+}
+
+function removeEditorEntryRow(id: string) {
+  if (editor.value?.mode === 'create' && editor.value.entries.length > 1) {
+    editor.value.entries = editor.value.entries.filter((entry) => entry.id !== id)
+  }
 }
 
 function deleteEntry(id: string, mode: 'keep-children' | 'subtree' | 'detach-children') {
@@ -1546,6 +1593,219 @@ function deleteEntry(id: string, mode: 'keep-children' | 'subtree' | 'detach-chi
     data.push(...detached)
   } else siblings.splice(index, 1)
   createVersion(data, `Delete ${node.value}`)
+}
+
+function deleteSelectedEntries(mode: 'keep-children' | 'subtree' | 'detach-children') {
+  if (isReadOnly.value || selectedNodes.value.length < 2) return
+  const selected = new Set(selectedNodes.value.filter((id) => !!findNode(active.value.data, id)))
+  if (selected.size < 2) return
+  const selectedRoots = [...selected].filter((id) => {
+    let parent = findParent(active.value.data, id)
+    while (parent) {
+      if (selected.has(parent.id)) return false
+      parent = findParent(active.value.data, parent.id)
+    }
+    return true
+  })
+  if (mode === 'subtree') {
+    const count = selectedRoots.reduce((sum, id) => {
+      const node = findNode(active.value.data, id)
+      return sum + (node ? countNodes([node]) : 0)
+    }, 0)
+    if (!window.confirm(`Delete ${count} entries in the selected subtrees?`)) return
+  }
+  const data = clone(active.value.data)
+  const detachedRoots: TreeNode[] = []
+  const removeSelected = (nodes: TreeNode[]): TreeNode[] => nodes.flatMap((node) => {
+    if (!selected.has(node.id)) {
+      return [{ ...node, children: removeSelected(node.children) }]
+    }
+    if (mode === 'subtree') return []
+    if (mode === 'detach-children') {
+      for (const child of node.children) {
+        if (selected.has(child.id)) removeSelected([child])
+        else detachedRoots.push({ ...child, children: removeSelected(child.children) })
+      }
+      return []
+    }
+    return removeSelected(node.children)
+  })
+  const nextData = removeSelected(data)
+  if (mode === 'detach-children') nextData.push(...detachedRoots)
+  const count = selected.size
+  const version = createVersion(nextData, `Delete ${count} selected entries`, true)
+  if (version) setSelectedNodes([])
+  entryOperation.value = null
+  bulkDeleteDialog.value = false
+}
+
+function openBulkDelete() {
+  if (selectedNodes.value.length < 2) return
+  bulkDeleteMode.value = 'keep-children'
+  bulkDeleteDialog.value = true
+}
+
+function highestSelectedNode(nodeIds: string[], data: TreeNode[]) {
+  const flat = flattenNodes(data)
+  const selected = new Set(nodeIds)
+  const depthOf = (id: string) => {
+    let depth = 0
+    let parentId = flat.get(id)?.parentId
+    while (parentId) {
+      depth += 1
+      parentId = flat.get(parentId)?.parentId ?? null
+    }
+    return depth
+  }
+  const order = new Map([...flat.keys()].map((id, index) => [id, index]))
+  return nodeIds.filter((id) => {
+    let parentId = flat.get(id)?.parentId
+    while (parentId) {
+      if (selected.has(parentId)) return false
+      parentId = flat.get(parentId)?.parentId ?? null
+    }
+    return true
+  }).sort((left, right) => depthOf(left) - depthOf(right)
+    || order.get(left)! - order.get(right)!)[0]
+}
+
+function openMergeEntries() {
+  const nodeIds = selectedNodes.value.filter((id) => !!findNode(active.value.data, id))
+  if (nodeIds.length < 2) return
+  const highest = highestSelectedNode(nodeIds, active.value.data)
+  if (!highest) return
+  const original = findNode(active.value.data, highest)!
+  entryOperation.value = {
+    mode: 'merge',
+    nodeIds,
+    value: original.value,
+    description: original.description ?? '',
+  }
+}
+
+function openSplitEntry(nodeId: string) {
+  const node = findNode(active.value.data, nodeId)
+  if (!node) return
+  const first = newSplitDraft()
+  entryOperation.value = {
+    mode: 'split',
+    nodeId,
+    entries: [first, newSplitDraft()],
+    assignments: Object.fromEntries(node.children.map((child) => [child.id, first.id])),
+  }
+}
+
+function newSplitDraft(): SplitDraft {
+  return { id: `split-${crypto.randomUUID()}`, value: '', description: '' }
+}
+
+function addSplitEntry() {
+  if (entryOperation.value?.mode === 'split') {
+    entryOperation.value.entries.push(newSplitDraft())
+  }
+}
+
+function removeSplitEntry(id: string) {
+  const operation = entryOperation.value
+  if (operation?.mode !== 'split' || operation.entries.length <= 2) return
+  const removed = operation.entries.find((entry) => entry.id === id)
+  if (!removed) return
+  const replacement = operation.entries.find((entry) => entry.id !== id)!
+  operation.entries = operation.entries.filter((entry) => entry.id !== id)
+  for (const [childId, destination] of Object.entries(operation.assignments)) {
+    if (destination === id) operation.assignments[childId] = replacement.id
+  }
+}
+
+function commitEntryOperation() {
+  if (isReadOnly.value || !entryOperation.value) return
+  const operation = entryOperation.value
+  const data = clone(active.value.data)
+  if (operation.mode === 'merge') {
+    const value = operation.value.trim()
+    if (!value) return
+    const selected = new Set(operation.nodeIds.filter((id) => !!findNode(data, id)))
+    if (selected.size < 2) return
+    const flat = flattenNodes(data)
+    const highest = highestSelectedNode([...selected], data)
+    if (!highest) return
+    const parentId = flat.get(highest)!.parentId
+    const targetSiblings = parentId ? findNode(data, parentId)?.children : data
+    if (!targetSiblings) return
+    const originalIndex = targetSiblings.findIndex((node) => node.id === highest)
+    if (originalIndex < 0) return
+    const removedBefore = targetSiblings.slice(0, originalIndex).filter((node) => selected.has(node.id)).length
+    const children: TreeNode[] = []
+    const appendSelectedChildren = (node: TreeNode) => {
+      for (const child of node.children) {
+        if (selected.has(child.id)) appendSelectedChildren(child)
+        else children.push(stripSelectedDescendants(child))
+      }
+    }
+    const stripSelectedDescendants = (node: TreeNode): TreeNode => ({
+      ...node,
+      children: node.children.flatMap((child) => {
+        if (selected.has(child.id)) {
+          appendSelectedChildren(child)
+          return []
+        }
+        return [stripSelectedDescendants(child)]
+      }),
+    })
+    for (const id of selected) {
+      const selectedNode = findNode(data, id)
+      if (selectedNode && ![...selected].some((otherId) => {
+        if (otherId === id) return false
+        let parentId = flat.get(id)?.parentId
+        while (parentId) {
+          if (parentId === otherId) return true
+          parentId = flat.get(parentId)?.parentId ?? null
+        }
+        return false
+      })) appendSelectedChildren(selectedNode)
+    }
+    const removeSelected = (nodes: TreeNode[]): TreeNode[] => nodes.flatMap((node) =>
+      selected.has(node.id) ? [] : [{ ...node, children: removeSelected(node.children) }])
+    const nextData = removeSelected(data)
+    const siblings = parentId ? findNode(nextData, parentId)?.children : nextData
+    if (!siblings) return
+    const mergeNode = makeNode(value, operation.description.trim())
+    mergeNode.children = children
+    siblings.splice(Math.max(0, originalIndex - removedBefore), 0, mergeNode)
+    entryOperation.value = null
+    const version = createVersion(nextData, `Merge ${selected.size} entries into ${value}`, true)
+    if (version) setSelectedNodes([mergeNode.id])
+    return
+  }
+
+  const original = findNode(data, operation.nodeId)
+  if (!original || operation.entries.length < 2) return
+  const entries = operation.entries.map((entry) => ({
+    ...entry,
+    value: entry.value.trim(),
+    description: entry.description.trim(),
+  }))
+  if (entries.some((entry) => !entry.value)) return
+  const validIds = new Set(entries.map((entry) => entry.id))
+  if (original.children.some((child) => !validIds.has(operation.assignments[child.id]))) return
+  const parent = findParent(data, operation.nodeId)
+  const siblings = parent?.children ?? data
+  const index = siblings.findIndex((node) => node.id === operation.nodeId)
+  if (index < 0) return
+  const childrenByEntry = new Map(entries.map((entry) => [entry.id, [] as TreeNode[]]))
+  for (const child of original.children) {
+    childrenByEntry.get(operation.assignments[child.id])!.push(child)
+  }
+  const replacements = entries.map((entry) => {
+    const node = makeNode(entry.value, entry.description)
+    node.children = childrenByEntry.get(entry.id)!
+    return node
+  })
+  const nextData = data
+  siblings.splice(index, 1, ...replacements)
+  entryOperation.value = null
+  const version = createVersion(nextData, `Split ${original.value} into ${entries.length} entries`, true)
+  if (version) setSelectedNodes(replacements.map((node) => node.id))
 }
 
 function detachEntry(id: string, preview?: SpatialPreview) {
@@ -1984,16 +2244,17 @@ const maxLane = computed(() => Math.max(...versions.value.map((version) => versi
 const activeChildren = computed(() => versions.value.filter((version) => version.parentId === active.value.id).length)
 
 function cardPosition(version: Version) {
-  const mainRow = canvasSize.value.height / 2 - CARD_HEIGHT / 2
-  if (version.id === 'v0') return { x: 0, y: 0 }
-  return { x: version.step * (CARD_WIDTH + GRAPH_GAP_X), y: mainRow + version.lane * (CARD_HEIGHT + GRAPH_GAP_Y) }
+  const { width, height } = windowDimensions.value
+  const mainRow = canvasSize.value.height / 2 - height / 2
+  if (version.id === 'v0') return { x: 0, y: mainRow }
+  return { x: version.step * (width + GRAPH_GAP_X), y: mainRow + version.lane * (height + GRAPH_GAP_Y) }
 }
-function cardHeight(version: Version) { return version.id === 'v0' ? graphBounds.value.height : CARD_HEIGHT }
+function cardHeight(_version: Version) { return windowDimensions.value.height }
 const graphBounds = computed(() => ({
-  width: Math.max(CARD_WIDTH, maxStep.value * (CARD_WIDTH + GRAPH_GAP_X) + CARD_WIDTH + 140),
+  width: Math.max(windowDimensions.value.width, maxStep.value * (windowDimensions.value.width + GRAPH_GAP_X) + windowDimensions.value.width + 140),
   height: Math.max(
     canvasSize.value.height,
-    canvasSize.value.height / 2 + CARD_HEIGHT / 2 + maxLane.value * (CARD_HEIGHT + GRAPH_GAP_Y) + 140,
+    canvasSize.value.height / 2 + windowDimensions.value.height / 2 + maxLane.value * (windowDimensions.value.height + GRAPH_GAP_Y) + 140,
   ),
 }))
 const fitZoom = computed(() => Math.max(0.005, Math.min(
@@ -2009,23 +2270,21 @@ function connectionPath(version: Version) {
   if (!parent) return ''
   return versionConnectionPath(parent, version)
 }
-function versionConnectionPath(source: Version, destination: Version, endOffsetY = 0) {
+function versionConnectionPath(source: Version, destination: Version, endOffsetY = 0, routeRight = false) {
   const from = cardPosition(source)
   const to = cardPosition(destination)
-  const startX = from.x + CARD_WIDTH
+  const startX = from.x + windowDimensions.value.width
   const startY = from.y + cardHeight(source) / 2
   const endX = to.x
   const endY = to.y + cardHeight(destination) / 2 + endOffsetY
   if (source.id === 'v0' && endOffsetY === 0) return `M ${startX} ${endY} H ${endX}`
   if (Math.abs(endY - startY) < 1) return `M ${startX} ${startY} H ${endX}`
   const direction = Math.sign(endY - startY)
-  const cornerX = startX + (endX - startX) / 2
-  const radius = Math.min(
-    GRAPH_GAP_X / 4,
-    Math.abs(endY - startY) / 2,
-    cornerX - startX,
-    endX - cornerX,
-  )
+  const maxRadius = Math.min(GRAPH_GAP_X / 4, Math.abs(endY - startY) / 2)
+  const cornerX = false ? endX - maxRadius : startX + (endX - startX) / 2
+  const radius = false
+    ? Math.min(maxRadius, (endX - startX) / 4)
+    : Math.min(maxRadius, cornerX - startX, endX - cornerX)
   return `M ${startX} ${startY} H ${cornerX - radius} Q ${cornerX} ${startY} ${cornerX} ${startY + direction * radius} V ${endY - direction * radius} Q ${cornerX} ${endY} ${cornerX + radius} ${endY} H ${endX}`
 }
 function mergeConnectionPath(version: Version) {
@@ -2045,7 +2304,7 @@ function isBranchCurve(version: Version) {
 }
 function connectionWidth(version: Version) {
   const parent = versions.value.find((item) => item.id === version.parentId)
-  return Math.min(CARD_HEIGHT, cardHeight(version), parent ? cardHeight(parent) : CARD_HEIGHT) / 3
+  return Math.min(windowDimensions.value.height, cardHeight(version), parent ? cardHeight(parent) : windowDimensions.value.height) / 3
 }
 function terminalTailEnd(version: Version) {
   return TERMINAL_TAIL_LENGTH - TERMINAL_ARROW_BASE_INSET * connectionWidth(version)
@@ -2158,18 +2417,14 @@ function cardPositions(version: Version) {
 const mapGeometries = computed(() => {
   const geometries = new Map<string, ReturnType<typeof mapGeometry>>()
   for (const version of versions.value) {
-    geometries.set(version.id, mapGeometry(
-      cardData(version), cardPositions(version),
-      version.id === 'v0' ? CARD_WIDTH - 2 : CARD_WIDTH - 14,
-      version.id === 'v0' ? graphBounds.value.height - 2 : CARD_HEIGHT - 47,
-    ))
+    geometries.set(version.id, mapGeometry(cardData(version), cardPositions(version), CARD_WIDTH - 14, CARD_HEIGHT - 47))
   }
   return geometries
 })
 function mapViewport(version: Version) {
   return {
-    width: version.id === 'v0' ? CARD_WIDTH - 2 : CARD_WIDTH - 14,
-    height: version.id === 'v0' ? Math.max(1, graphBounds.value.height - 2) : CARD_HEIGHT - 47,
+    width: CARD_WIDTH - 14,
+    height: CARD_HEIGHT - 47,
   }
 }
 function mapViewFor(version: Version): MapView {
@@ -2587,16 +2842,19 @@ function positionAt(version: Version, clientX: number, clientY: number, map: HTM
   const drag = treeDrag.value
   const rect = map.getBoundingClientRect()
   const view = previewLayout.value?.view ?? mapViewFor(version)
+  const viewport = mapViewport(version)
+  const localX = (clientX - rect.left) / zoom.value * viewport.width / (rect.width / zoom.value)
+  const localY = (clientY - rect.top) / zoom.value * viewport.height / (rect.height / zoom.value)
   if (!drag?.space) {
-    const x = ((clientX - rect.left) / zoom.value - view.panX) / view.zoom
-    const y = ((clientY - rect.top) / zoom.value - view.panY) / view.zoom
+    const x = (localX - view.panX) / view.zoom
+    const y = (localY - view.panY) / view.zoom
     return {
       x: x / CARD_WIDTH,
       y: y / TREE_MAP_HEIGHT,
     }
   }
-  const pointerX = ((clientX - rect.left) / zoom.value - view.panX) / view.zoom
-  const pointerY = ((clientY - rect.top) / zoom.value - view.panY) / view.zoom
+  const pointerX = (localX - view.panX) / view.zoom
+  const pointerY = (localY - view.panY) / view.zoom
   return {
     x: (pointerX - drag.space.grabX * drag.space.width) / CARD_WIDTH,
     y: (pointerY - drag.space.grabY * drag.space.height) / TREE_MAP_HEIGHT,
@@ -2607,8 +2865,9 @@ function treeNodeAt(clientX: number, clientY: number, map: HTMLElement) {
   if (versionId !== active.value.id) return null
   const rect = map.getBoundingClientRect()
   const view = previewLayout.value?.view ?? mapViewFor(active.value)
-  const localX = (clientX - rect.left) / zoom.value
-  const localY = (clientY - rect.top) / zoom.value
+  const viewport = mapViewport(active.value)
+  const localX = (clientX - rect.left) / zoom.value * viewport.width / (rect.width / zoom.value)
+  const localY = (clientY - rect.top) / zoom.value * viewport.height / (rect.height / zoom.value)
   const x = (localX - view.panX) / view.zoom
   const y = (localY - view.panY) / view.zoom
   const tiles = active.value.data.flatMap((root, index) => tilesFor(root, active.value.data, index, active.value.positions))
@@ -2643,8 +2902,8 @@ function rootPositionIsAvailable(
   const bounds = {
     left: -view.panX / view.zoom,
     top: -view.panY / view.zoom,
-    right: (map.clientWidth - view.panX) / view.zoom,
-    bottom: (map.clientHeight - view.panY) / view.zoom,
+    right: (mapViewport(version).width - view.panX) / view.zoom,
+    bottom: (mapViewport(version).height - view.panY) / view.zoom,
   }
   if (left < bounds.left || top < bounds.top
     || left + size.width > bounds.right || top + size.height > bounds.bottom) return false
@@ -2721,7 +2980,7 @@ function onTileContext(event: MouseEvent, nodeId: string) {
   if (isReadOnly.value || event.button !== 2) return
   event.preventDefault()
   event.stopPropagation()
-  setSelectedNodes([nodeId])
+  if (!selectedNodes.value.includes(nodeId)) setSelectedNodes([nodeId])
   menu.value = { x: event.clientX, y: event.clientY, kind: 'entry', nodeId, versionId: active.value.id }
 }
 function onVersionContext(version: Version, event: MouseEvent) {
@@ -2765,8 +3024,9 @@ function zoomMap(event: WheelEvent, version: Version) {
   event.stopPropagation()
   const map = event.currentTarget as HTMLElement
   const rect = map.getBoundingClientRect()
-  const pointerX = (event.clientX - rect.left) / zoom.value
-  const pointerY = (event.clientY - rect.top) / zoom.value
+  const viewport = mapViewport(version)
+  const pointerX = (event.clientX - rect.left) / zoom.value * viewport.width / (rect.width / zoom.value)
+  const pointerY = (event.clientY - rect.top) / zoom.value * viewport.height / (rect.height / zoom.value)
   const current = mapViewFor(version)
   const nextZoom = Math.max(MAP_ZOOM_MIN, Math.min(MAP_ZOOM_MAX, current.zoom * Math.exp(-event.deltaY * 0.0012)))
   const worldX = (pointerX - current.panX) / current.zoom
@@ -2784,6 +3044,8 @@ function startMapPan(event: PointerEvent, version: Version) {
   event.stopPropagation()
   state.value.activeId = version.id
   const view = mapViewFor(version)
+  const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
+  const viewport = mapViewport(version)
   const timer = mapViewTimers.get(version.id)
   if (timer !== undefined) window.clearTimeout(timer)
   mapViewTimers.delete(version.id)
@@ -2794,6 +3056,8 @@ function startMapPan(event: PointerEvent, version: Version) {
     y: event.clientY,
     panX: view.panX,
     panY: view.panY,
+    scaleX: viewport.width / (rect.width / zoom.value),
+    scaleY: viewport.height / (rect.height / zoom.value),
     moved: false,
   }
 }
@@ -2815,8 +3079,8 @@ function moveMapPan(event: PointerEvent) {
   drag.moved = true
   transientMapViews.value[version.id] = {
     ...mapViewFor(version),
-    panX: drag.panX + (event.clientX - drag.x) / zoom.value,
-    panY: drag.panY + (event.clientY - drag.y) / zoom.value,
+    panX: drag.panX + (event.clientX - drag.x) / zoom.value * drag.scaleX,
+    panY: drag.panY + (event.clientY - drag.y) / zoom.value * drag.scaleY,
     manual: true,
   }
 }
@@ -2838,9 +3102,9 @@ function focusVersion(version: Version) {
   const position = cardPosition(version)
   const availableWidth = Math.max(1, canvasSize.value.width - 100)
   const availableHeight = Math.max(1, canvasSize.value.height - 100)
-  const targetZoom = Math.max(0.005, Math.min(ZOOM_MAX, availableWidth / CARD_WIDTH, availableHeight / cardHeight(version)))
+  const targetZoom = Math.max(0.005, Math.min(ZOOM_MAX, availableWidth / windowDimensions.value.width, availableHeight / cardHeight(version)))
   animateCamera(targetZoom, {
-    x: canvasSize.value.width / 2 - (position.x + CARD_WIDTH / 2) * targetZoom,
+    x: canvasSize.value.width / 2 - (position.x + windowDimensions.value.width / 2) * targetZoom,
     y: canvasSize.value.height / 2 - (position.y + cardHeight(version) / 2) * targetZoom,
   }, 420)
 }
@@ -2901,7 +3165,7 @@ function animateCamera(targetZoom: number, targetPan: { x: number; y: number }, 
 }
 function isVersionCentered(version: Version) {
   const position = cardPosition(version)
-  const centerX = (position.x + CARD_WIDTH / 2) * zoom.value + pan.value.x
+  const centerX = (position.x + windowDimensions.value.width / 2) * zoom.value + pan.value.x
   const centerY = (position.y + cardHeight(version) / 2) * zoom.value + pan.value.y
   return Math.abs(centerX - canvasSize.value.width / 2) < 2
     && Math.abs(centerY - canvasSize.value.height / 2) < 2
@@ -2909,7 +3173,7 @@ function isVersionCentered(version: Version) {
 function panToVersion(version: Version, centerImmediately: boolean) {
   cancelPanAnimation()
   const position = cardPosition(version)
-  const width = CARD_WIDTH * zoom.value
+  const width = windowDimensions.value.width * zoom.value
   const height = cardHeight(version) * zoom.value
   const margin = 50
   const target = { ...pan.value }
@@ -2919,7 +3183,7 @@ function panToVersion(version: Version, centerImmediately: boolean) {
   const bottom = top + height
 
   if (centerImmediately || width > canvasSize.value.width - margin * 2) {
-    target.x = canvasSize.value.width / 2 - (position.x + CARD_WIDTH / 2) * zoom.value
+    target.x = canvasSize.value.width / 2 - (position.x + windowDimensions.value.width / 2) * zoom.value
   } else if (left < margin) target.x += margin - left
   else if (right > canvasSize.value.width - margin) target.x -= right - (canvasSize.value.width - margin)
 
@@ -2955,8 +3219,13 @@ function startTreeDrag(event: PointerEvent, id: string) {
   const rect = map?.getBoundingClientRect()
   const view = mapViewFor(active.value)
   const originalTile = tileForNode(active.value.data, active.value.positions, id)
-  const pointerX = rect ? ((event.clientX - rect.left) / zoom.value - view.panX) / view.zoom : 0
-  const pointerY = rect ? ((event.clientY - rect.top) / zoom.value - view.panY) / view.zoom : 0
+  const viewport = mapViewport(active.value)
+  const pointerX = rect
+    ? (((event.clientX - rect.left) / zoom.value * viewport.width / (rect.width / zoom.value)) - view.panX) / view.zoom
+    : 0
+  const pointerY = rect
+    ? (((event.clientY - rect.top) / zoom.value * viewport.height / (rect.height / zoom.value)) - view.panY) / view.zoom
+    : 0
   treeDrag.value = {
     id, x: event.clientX, y: event.clientY, moved: false,
     space: rect && originalTile ? {
@@ -3106,13 +3375,15 @@ function onKeydown(event: KeyboardEvent) {
   }
   if (event.key === 'Escape') { menu.value = null; closeVersionSelection(); pingMode.value = false }
 }
+function measureCanvas() {
+  browserViewport.value = { width: window.innerWidth, height: window.innerHeight }
+  if (graphCanvas.value) canvasSize.value = { width: graphCanvas.value.clientWidth, height: graphCanvas.value.clientHeight }
+}
 onMounted(() => {
-  const measureCanvas = () => {
-    if (graphCanvas.value) canvasSize.value = { width: graphCanvas.value.clientWidth, height: graphCanvas.value.clientHeight }
-  }
   canvasObserver = new ResizeObserver(measureCanvas)
   if (graphCanvas.value) canvasObserver.observe(graphCanvas.value)
   measureCanvas()
+  window.addEventListener('resize', measureCanvas)
   window.addEventListener('keydown', onKeydown)
   window.addEventListener('pointermove', moveTreeDrag)
   window.addEventListener('pointermove', moveMapPan)
@@ -3129,6 +3400,7 @@ onUnmounted(() => {
   cancelPanAnimation()
   window.clearTimeout(tileTooltipTimer)
   canvasObserver?.disconnect()
+  window.removeEventListener('resize', measureCanvas)
   window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('pointermove', moveTreeDrag)
   window.removeEventListener('pointermove', moveMapPan)
@@ -3185,16 +3457,22 @@ function resetWorkspace() {
       <aside class="sidebar" :class="{ collapsed: sidebarCollapsed }">
         <div class="sidebar-head">
           <span class="brand-mark"><Layers3 :size="19" :stroke-width="2.2" /></span>
-          <span class="brand-name">Data Structure Constructor</span>
+          <span class="brand-name">DSC</span>
           <button class="quiet-icon sidebar-toggle" :title="sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'"
             :aria-label="sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'" :aria-expanded="!sidebarCollapsed"
             @click="sidebarCollapsed = !sidebarCollapsed"><ChevronDown :size="16" /></button>
         </div>
+        <section class="side-section settings-section">
+          <button type="button" class="theme-toggle" @click="darkMode = !darkMode">
+            <component :is="darkMode ? Sun : Moon" :size="15" />
+            <span>{{ darkMode ? 'Light mode' : 'Dark mode' }}</span>
+          </button>
+        </section>
         <section class="side-section session-section">
-          <div class="section-label">SHARED SESSION</div>
+          <!-- <div class="section-label">SHARED SESSION</div> -->
           <label class="session-label" for="session-room">Room name</label>
           <input id="session-room" v-model="roomInput" maxlength="80" placeholder="Enter a room name" :disabled="roomStatus.state === 'connected' || roomStatus.state === 'hosting'" />
-          <div class="session-status" :class="`status-${roomStatus.state}`" role="status" aria-live="polite">{{ collaborationLabel }}</div>
+          <!-- <div class="session-status" :class="`status-${roomStatus.state}`" role="status" aria-live="polite">{{ collaborationLabel }}</div> -->
           <div v-if="roomStatus.state === 'idle' || roomStatus.state === 'error'" class="session-actions">
             <button type="button" class="session-button" @click="createSharedSession">New room</button>
             <button type="button" class="session-button" @click="connectToRoom('host')">Host</button>
@@ -3205,32 +3483,8 @@ function resetWorkspace() {
             <button type="button" class="session-button secondary" @click="leaveSharedSession">Leave</button>
           </div>
         </section>
-        <section class="side-section overview-section">
-          <div class="section-label">OVERVIEW</div>
-          <div class="metric-row"><span>Branches</span><strong>{{ branchCount }}</strong></div>
-          <div class="metric-row"><span>Versions</span><strong>{{ versions.length }}</strong></div>
-        </section>
-        <section class="side-section active-section">
-          <div class="section-label">ACTIVE VERSION</div>
-          <button type="button" class="active-version-card" title="Focus active version · F" @click="focusActive">
-            <div class="active-version-top"><span class="version-pip" :style="{ background: versionColor(active) }"></span><span> Branch {{ active.branch }} | {{ displayVersionId(active.id) }} | Step {{ active.step }}</span></div>
-            <strong>{{ active.change }}</strong>
-            <div class="active-meta"><span>Entries</span><strong>{{ activeNodes }}</strong></div>
-            <div class="active-meta"><span>Current step</span><strong>{{ String(active.step).padStart(2, '0') }}</strong></div>
-            <div class="active-meta"><span>Paths from here</span><strong>{{ activeChildren }}</strong></div>
-          </button>
-        </section>
-        <section class="side-section settings-section">
-          <button type="button" class="theme-toggle" @click="darkMode = !darkMode">
-            <component :is="darkMode ? Sun : Moon" :size="15" />
-            <span>{{ darkMode ? 'Light mode' : 'Dark mode' }}</span>
-          </button>
-        </section>
         <section class="side-section collaborators-section">
           <div class="section-label">COLLABORATORS</div>
-          <label class="session-label" for="user-name">Your name</label>
-          <input id="user-name" v-model="userName" class="user-name-input" maxlength="32" placeholder="Animal name"
-            @blur="userName = userName.trim() || animalForUser(CLIENT_ID)" />
           <div class="collaborator-list">
             <button v-for="user in connectedUsers" :key="user.id" type="button" class="collaborator"
               :disabled="!user.activeVersionId || !versions.some((version) => version.id === user.activeVersionId)"
@@ -3271,6 +3525,21 @@ function resetWorkspace() {
           </ol>
           <span v-else class="interaction-empty">Collaborative actions appear here.</span>
         </section>
+        <section class="side-section overview-section">
+          <div class="section-label">ROOM OVERVIEW</div>
+          <div class="metric-row"><span>Branches</span><strong>{{ branchCount }}</strong></div>
+          <div class="metric-row"><span>Versions</span><strong>{{ versions.length }}</strong></div>
+        </section>
+        <section class="side-section active-section">
+          <div class="section-label">YOUR ACTIVE VERSION</div>
+          <button type="button" class="active-version-card" title="Focus active version · F" @click="focusActive">
+            <div class="active-version-top"><span class="version-pip" :style="{ background: versionColor(active) }"></span><span> Branch {{ active.branch }} | {{ displayVersionId(active.id) }} | Step {{ active.step }}</span></div>
+            <strong>{{ active.change }}</strong>
+            <div class="active-meta"><span>Entries</span><strong>{{ activeNodes }}</strong></div>
+            <div class="active-meta"><span>Current step</span><strong>{{ String(active.step).padStart(2, '0') }}</strong></div>
+            <div class="active-meta"><span>Paths from here</span><strong>{{ activeChildren }}</strong></div>
+          </button>
+        </section>
       </aside>
 
       <section class="canvas-region">
@@ -3297,13 +3566,13 @@ function resetWorkspace() {
                   :opacity="version.id === active.id || version.mergeSourceId === active.id ? 0.96 : 0.76" />
               </template>
               <template v-for="version in versions.filter((item) => !versions.some((child) => child.parentId === item.id))" :key="`tail-${version.id}`">
-                <path :d="`M ${cardPosition(version).x + CARD_WIDTH} ${cardPosition(version).y + cardHeight(version) / 2} H ${cardPosition(version).x + CARD_WIDTH + terminalTailEnd(version)}`" class="connection-outline" fill="none" stroke="#f5f7f4" :stroke-width="connectionWidth(version) + 10" stroke-linecap="butt" />
-                <path :d="`M ${cardPosition(version).x + CARD_WIDTH} ${cardPosition(version).y + cardHeight(version) / 2} H ${cardPosition(version).x + CARD_WIDTH + terminalTailEnd(version)}`" fill="none" :stroke="versionColor(version)" :stroke-width="connectionWidth(version)" stroke-linecap="butt" marker-end="url(#arrow)" />
+                <path :d="`M ${cardPosition(version).x + windowDimensions.width} ${cardPosition(version).y + cardHeight(version) / 2} H ${cardPosition(version).x + windowDimensions.width + terminalTailEnd(version)}`" class="connection-outline" fill="none" stroke="#f5f7f4" :stroke-width="connectionWidth(version) + 10" stroke-linecap="butt" />
+                <path :d="`M ${cardPosition(version).x + windowDimensions.width} ${cardPosition(version).y + cardHeight(version) / 2} H ${cardPosition(version).x + windowDimensions.width + terminalTailEnd(version)}`" fill="none" :stroke="versionColor(version)" :stroke-width="connectionWidth(version)" stroke-linecap="butt" marker-end="url(#arrow)" />
               </template>
             </svg>
 
             <article v-for="version in versions" :key="version.id" class="version-card" :class="{ active: version.id === active.id, compared: compareIds.includes(version.id), 'compare-pick': compareMode, compact: zoom < 0.66, previewing: isPreviewing(version), 'root-version': version.id === 'v0' }"
-              :data-version="version.id" :style="{ left: `${cardPosition(version).x}px`, top: `${cardPosition(version).y}px`, width: `${CARD_WIDTH}px`, height: `${cardHeight(version)}px`, '--branch-color': versionColor(version), '--user-color': userColor(CLIENT_ID), '--author-color': versionAuthorColor(version) }"
+              :data-version="version.id" :style="{ left: `${cardPosition(version).x}px`, top: `${cardPosition(version).y}px`, width: `${windowDimensions.width}px`, height: `${cardHeight(version)}px`, '--branch-color': versionColor(version), '--user-color': userColor(CLIENT_ID), '--author-color': versionAuthorColor(version) }"
               @pointerdown="activateVersionOnPointer(version, $event)"
               @click="selectVersion(version)" @dblclick.stop="focusVersion(version)" @contextmenu="onVersionContext(version, $event)" :data-over="overNode === version.id">
               <span v-for="(user, index) in activeUsersFor(version.id)" :key="`active-${user.id}`"
@@ -3330,7 +3599,7 @@ function resetWorkspace() {
               <div v-else class="mini-map" :class="{ empty: !cardData(version).length, 'root-map': version.id === 'v0' }"
                 @pointerdown="startMapPan($event, version)" @wheel="zoomMap($event, version)">
                 <template v-if="cardData(version).length">
-                  <svg :viewBox="`0 0 ${mapViewport(version).width} ${mapViewport(version).height}`" class="treemap-svg">
+                  <svg :viewBox="`0 0 ${mapViewport(version).width} ${mapViewport(version).height}`" preserveAspectRatio="none" class="treemap-svg">
                     <g :transform="mapTransform(version)">
                       <rect v-for="tile in versionTiles.get(version.id) ?? []" :key="tile.id"
                         :x="tile.x" :y="tile.y" :width="tile.width" :height="tile.height"
@@ -3553,6 +3822,9 @@ function resetWorkspace() {
         <template v-if="!isReadOnly">
           <button @click="addEntry(menu.nodeId); menu = null"><Plus :size="15" /> Add child</button>
           <button @click="renameEntry(menu.nodeId!); menu = null"><Pencil :size="15" /> Change value</button>
+          <button v-if="selectedNodes.length >= 2" @click="openMergeEntries(); menu = null"><Layers3 :size="15" /> Merge selected entries</button>
+          <button v-if="selectedNodes.length >= 2" class="danger-action" @click="openBulkDelete(); menu = null"><Trash2 :size="15" /> Delete selected entries</button>
+          <button v-if="selectedNodes.length === 1 && selectedNodes[0] === menu.nodeId" @click="openSplitEntry(menu.nodeId!); menu = null"><GitBranch :size="15" /> Split entry</button>
           <button v-if="findParent(active.data, menu.nodeId!)" @click="detachEntry(menu.nodeId!); menu = null"><Unlink :size="15" /> Detach from parent</button>
         </template>
         <template v-if="!isReadOnly && !(findNode(active.data, menu.nodeId!)?.children.length)">
@@ -3577,11 +3849,75 @@ function resetWorkspace() {
     <div v-if="editor" class="editor-scrim" @click.self="editor = null">
       <form class="entry-editor" @submit.prevent="commitEditor">
         <div class="editor-heading"><span class="section-label">{{ editor.mode === 'create' ? 'NEW ENTRY' : 'CHANGE VALUE' }}</span><button type="button" class="quiet-icon" title="Close" @click="editor = null"><X :size="17" /></button></div>
-        <label class="editor-label" for="entry-value">{{ editor.mode === 'create' ? 'Entry name' : 'New value' }}</label>
-        <input id="entry-value" ref="entryValueInput" v-model="editor.value" maxlength="120" placeholder="e.g. Research notes" />
-        <label class="editor-label" for="entry-description">Description <span>optional</span></label>
-        <textarea id="entry-description" v-model="editor.description" maxlength="400" rows="3" placeholder="Shown when you hover over this entry"></textarea>
-        <div class="editor-actions"><button type="button" class="cancel-button" @click="editor = null">Cancel</button><button type="submit" class="primary-button" :disabled="!editor.value.trim()"><Check :size="15" /> Confirm</button></div>
+        <template v-if="editor.mode === 'create'">
+          <div v-for="(entry, index) in editor.entries" :key="entry.id" class="entry-draft-row">
+            <div class="entry-draft-heading"><strong>Entry {{ index + 1 }}</strong><button v-if="editor.entries.length > 1" type="button" class="quiet-icon" :aria-label="`Remove entry ${index + 1}`" @click="removeEditorEntryRow(entry.id)"><X :size="14" /></button></div>
+            <label class="editor-label" :for="`entry-value-${entry.id}`">Entry name</label>
+            <input v-if="index === 0" :id="`entry-value-${entry.id}`" ref="entryValueInput" v-model="entry.value" maxlength="120" placeholder="e.g. Research notes" />
+            <input v-else :id="`entry-value-${entry.id}`" v-model="entry.value" maxlength="120" placeholder="e.g. Research notes" />
+            <label class="editor-label" :for="`entry-description-${entry.id}`">Description <span>optional</span></label>
+            <textarea :id="`entry-description-${entry.id}`" v-model="entry.description" maxlength="400" rows="2" placeholder="Shown when you hover over this entry"></textarea>
+          </div>
+          <button type="button" class="add-draft-button" @click="addEditorEntryRow"><Plus :size="14" /> Add another entry</button>
+          <div class="editor-actions"><button type="button" class="cancel-button" @click="editor = null">Cancel</button><button type="submit" class="primary-button" :disabled="editor.entries.some((entry) => !entry.value.trim())"><Check :size="15" /> Add {{ editor.entries.length }} {{ editor.entries.length === 1 ? 'entry' : 'entries' }}</button></div>
+        </template>
+        <template v-else>
+          <label class="editor-label" for="entry-value">New value</label>
+          <input id="entry-value" ref="entryValueInput" v-model="editor.value" maxlength="120" placeholder="e.g. Research notes" />
+          <label class="editor-label" for="entry-description">Description <span>optional</span></label>
+          <textarea id="entry-description" v-model="editor.description" maxlength="400" rows="3" placeholder="Shown when you hover over this entry"></textarea>
+          <div class="editor-actions"><button type="button" class="cancel-button" @click="editor = null">Cancel</button><button type="submit" class="primary-button" :disabled="!editor.value.trim()"><Check :size="15" /> Confirm</button></div>
+        </template>
+      </form>
+    </div>
+    <div v-if="bulkDeleteDialog" class="editor-scrim" @click.self="bulkDeleteDialog = false">
+      <form class="entry-editor operation-editor" @submit.prevent="deleteSelectedEntries(bulkDeleteMode)">
+        <div class="editor-heading"><span class="section-label">DELETE {{ selectedNodes.length }} SELECTED ENTRIES</span><button type="button" class="quiet-icon" title="Close" @click="bulkDeleteDialog = false"><X :size="17" /></button></div>
+        <label class="editor-label" for="bulk-delete-mode">How should children be handled?</label>
+        <select id="bulk-delete-mode" v-model="bulkDeleteMode">
+          <option value="keep-children">Remove selected entries and keep children in their place</option>
+          <option value="subtree">Delete selected entries and their descendants</option>
+          <option value="detach-children">Remove selected entries and detach children to roots</option>
+        </select>
+        <p class="operation-note">The complete selection is applied as one new version.</p>
+        <div class="editor-actions"><button type="button" class="cancel-button" @click="bulkDeleteDialog = false">Cancel</button><button type="submit" class="primary-button danger-button"><Trash2 :size="15" /> Delete entries</button></div>
+      </form>
+    </div>
+    <div v-if="entryOperation" class="editor-scrim" @click.self="entryOperation = null">
+      <form class="entry-editor operation-editor" @submit.prevent="commitEntryOperation">
+        <div class="editor-heading">
+          <span class="section-label">{{ entryOperation.mode === 'merge' ? 'MERGE ENTRIES' : 'SPLIT ENTRY' }}</span>
+          <button type="button" class="quiet-icon" title="Close" @click="entryOperation = null"><X :size="17" /></button>
+        </div>
+        <template v-if="entryOperation.mode === 'merge'">
+          <p class="operation-note">Selected entries and their children will be combined under one entry. Existing descendants are kept without duplication.</p>
+          <label class="editor-label" for="merge-entry-value">Resulting entry name</label>
+          <input id="merge-entry-value" v-model="entryOperation.value" maxlength="120" />
+          <label class="editor-label" for="merge-entry-description">Description <span>optional</span></label>
+          <textarea id="merge-entry-description" v-model="entryOperation.description" maxlength="400" rows="3"></textarea>
+          <div class="editor-actions"><button type="button" class="cancel-button" @click="entryOperation = null">Cancel</button><button type="submit" class="primary-button" :disabled="!entryOperation.value.trim()"><Layers3 :size="15" /> Merge entries</button></div>
+        </template>
+        <template v-else>
+          <p class="operation-note">Each original child must be assigned to exactly one resulting entry.</p>
+          <div v-for="(entry, index) in entryOperation.entries" :key="entry.id" class="entry-draft-row">
+            <div class="entry-draft-heading"><strong>Result {{ index + 1 }}</strong><button v-if="entryOperation.entries.length > 2" type="button" class="quiet-icon" :aria-label="`Remove result ${index + 1}`" @click="removeSplitEntry(entry.id)"><X :size="14" /></button></div>
+            <label class="editor-label" :for="`split-value-${entry.id}`">Entry name</label>
+            <input :id="`split-value-${entry.id}`" v-model="entry.value" maxlength="120" />
+            <label class="editor-label" :for="`split-description-${entry.id}`">Description <span>optional</span></label>
+            <textarea :id="`split-description-${entry.id}`" v-model="entry.description" maxlength="400" rows="2"></textarea>
+          </div>
+          <button type="button" class="add-draft-button" @click="addSplitEntry"><Plus :size="14" /> Add result entry</button>
+          <div v-if="findNode(active.data, entryOperation.nodeId)?.children.length" class="child-assignment-list">
+            <strong>Assign existing children</strong>
+            <label v-for="child in findNode(active.data, entryOperation.nodeId)!.children" :key="child.id">
+              <span>{{ child.value }}</span>
+              <select v-model="entryOperation.assignments[child.id]" :aria-label="`Assign ${child.value} to a result entry`">
+                <option v-for="(entry, index) in entryOperation.entries" :key="entry.id" :value="entry.id">Result {{ index + 1 }} · {{ entry.value || 'Unnamed' }}</option>
+              </select>
+            </label>
+          </div>
+          <div class="editor-actions"><button type="button" class="cancel-button" @click="entryOperation = null">Cancel</button><button type="submit" class="primary-button" :disabled="entryOperation.entries.some((entry) => !entry.value.trim())"><GitBranch :size="15" /> Split entry</button></div>
+        </template>
       </form>
     </div>
     <div v-if="entryTooltip" class="entry-tooltip" role="tooltip"
