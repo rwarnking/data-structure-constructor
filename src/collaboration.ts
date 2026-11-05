@@ -153,5 +153,10 @@ export class PeerRoom {
 }
 
 export function getClientId() {
-  return crypto.randomUUID().replace(/-/g, '').slice(0, 12)
+  const key = 'canopy-client-id'
+  const stored = sessionStorage.getItem(key)
+  if (stored && /^[a-f0-9]{12}$/.test(stored)) return stored
+  const id = crypto.randomUUID().replace(/-/g, '').slice(0, 12)
+  sessionStorage.setItem(key, id)
+  return id
 }

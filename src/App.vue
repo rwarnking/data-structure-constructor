@@ -85,6 +85,7 @@ type SyncSnapshot = {
   removed: Record<string, Revision>
   active: Revision
   copyLinks: Revision
+  interactions?: InteractionEntry[]
   clock: number
 }
 type CollaborationMetadata = {
@@ -94,7 +95,18 @@ type CollaborationMetadata = {
   active: Revision
   copyLinks: Revision
 }
-type RemoteUser = { activeVersionId: string; selectedNodeIds: string[]; lastSeen: number }
+type InteractionEntry = {
+  id: string
+  actorId: string
+  actorName: string
+  action: string
+  createdAt: number
+  versionId?: string
+  nodeId?: string
+  nodeLabel?: string
+  ping?: { x: number; y: number }
+}
+type RemoteUser = { name: string; activeVersionId: string | null; selectedNodeIds: string[]; lastSeen: number }
 type Ping = { id: string; userId: string; x: number; y: number; createdAt: number }
 
 const STORAGE_KEY = 'canopy-data-structure-v1'
@@ -119,6 +131,11 @@ const MAP_ZOOM_MIN = 0.0001
 const MAP_ZOOM_MAX = 8
 const ZOOM_MAX = 4
 const branchColors = ['#176b68', '#d15a3b', '#a58127', '#4774a8', '#8a5c83', '#5b7d46']
+const animalNames = [
+  'Badger', 'Bison', 'Capybara', 'Dolphin', 'Falcon', 'Fox', 'Gecko', 'Hare',
+  'Heron', 'Koala', 'Lynx', 'Marmot', 'Otter', 'Panda', 'Quokka', 'Raven',
+  'Robin', 'Seal', 'Tiger', 'Wombat',
+]
 const seed: StoredState = {
   versions: [{
     id: 'v0', parentId: null, step: 0, lane: 0, branch: 'ROOT', change: 'Empty structure',
@@ -176,6 +193,9 @@ const active = computed(() => versions.value.find((version) => version.id === st
 const selectedNode = ref<string | null>(null)
 const selectedNodes = ref<string[]>([])
 const remoteUsers = ref<Record<string, RemoteUser>>({})
+const userName = ref(localStorage.getItem('canopy-user-name')?.trim().slice(0, 32) || animalForUser(CLIENT_ID))
+localStorage.setItem('canopy-user-name', userName.value)
+const interactions = ref<InteractionEntry[]>([])
 const hoveredNode = ref<{ versionId: string; nodeId: string } | null>(null)
 const entryTooltip = ref<{ versionId: string; nodeId: string; description: string; x: number; y: number } | null>(null)
 const pings = ref<Ping[]>([])
@@ -266,10 +286,23 @@ const peerRoom = new PeerRoom()
 const collaborationLabel = computed(() => roomStatus.value.state === 'connected' || roomStatus.value.state === 'hosting'
   ? `${roomStatus.value.peers} peer${roomStatus.value.peers === 1 ? '' : 's'}`
   : roomStatus.value.message)
+const connectedUsers = computed(() => {
+  if (roomStatus.value.state !== 'connected' && roomStatus.value.state !== 'hosting') return []
+  return [
+    { id: CLIENT_ID, name: userName.value.trim() || animalForUser(CLIENT_ID), activeVersionId: active.value.id },
+    ...Object.entries(remoteUsers.value).map(([id, user]) => ({
+      id, name: user.name, activeVersionId: user.activeVersionId,
+    })),
+  ]
+})
+const recentInteractions = computed(() => [...interactions.value]
+  .sort((left, right) => right.createdAt - left.createdAt || right.id.localeCompare(left.id))
+  .slice(0, 10))
 let toastTimer = 0
 let presenceTimer = 0
 let pingClickTimer = 0
 let pingSequence = 0
+let interactionSequence = 0
 let tileTooltipTimer = 0
 let tilePointer = { x: 0, y: 0 }
 let persistenceQueue = Promise.resolve()
@@ -283,7 +316,13 @@ watch(selectedNode, (nodeId) => {
   if (!nodeId) selectedNodes.value = []
   else if (!selectedNodes.value.includes(nodeId)) selectedNodes.value = [nodeId]
 })
-watch([selectedNodes, () => active.value.id], publishPresence, { deep: true })
+watch([selectedNodes, () => active.value.id, userName], publishPresence, { deep: true })
+watch(userName, (name) => {
+  localStorage.setItem('canopy-user-name', name.trim().slice(0, 32) || animalForUser(CLIENT_ID))
+})
+watch(interactions, (entries) => {
+  if (collaborationRoom) localStorage.setItem(interactionStorageKey(collaborationRoom), JSON.stringify(entries))
+}, { deep: true })
 watch(isReadOnly, (readOnly) => {
   if (!readOnly) return
   setSelectedNodes([])
@@ -336,12 +375,64 @@ function metadataKey(room: string) {
   return `canopy-collaboration-${room}`
 }
 
+function interactionStorageKey(room: string) {
+  return `canopy-interactions-${encodeURIComponent(room)}`
+}
+
+function animalForUser(userId: string) {
+  let hash = 2166136261
+  for (const character of userId) hash = Math.imul(hash ^ character.charCodeAt(0), 16777619)
+  return animalNames[(hash >>> 0) % animalNames.length]!
+}
+
+function isInteractionEntry(value: unknown): value is InteractionEntry {
+  if (!isRecord(value) || typeof value.id !== 'string' || typeof value.actorId !== 'string'
+    || typeof value.actorName !== 'string' || typeof value.action !== 'string'
+    || !Number.isFinite(value.createdAt)
+    || (value.versionId !== undefined && typeof value.versionId !== 'string')
+    || (value.nodeId !== undefined && typeof value.nodeId !== 'string')
+    || (value.nodeLabel !== undefined && typeof value.nodeLabel !== 'string')) return false
+  return value.ping === undefined || (isRecord(value.ping)
+    && Number.isFinite(value.ping.x) && Number.isFinite(value.ping.y))
+}
+
+function addInteraction(entry: InteractionEntry, broadcast = true) {
+  if (interactions.value.some((item) => item.id === entry.id)) return
+  interactions.value = [...interactions.value, entry]
+    .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))
+    .slice(-10)
+  if (broadcast && collaborationRoom) peerRoom.send({ type: 'interaction', entry })
+}
+
+function logInteraction(
+  action: string,
+  reference: { versionId?: string; nodeId?: string; nodeLabel?: string; ping?: { x: number; y: number } } = {},
+) {
+  if (!collaborationRoom) return
+  addInteraction({
+    id: `${CLIENT_ID}-${Date.now()}-${++interactionSequence}`,
+    actorId: CLIENT_ID,
+    actorName: userName.value.trim() || animalForUser(CLIENT_ID),
+    action,
+    createdAt: Date.now(),
+    ...reference,
+  })
+}
+
 function newRevision(clock: number): Revision {
   return { clock, actor: CLIENT_ID }
 }
 
 function initializeCollaborationMetadata(room: string) {
   collaborationRoom = room
+  try {
+    const savedInteractions: unknown = JSON.parse(localStorage.getItem(interactionStorageKey(room)) ?? '[]')
+    interactions.value = Array.isArray(savedInteractions) && savedInteractions.every(isInteractionEntry)
+      ? savedInteractions.slice(-10)
+      : []
+  } catch {
+    interactions.value = []
+  }
   const raw = localStorage.getItem(metadataKey(room))
   if (raw) {
     try {
@@ -505,6 +596,7 @@ function sendSyncSnapshot(reply: (message: unknown) => void) {
     removed: clone(collaborationMetadata.removed),
     active: clone(collaborationMetadata.active),
     copyLinks: clone(collaborationMetadata.copyLinks),
+    interactions: clone(interactions.value),
     clock: collaborationMetadata.clock,
   }
   reply(snapshot)
@@ -513,7 +605,9 @@ function sendSyncSnapshot(reply: (message: unknown) => void) {
 function applySyncSnapshot(message: SyncSnapshot) {
   if (!isStoredState(message.state) || !isRevision(message.active) || !isRevision(message.copyLinks)
     || !Number.isFinite(message.clock) || !isRecord(message.versions) || !isRecord(message.removed)
-    || !Object.values(message.versions).every(isRevision) || !Object.values(message.removed).every(isRevision)) {
+    || !Object.values(message.versions).every(isRevision) || !Object.values(message.removed).every(isRevision)
+    || (message.interactions !== undefined
+      && (!Array.isArray(message.interactions) || !message.interactions.every(isInteractionEntry)))) {
     notify('Ignored an invalid shared-state snapshot')
     return
   }
@@ -529,6 +623,7 @@ function applySyncSnapshot(message: SyncSnapshot) {
   }
   const localActiveId = state.value.activeId
   state.value = normalizeState(message.state)
+  interactions.value = (message.interactions ?? []).slice(-10)
   state.value.activeId = state.value.versions.some((version) => version.id === localActiveId)
     ? localActiveId
     : state.value.versions.find((version) => version.id === 'v0')!.id
@@ -657,24 +752,37 @@ function handleRoomMessage(message: unknown, reply: (message: unknown) => void) 
   } else if (packet.type === 'sync-delta') {
     applySyncDelta(packet as SyncDelta)
   } else if (packet.type === 'presence') {
-    const presence = message as { userId?: unknown; activeVersionId?: unknown; selectedNodeIds?: unknown }
+    const presence = message as { userId?: unknown; name?: unknown; activeVersionId?: unknown; selectedNodeIds?: unknown }
     if (typeof presence.userId !== 'string' || !presence.userId || presence.userId === CLIENT_ID
-      || typeof presence.activeVersionId !== 'string'
+      || !(typeof presence.activeVersionId === 'string' || presence.activeVersionId === null)
       || !Array.isArray(presence.selectedNodeIds)
       || !presence.selectedNodeIds.every((id) => typeof id === 'string')) return
     remoteUsers.value = {
       ...remoteUsers.value,
       [presence.userId]: {
+        name: typeof presence.name === 'string' && presence.name.trim()
+          ? presence.name.trim().slice(0, 32)
+          : animalForUser(presence.userId),
         activeVersionId: presence.activeVersionId,
         selectedNodeIds: presence.selectedNodeIds,
         lastSeen: Date.now(),
       },
     }
+  } else if (packet.type === 'presence-leave') {
+    const userId = (message as { userId?: unknown }).userId
+    if (typeof userId === 'string' && userId !== CLIENT_ID) {
+      const { [userId]: _leaving, ...remainingUsers } = remoteUsers.value
+      remoteUsers.value = remainingUsers
+    }
   } else if (packet.type === 'ping') {
     const ping = message as { id?: unknown; userId?: unknown; x?: unknown; y?: unknown }
     if (typeof ping.id !== 'string' || typeof ping.userId !== 'string' || ping.userId === CLIENT_ID
       || !Number.isFinite(ping.x) || !Number.isFinite(ping.y)) return
-    showPing({ id: ping.id, userId: ping.userId, x: ping.x as number, y: ping.y as number, createdAt: Date.now() })
+    const entry = { id: ping.id, userId: ping.userId, x: ping.x as number, y: ping.y as number, createdAt: Date.now() }
+    showPing(entry)
+  } else if (packet.type === 'interaction') {
+    const entry = (message as { entry?: unknown }).entry
+    if (isInteractionEntry(entry) && entry.actorId !== CLIENT_ID) addInteraction(entry, false)
   }
 }
 
@@ -701,6 +809,7 @@ function publishPresence() {
   peerRoom.send({
     type: 'presence',
     userId: CLIENT_ID,
+    name: userName.value.trim() || animalForUser(CLIENT_ID),
     activeVersionId: active.value.id,
     selectedNodeIds: selectedNodes.value,
   })
@@ -724,6 +833,36 @@ function sendPingAt(clientX: number, clientY: number) {
   }
   showPing(ping)
   peerRoom.send({ type: 'ping', ...ping })
+  logInteraction('Ping', { ping: { x: ping.x, y: ping.y } })
+}
+
+function focusCollaborator(userId: string) {
+  const collaborator = connectedUsers.value.find((user) => user.id === userId)
+  if (!collaborator?.activeVersionId) return
+  const version = versions.value.find((item) => item.id === collaborator.activeVersionId)
+  if (version) focusVersion(version)
+}
+
+function focusPingLocation(location: { x: number; y: number }) {
+  const targetZoom = Math.min(ZOOM_MAX, Math.max(1, zoom.value))
+  animateCamera(targetZoom, {
+    x: canvasSize.value.width / 2 - location.x * targetZoom,
+    y: canvasSize.value.height / 2 - location.y * targetZoom,
+  })
+}
+
+function navigateInteraction(entry: InteractionEntry, kind: 'version' | 'node' | 'ping') {
+  if (kind === 'ping' && entry.ping) {
+    focusPingLocation(entry.ping)
+    return
+  }
+  if (kind === 'node' && entry.nodeId) {
+    const version = versions.value.find((item) => item.id === entry.versionId && findNode(item.data, entry.nodeId!))
+    if (version) focusVersion(version)
+    return
+  }
+  const version = versions.value.find((item) => item.id === entry.versionId)
+  if (version) focusVersion(version)
 }
 function playPingSound() {
   try {
@@ -864,6 +1003,7 @@ async function copySessionInvite() {
 }
 
 function leaveSharedSession() {
+  peerRoom.send({ type: 'presence-leave', userId: CLIENT_ID })
   peerRoom.close()
   collaborationRoom = ''
   collaborationMetadata = null
@@ -1289,6 +1429,22 @@ function createVersion(data: TreeNode[], change: string, forceNew = false) {
   selectedNode.value = null
   compareMode.value = false
   if (!parent.data.length && data.length) centerVersionTreemaps(version.id, false)
+  const previousNodes = flattenPaths(parent.data)
+  const nextNodes = flattenPaths(version.data)
+  const addedNodeId = [...nextNodes.keys()].find((nodeId) => !previousNodes.has(nodeId))
+  const removedNodeId = [...previousNodes.keys()].find((nodeId) => !nextNodes.has(nodeId))
+  const changedNodeId = [...nextNodes].find(([nodeId, item]) =>
+    previousNodes.get(nodeId)?.value !== item.value)?.[0]
+  const movedNodeId = [...nextNodes].find(([nodeId, item]) =>
+    previousNodes.has(nodeId) && previousNodes.get(nodeId)?.parentId !== item.parentId)?.[0]
+  const referenceNodeId = addedNodeId ?? removedNodeId ?? changedNodeId ?? movedNodeId
+  logInteraction(`Created ${branch} · ${change}`, {
+    versionId: version.id,
+    nodeId: referenceNodeId,
+    nodeLabel: referenceNodeId
+      ? findNode(version.data, referenceNodeId)?.value ?? findNode(parent.data, referenceNodeId)?.value
+      : undefined,
+  })
   notify(`Created ${version.id} · ${change}`)
   panToVersion(version, wasCentered)
   return version
@@ -1691,6 +1847,7 @@ function confirmMerge() {
   mergeDecisions.value = {}
   mergeParentOverrides.value = {}
   notify(`Created merge ${displayVersionId(version.id)}`)
+  logInteraction(`Merged ${result.source.branch} into ${result.target.branch}`, { versionId: version.id })
   panToVersion(version, wasCentered)
 }
 
@@ -2941,6 +3098,7 @@ function copyEntry(nodeId: string) {
   if (!node) return
   clipboard.value = { sourceVersionId: active.value.id, node: clone(node) }
   sessionStorage.setItem('canopy-copy', JSON.stringify(clipboard.value))
+  logInteraction(`Copied ${node.value}`, { versionId: active.value.id, nodeId, nodeLabel: node.value })
   notify(`Copied ${node.value}`)
 }
 function pasteEntry() {
@@ -3019,7 +3177,51 @@ function resetWorkspace() {
             <span>{{ darkMode ? 'Light mode' : 'Dark mode' }}</span>
           </button>
         </section>
+        <section class="side-section collaborators-section">
+          <div class="section-label">COLLABORATORS</div>
+          <label class="session-label" for="user-name">Your name</label>
+          <input id="user-name" v-model="userName" class="user-name-input" maxlength="32" placeholder="Animal name"
+            @blur="userName = userName.trim() || animalForUser(CLIENT_ID)" />
+          <div class="collaborator-list">
+            <button v-for="user in connectedUsers" :key="user.id" type="button" class="collaborator"
+              :disabled="!user.activeVersionId || !versions.some((version) => version.id === user.activeVersionId)"
+              :title="`${user.name} · ${user.activeVersionId ? displayVersionId(user.activeVersionId) : 'No active version'}`"
+              @click="focusCollaborator(user.id)">
+              <span class="collaborator-avatar" :style="{ '--collaborator-color': userColor(user.id) }" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4" /><path d="M4.5 21a7.5 7.5 0 0 1 15 0" /></svg>
+              </span>
+              <span class="collaborator-info"><strong>{{ user.name }}</strong>
+                <small>{{ user.activeVersionId && versions.some((version) => version.id === user.activeVersionId)
+                  ? displayVersionId(user.activeVersionId)
+                  : 'No active version' }}</small>
+              </span>
+            </button>
+            <span v-if="!connectedUsers.length" class="collaborator-empty">Join a shared room to see collaborators.</span>
+          </div>
+        </section>
         <div class="sidebar-fill"></div>
+        <section class="side-section interaction-section">
+          <div class="interaction-heading"><span class="section-label">INTERACTION LOG</span><small>LAST 10</small></div>
+          <ol v-if="recentInteractions.length" class="interaction-list">
+            <li v-for="entry in recentInteractions" :key="entry.id">
+              <span class="interaction-user" :style="{ color: userColor(entry.actorId) }">{{ entry.actorName }}</span>
+              <span class="interaction-action">{{ entry.action }}</span>
+              <button v-if="entry.ping" class="interaction-reference" type="button"
+                :title="`Focus ping by ${entry.actorName}`" @click="focusPingLocation(entry.ping)">Ping location</button>
+              <button v-if="entry.nodeId && entry.versionId
+                && versions.some((version) => version.id === entry.versionId && findNode(version.data, entry.nodeId!))"
+                class="interaction-reference" type="button" @click="navigateInteraction(entry, 'node')">
+                {{ entry.nodeLabel || 'Entry' }}
+              </button>
+              <button v-if="entry.versionId && versions.some((version) => version.id === entry.versionId)"
+                class="interaction-reference" type="button" @click="navigateInteraction(entry, 'version')">
+                {{ displayVersionId(entry.versionId) }}
+              </button>
+              <span class="interaction-time">{{ new Date(entry.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</span>
+            </li>
+          </ol>
+          <span v-else class="interaction-empty">Collaborative actions appear here.</span>
+        </section>
       </aside>
 
       <section class="canvas-region">
