@@ -119,6 +119,10 @@ h1 { margin: 7px 0 0; font-size: 21px; line-height: 1.25; font-weight: 700; lett
 .canvas-hotbar button[title] { position: relative; }
 .copy-link-hit { cursor: pointer; }
 .copy-link-hit:focus { outline: none; }
+.copy-connection-layer { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
+.copy-link-group:hover .copy-link,
+.copy-link-group:focus-within .copy-link { stroke: #e58b39; stroke-width: 4; }
+.copy-link-hit:focus-visible { stroke: #e58b39; stroke-opacity: .35; }
 .hotbar-divider { width: 1px; height: 22px; margin: 0 3px; background: #dfe6e1; }
 .canvas-grid { position: absolute; inset: 0; pointer-events: none; background-image: radial-gradient(#cfd8d1 .7px, transparent .7px); background-size: 22px 22px; opacity: .65; mask-image: linear-gradient(90deg, transparent, #000 9%, #000 92%, transparent); }
 .graph-world { position: absolute; left: 0; top: 0; transform-origin: 0 0; width: max-content; min-width: 100%; min-height: 100%; }
@@ -163,7 +167,7 @@ h1 { margin: 7px 0 0; font-size: 21px; line-height: 1.25; font-weight: 700; lett
 .tree-tile.is-over, .tree-tile.is-hovered { filter: none; }
 .tree-tile.is-invalid { filter: drop-shadow(0 0 4px #c34c43); }
 .drag-source-ghost { opacity: 1; }
-.dragged-overlay { opacity: .94; stroke: #f7faf7; stroke-width: 1.5; filter: drop-shadow(0 3px 4px #24352f55); }
+.dragged-overlay { opacity: .94; stroke: #f7faf7; stroke-width: 3; filter: drop-shadow(0 3px 4px #24352f55); }
 .dragged-overlay.depth-0 { stroke: #176b68; stroke-dasharray: 5 3; stroke-width: 3; }
 .tile-label { fill: #35534a; pointer-events: none; font-family: 'DM Mono', monospace; font-weight: 500; }
 .mini-map { overflow: hidden; overscroll-behavior: contain; touch-action: none; }

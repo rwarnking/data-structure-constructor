@@ -138,27 +138,35 @@ function readState(): StoredState {
 }
 
 function normalizeState(value: Partial<StoredState>): StoredState {
+  const normalizedVersions = (value.versions ?? clone(seed.versions)).map((version) => {
+    const positions = version.positions ?? {}
+    const firstRoot = version.data[0]
+    const savedView = version.mapView
+    const validView = savedView && Number.isFinite(savedView.zoom) && savedView.zoom > 0
+      && Number.isFinite(savedView.panX) && Number.isFinite(savedView.panY)
+      && typeof savedView.manual === 'boolean'
+    return {
+      ...version,
+      mapView: validView ? {
+        ...savedView,
+        zoom: Math.min(MAP_ZOOM_MAX, Math.max(MAP_ZOOM_MIN, savedView.zoom)),
+      } : undefined,
+      positions: firstRoot
+        ? positionsAfterMove(version.data, positions, firstRoot.id, positions[firstRoot.id] ?? defaultPositions(version.data, positions)[firstRoot.id]!)
+        : positions,
+    }
+  })
+  const versionsById = new Map(normalizedVersions.map((version) => [version.id, version]))
   return {
     ...clone(seed), ...value,
-    versions: (value.versions ?? clone(seed.versions)).map((version) => {
-      const positions = version.positions ?? {}
-      const firstRoot = version.data[0]
-      const savedView = version.mapView
-      const validView = savedView && Number.isFinite(savedView.zoom) && savedView.zoom > 0
-        && Number.isFinite(savedView.panX) && Number.isFinite(savedView.panY)
-        && typeof savedView.manual === 'boolean'
-      return {
-        ...version,
-        mapView: validView ? {
-          ...savedView,
-          zoom: Math.min(MAP_ZOOM_MAX, Math.max(MAP_ZOOM_MIN, savedView.zoom)),
-        } : undefined,
-        positions: firstRoot
-          ? positionsAfterMove(version.data, positions, firstRoot.id, positions[firstRoot.id] ?? defaultPositions(version.data, positions)[firstRoot.id]!)
-          : positions,
-      }
-    }),
-    copyLinks: [...(value.copyLinks ?? [])].sort(compareCopyLinks),
+    versions: normalizedVersions,
+    copyLinks: (value.copyLinks ?? []).filter((link) => {
+      const source = versionsById.get(link.sourceVersionId)
+      const target = versionsById.get(link.targetVersionId)
+      return !!source && !!target
+        && !!findNode(source.data, link.sourceNodeId)
+        && !!findNode(target.data, link.targetNodeId)
+    }).sort(compareCopyLinks),
   }
 }
 
@@ -575,8 +583,14 @@ function applySyncDelta(message: SyncDelta) {
     collaborationMetadata.clock = Math.max(collaborationMetadata.clock, message.copyLinks.revision.clock)
     const merged = new Map(state.value.copyLinks.map((link) => [JSON.stringify(link), link]))
     for (const link of message.copyLinks.links) merged.set(JSON.stringify(link), link)
-    const links = [...merged.values()].sort(compareCopyLinks)
-    if (links.length !== state.value.copyLinks.length) {
+    const links = [...merged.values()].filter((link) => {
+      const source = versionsById.get(link.sourceVersionId)
+      const target = versionsById.get(link.targetVersionId)
+      return !!source && !!target
+        && !!findNode(source.data, link.sourceNodeId)
+        && !!findNode(target.data, link.targetNodeId)
+    }).sort(compareCopyLinks)
+    if (JSON.stringify(links) !== JSON.stringify(state.value.copyLinks)) {
       state.value.copyLinks = links
       changed = true
     }
@@ -1207,7 +1221,7 @@ function reflowLayout() {
   state.value.nextLane = nextLane
 }
 
-function createVersion(data: TreeNode[], change: string) {
+function createVersion(data: TreeNode[], change: string, forceNew = false) {
   if (isReadOnly.value) return null
   const parent = active.value
   const wasCentered = isVersionCentered(parent)
@@ -1217,7 +1231,9 @@ function createVersion(data: TreeNode[], change: string) {
     return null
   }
   const signature = structureSignature(data)
-  const duplicate = siblings.find((version) => structureSignature(version.data) === signature)
+  const duplicate = forceNew
+    ? undefined
+    : siblings.find((version) => structureSignature(version.data) === signature)
   if (duplicate) {
     state.value.activeId = duplicate.id
     selectedNode.value = null
@@ -1248,6 +1264,7 @@ function createVersion(data: TreeNode[], change: string) {
   state.value.activeId = version.id
   selectedNode.value = null
   compareMode.value = false
+  if (!parent.data.length && data.length) centerVersionTreemaps(version.id, false)
   notify(`Created ${version.id} · ${change}`)
   panToVersion(version, wasCentered)
   return version
@@ -1660,10 +1677,6 @@ function pruneVersion(id: string) {
       }
     }
   }
-  if (state.value.copyLinks.some((link) => removeIds.has(link.sourceVersionId) || removeIds.has(link.targetVersionId))) {
-    notify('Cannot prune versions referenced by copied entries')
-    return
-  }
   if (versions.value.some((version) => !removeIds.has(version.id)
     && version.mergeSourceId && removeIds.has(version.mergeSourceId))) {
     notify('Cannot prune a version referenced by a merge')
@@ -1677,6 +1690,8 @@ function pruneVersion(id: string) {
     mapViewTimers.delete(versionId)
     delete transientMapViews.value[versionId]
   }
+  state.value.copyLinks = state.value.copyLinks.filter((link) =>
+    !removeIds.has(link.sourceVersionId) && !removeIds.has(link.targetVersionId))
   state.value.versions = versions.value.filter((version) => !removeIds.has(version.id))
   reflowLayout()
   if (removeIds.has(state.value.activeId)) state.value.activeId = fallbackId
@@ -1945,7 +1960,18 @@ function mapViewFor(version: Version): MapView {
 }
 function centerVersionTreemaps(versionId: string, notifyUser = true) {
   const version = versions.value.find((item) => item.id === versionId)
-  if (!version || !version.data.length) return
+  if (!version) return
+  if (!version.data.length) {
+    const viewport = mapViewport(version)
+    version.mapView = {
+      zoom: 1,
+      panX: viewport.width / 2,
+      panY: viewport.height / 2,
+      manual: true,
+    }
+    if (notifyUser) notify('Treemaps centered and fitted')
+    return
+  }
   const positions = { ...defaultPositions(version.data, version.positions), ...version.positions }
   const extents = version.data.map((node) => {
     const position = positions[node.id]!
@@ -2215,6 +2241,13 @@ function nodeGraphBounds(versionId: string, nodeId: string) {
   }
   return null
 }
+const visibleCopyLinks = computed(() => state.value.copyLinks.filter((link) => {
+  const source = versions.value.find((version) => version.id === link.sourceVersionId)
+  const target = versions.value.find((version) => version.id === link.targetVersionId)
+  return !!source && !!target
+    && !!findNode(source.data, link.sourceNodeId)
+    && !!findNode(target.data, link.targetNodeId)
+}))
 function copyLinkPath(link: CopyLink) {
   const source = nodeGraphBounds(link.sourceVersionId, link.sourceNodeId)
   const target = nodeGraphBounds(link.targetVersionId, link.targetNodeId)
@@ -2241,17 +2274,38 @@ function copyLinkPath(link: CopyLink) {
   }
   return `M ${start.x} ${start.y} Q ${control.x} ${control.y} ${end.x} ${end.y}`
 }
-function activateCopyLink(link: CopyLink) {
-  const versionId = active.value.id === link.sourceVersionId
-    ? link.targetVersionId
-    : link.sourceVersionId
+function activateCopyLink(link: CopyLink, event?: MouseEvent) {
+  let versionId: string
+  if (event) {
+    const source = nodeGraphBounds(link.sourceVersionId, link.sourceNodeId)
+    const target = nodeGraphBounds(link.targetVersionId, link.targetNodeId)
+    const canvas = graphCanvas.value
+    if (!source || !target || !canvas) return
+    const canvasRect = canvas.getBoundingClientRect()
+    const clientCenter = (bounds: NonNullable<typeof source>) => ({
+      x: canvasRect.left + pan.value.x + ((bounds.left + bounds.right) / 2) * zoom.value,
+      y: canvasRect.top + pan.value.y + ((bounds.top + bounds.bottom) / 2) * zoom.value,
+    })
+    const sourceCenter = clientCenter(source)
+    const targetCenter = clientCenter(target)
+    const sourceDistance = Math.hypot(
+      event.clientX - sourceCenter.x,
+      event.clientY - sourceCenter.y,
+    )
+    const targetDistance = Math.hypot(
+      event.clientX - targetCenter.x,
+      event.clientY - targetCenter.y,
+    )
+    versionId = sourceDistance <= targetDistance ? link.targetVersionId : link.sourceVersionId
+  } else {
+    versionId = active.value.id === link.sourceVersionId
+      ? link.targetVersionId
+      : link.sourceVersionId
+  }
   const version = versions.value.find((item) => item.id === versionId)
   if (!version) return
   state.value.activeId = version.id
   centerVersion(version)
-}
-function handleCopyLinkClick(link: CopyLink, event: MouseEvent) {
-  if (event.detail === 2) activateCopyLink(link)
 }
 
 function tilesFor(
@@ -2846,11 +2900,11 @@ function pasteEntry() {
   const copied = clone(clipboard.value)
   const rekey = (node: TreeNode): TreeNode => ({ ...node, id: `n${state.value.nextNode++}-${CLIENT_ID}`, children: node.children.map(rekey) })
   const newNode = rekey(copied.node)
-  const version = createVersion([...clone(active.value.data), newNode], `Paste ${newNode.value}`)
+  const version = createVersion([...clone(active.value.data), newNode], `Paste ${newNode.value}`, true)
   if (!version) return
   const source = versions.value.find((item) => item.id === copied.sourceVersionId)
-  if (source && source.branch !== version.branch) {
-    const targetNode = version.data.find((node) => structureSignature([node]) === structureSignature([newNode]))
+  if (source) {
+    const targetNode = version.data.find((node) => node.id === newNode.id)
     if (!targetNode) return
     state.value.copyLinks = [...state.value.copyLinks, {
       sourceVersionId: source.id, sourceNodeId: copied.node.id,
@@ -2925,7 +2979,6 @@ function resetWorkspace() {
             <svg class="connection-layer" :width="graphBounds.width + 260" :height="graphBounds.height">
               <defs>
                 <marker id="arrow" viewBox="0 0 10 10" refX="0" refY="5" :markerWidth="TERMINAL_ARROW_SIZE" :markerHeight="TERMINAL_ARROW_SIZE" markerUnits="strokeWidth" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke" stroke="#f5f7f4" stroke-width="0.8" stroke-linejoin="round" /></marker>
-                <marker id="copy-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#cf7b32" /></marker>
                 <marker id="merge-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#8a5c83" /></marker>
               </defs>
               <template v-for="version in versions.filter((item) => item.parentId && !isBranchCurve(item))" :key="`edge-${version.id}`">
@@ -2946,20 +2999,6 @@ function resetWorkspace() {
                 <path :d="`M ${cardPosition(version).x + CARD_WIDTH} ${cardPosition(version).y + cardHeight(version) / 2} H ${cardPosition(version).x + CARD_WIDTH + terminalTailEnd(version)}`" class="connection-outline" fill="none" stroke="#f5f7f4" :stroke-width="connectionWidth(version) + 10" stroke-linecap="butt" />
                 <path :d="`M ${cardPosition(version).x + CARD_WIDTH} ${cardPosition(version).y + cardHeight(version) / 2} H ${cardPosition(version).x + CARD_WIDTH + terminalTailEnd(version)}`" fill="none" :stroke="versionColor(version)" :stroke-width="connectionWidth(version)" stroke-linecap="butt" marker-end="url(#arrow)" />
               </template>
-              <g v-for="(link, index) in state.copyLinks" :key="`copy-${index}`">
-                <path :d="copyLinkPath(link)" class="copy-link" fill="none" stroke="#cf7b32"
-                  stroke-width="3" vector-effect="non-scaling-stroke" stroke-dasharray="7 4"
-                  marker-end="url(#copy-arrow)" pointer-events="none" />
-                <path :d="copyLinkPath(link)" class="copy-link-hit" fill="none" stroke="transparent"
-                  stroke-width="18" vector-effect="non-scaling-stroke" pointer-events="stroke"
-                  role="button" tabindex="0"
-                  :aria-label="`Copied entry connection from ${displayVersionId(link.sourceVersionId)} to ${displayVersionId(link.targetVersionId)}. Double-click to switch versions.`"
-                  @click.stop="handleCopyLinkClick(link, $event)"
-                  @keydown.enter.prevent.stop="activateCopyLink(link)"
-                  @keydown.space.prevent.stop="activateCopyLink(link)">
-                  <title>Copied entry connection</title>
-                </path>
-              </g>
             </svg>
 
             <article v-for="version in versions" :key="version.id" class="version-card" :class="{ active: version.id === active.id, compared: compareIds.includes(version.id), 'compare-pick': compareMode, compact: zoom < 0.66, previewing: isPreviewing(version), 'root-version': version.id === 'v0' }"
@@ -3033,6 +3072,22 @@ function resetWorkspace() {
                 </div>
               </div>
             </article>
+            <svg class="copy-connection-layer" :width="graphBounds.width + 260" :height="graphBounds.height">
+              <g v-for="(link, index) in visibleCopyLinks" :key="`copy-${index}`" class="copy-link-group">
+                <path :d="copyLinkPath(link)" class="copy-link" fill="none" stroke="#cf7b32"
+                  stroke-width="3" vector-effect="non-scaling-stroke" stroke-dasharray="7 4"
+                  pointer-events="none" />
+                <path :d="copyLinkPath(link)" class="copy-link-hit" fill="none" stroke="transparent"
+                  stroke-width="8" vector-effect="non-scaling-stroke" pointer-events="stroke"
+                  role="button" tabindex="0"
+                  :aria-label="`Copied entry connection from ${displayVersionId(link.sourceVersionId)} to ${displayVersionId(link.targetVersionId)}. Click to switch versions.`"
+                  @click.stop="activateCopyLink(link, $event)"
+                  @keydown.enter.prevent.stop="activateCopyLink(link)"
+                  @keydown.space.prevent.stop="activateCopyLink(link)">
+                  <title>Copied entry connection. Click to focus the opposite version.</title>
+                </path>
+              </g>
+            </svg>
             <span v-for="ping in pings" :key="ping.id" class="ping-origin"
               :style="{ left: `${ping.x}px`, top: `${ping.y}px`, '--ping-color': userColor(ping.userId) }">
               <span v-for="pulse in 3" :key="pulse" class="ping-ripple"
