@@ -218,6 +218,8 @@ h1 { margin: 7px 0 0; font-size: 21px; line-height: 1.25; font-weight: 700; lett
 .primary-button:hover { background: #115c59; }
 .compare-drawer { position: absolute; z-index: 8; right: 17px; top: 17px; width: 290px; min-height: 126px; border: 1px solid #dfe7e0; border-radius: 7px; background: #fcfdfb; box-shadow: 0 9px 28px #263b2d16; }
 .compare-drawer.open { width: min(1000px, calc(100vw - 80px)); max-height: calc(100vh - 34px); overflow: auto; }
+.merge-modal { position: fixed; z-index: 100; inset: 0; display: grid; place-items: center; padding: 20px; background: #14211c66; }
+.merge-modal .compare-drawer { position: relative; inset: auto; width: min(1200px, 100%); max-height: calc(100dvh - 40px); overflow: auto; }
 .drawer-head { padding: 12px 13px 10px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #edf1ed; }
 .drawer-head strong { display: block; margin-top: 5px; font-size: 11px; }
 .drawer-empty { display: flex; align-items: center; gap: 9px; padding: 15px; color: #87948d; font-size: 10px; }
@@ -417,6 +419,8 @@ h1 { margin: 7px 0 0; font-size: 21px; line-height: 1.25; font-weight: 700; lett
   .sidebar:not(.collapsed) .brand-name { font-size: 17px; }
   .compare-drawer { top: 12px; right: 12px; width: calc(100vw - 80px); max-width: 350px; }
   .compare-drawer.merge-view.open { width: calc(100vw - 80px); }
+  .merge-modal { padding: 12px; }
+  .merge-modal .compare-drawer, .merge-modal .compare-drawer.merge-view.open { width: 100%; max-height: calc(100dvh - 24px); }
   .merge-workspace { overflow-x: auto; }
   .merge-view-head, .merge-view-row { min-width: 620px; }
 }

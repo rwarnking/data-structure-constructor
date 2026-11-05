@@ -553,6 +553,13 @@ function isCollaborationMetadata(value: unknown): value is CollaborationMetadata
     && isRevision(value.active) && isRevision(value.copyLinks)
 }
 
+function hasValidVersionStep(version: Version, parent: Version, mergeSource?: Version) {
+  if (!version.mergeSourceId) return version.step === parent.step + 1
+  if (!mergeSource || version.mergeSourceId === version.id) return false
+  return version.step === Math.max(parent.step, mergeSource.step) + 1
+    || version.step === parent.step + 1
+}
+
 function isStoredState(value: unknown): value is StoredState {
   if (!isRecord(value) || !Array.isArray(value.versions) || !value.versions.every(isVersion)
     || typeof value.activeId !== 'string' || !Number.isInteger(value.nextNode)
@@ -566,8 +573,8 @@ function isStoredState(value: unknown): value is StoredState {
   for (const version of versions) {
     if (version.id === 'v0') continue
     const parent = version.parentId ? byId.get(version.parentId) : undefined
-    if (!parent || version.step !== parent.step + 1) return false
-    if (version.mergeSourceId && (!byId.has(version.mergeSourceId) || version.mergeSourceId === version.id)) return false
+    const mergeSource = version.mergeSourceId ? byId.get(version.mergeSourceId) : undefined
+    if (!parent || !hasValidVersionStep(version, parent, mergeSource)) return false
     const visited = new Set([version.id])
     let ancestor: Version | undefined = parent
     while (ancestor) {
@@ -667,10 +674,13 @@ function applySyncDelta(message: SyncDelta) {
       continue
     }
     const parent = change.version.parentId ? versionsById.get(change.version.parentId) : undefined
+    const mergeSource = change.version.mergeSourceId
+      ? versionsById.get(change.version.mergeSourceId)
+      : undefined
     const validParent = change.version.id === 'v0'
       ? change.version.parentId === null && change.version.step === 0
-      : !!parent && change.version.step === parent.step + 1
-    if (!validParent || (change.version.mergeSourceId && !versionsById.has(change.version.mergeSourceId))) {
+      : !!parent && hasValidVersionStep(change.version, parent, mergeSource)
+    if (!validParent) {
       notify('Ignored a shared version with a missing or invalid connection')
       continue
     }
@@ -1381,6 +1391,34 @@ function reflowLayout() {
     nextLane += 1
   }
 
+  const mergeVersions = graph.filter((item) => item.mergeSourceId)
+    .sort((left, right) => left.step - right.step || left.createdAt - right.createdAt)
+  for (const version of mergeVersions) {
+    const parent = version.parentId ? byId.get(version.parentId) : undefined
+    const source = version.mergeSourceId ? byId.get(version.mergeSourceId) : undefined
+    if (!parent || !source) continue
+    const mergeLine: Version[] = []
+    let current: Version | undefined = version
+    while (current) {
+      mergeLine.push(current)
+      current = orderedChildren(current)[0]
+    }
+    const mergeLineIds = new Set(mergeLine.map((item) => item.id))
+    if (version.branch === parent.branch) {
+      mergeLine.forEach((lineVersion) => { lineVersion.lane = parent.lane })
+      continue
+    }
+
+    const lane = parent.lane === source.lane
+      ? parent.lane + 1
+      : Math.max(parent.lane, source.lane)
+    for (const other of graph) {
+      if (!mergeLineIds.has(other.id) && other.lane >= lane) other.lane += 1
+    }
+    mergeLine.forEach((lineVersion) => { lineVersion.lane = lane })
+    nextLane += 1
+  }
+
   graph.sort((left, right) => left.step - right.step || left.id.localeCompare(right.id))
   state.value.nextLane = nextLane
 }
@@ -1825,7 +1863,7 @@ function confirmMerge() {
     id: `v${nextVersionNumber}-${CLIENT_ID}`,
     parentId: result.target.id,
     mergeSourceId: result.source.id,
-    step: result.target.step + 1,
+    step: Math.max(result.source.step, result.target.step) + 1,
     lane: result.target.lane,
     branch,
     change: `Merge ${result.source.branch} into ${result.target.branch}`,
@@ -1969,31 +2007,35 @@ watch(canvasSize, () => {
 function connectionPath(version: Version) {
   const parent = versions.value.find((item) => item.id === version.parentId)
   if (!parent) return ''
-  const from = cardPosition(parent)
-  const to = cardPosition(version)
+  return versionConnectionPath(parent, version)
+}
+function versionConnectionPath(source: Version, destination: Version, endOffsetY = 0) {
+  const from = cardPosition(source)
+  const to = cardPosition(destination)
   const startX = from.x + CARD_WIDTH
-  const startY = from.y + cardHeight(parent) / 2
+  const startY = from.y + cardHeight(source) / 2
   const endX = to.x
-  const endY = to.y + cardHeight(version) / 2
-  if (parent.id === 'v0') return `M ${startX} ${endY} H ${endX}`
+  const endY = to.y + cardHeight(destination) / 2 + endOffsetY
+  if (source.id === 'v0' && endOffsetY === 0) return `M ${startX} ${endY} H ${endX}`
   if (Math.abs(endY - startY) < 1) return `M ${startX} ${startY} H ${endX}`
   const direction = Math.sign(endY - startY)
   const cornerX = startX + (endX - startX) / 2
-  const radius = Math.min(GRAPH_GAP_X / 4, Math.abs(endY - startY) / 2)
+  const radius = Math.min(
+    GRAPH_GAP_X / 4,
+    Math.abs(endY - startY) / 2,
+    cornerX - startX,
+    endX - cornerX,
+  )
   return `M ${startX} ${startY} H ${cornerX - radius} Q ${cornerX} ${startY} ${cornerX} ${startY + direction * radius} V ${endY - direction * radius} Q ${cornerX} ${endY} ${cornerX + radius} ${endY} H ${endX}`
 }
 function mergeConnectionPath(version: Version) {
   const source = versions.value.find((item) => item.id === version.mergeSourceId)
   if (!source) return ''
-  const sourcePosition = cardPosition(source)
-  const targetPosition = cardPosition(version)
-  const forward = targetPosition.x >= sourcePosition.x
-  const startX = sourcePosition.x + (forward ? CARD_WIDTH : 0)
-  const endX = targetPosition.x + (forward ? 0 : CARD_WIDTH)
-  const startY = sourcePosition.y + cardHeight(source) / 2
-  const endY = targetPosition.y + cardHeight(version) / 2
-  const bendX = (startX + endX) / 2
-  return `M ${startX} ${startY} C ${bendX} ${startY}, ${bendX} ${endY}, ${endX} ${endY}`
+  return versionConnectionPath(source, version, 0, true)
+}
+function mergeConnectionColor(version: Version) {
+  const source = versions.value.find((item) => item.id === version.mergeSourceId)
+  return versionColor(source ?? version)
 }
 function isBranchCurve(version: Version) {
   const parent = versions.value.find((item) => item.id === version.parentId)
@@ -3018,6 +3060,13 @@ function finishTreeDrag(event: PointerEvent) {
   spatialPreview.value = null
 }
 function onKeydown(event: KeyboardEvent) {
+  if (mergeMode.value && compareIds.value.length === 2) {
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      closeVersionSelection()
+    }
+    return
+  }
   if ((event.target as HTMLElement).matches('input, textarea, select')) return
   const key = event.key.toLowerCase()
   const modified = event.ctrlKey || event.metaKey
@@ -3132,7 +3181,7 @@ function resetWorkspace() {
 
 <template>
   <main class="app-shell" :class="{ dark: darkMode }" @click.capture="handleAppClickCapture" @wheel="onWheel">
-    <div class="workspace">
+    <div class="workspace" :inert="mergeMode && compareIds.length === 2">
       <aside class="sidebar" :class="{ collapsed: sidebarCollapsed }">
         <div class="sidebar-head">
           <span class="brand-mark"><Layers3 :size="19" :stroke-width="2.2" /></span>
@@ -3231,7 +3280,6 @@ function resetWorkspace() {
             <svg class="connection-layer" :width="graphBounds.width + 260" :height="graphBounds.height">
               <defs>
                 <marker id="arrow" viewBox="0 0 10 10" refX="0" refY="5" :markerWidth="TERMINAL_ARROW_SIZE" :markerHeight="TERMINAL_ARROW_SIZE" markerUnits="strokeWidth" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke" stroke="#f5f7f4" stroke-width="0.8" stroke-linejoin="round" /></marker>
-                <marker id="merge-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#8a5c83" /></marker>
               </defs>
               <template v-for="version in versions.filter((item) => item.parentId && !isBranchCurve(item))" :key="`edge-${version.id}`">
                 <path :d="connectionPath(version)" class="connection-outline" fill="none" stroke="#f5f7f4" :stroke-width="connectionWidth(version) + 10" stroke-linecap="round" stroke-linejoin="round" />
@@ -3241,12 +3289,13 @@ function resetWorkspace() {
                 <path :d="connectionPath(version)" class="connection-outline" fill="none" stroke="#f5f7f4" :stroke-width="connectionWidth(version) + 10" stroke-linecap="round" stroke-linejoin="round" />
                 <path :d="connectionPath(version)" fill="none" :stroke="versionColor(version)" :stroke-width="connectionWidth(version)" stroke-linecap="round" stroke-linejoin="round" :opacity="version.id === active.id || version.parentId === active.id ? 0.96 : 0.76" />
               </template>
-              <path v-for="version in versions.filter((item) => item.mergeSourceId)" :key="`merge-edge-${version.id}`"
-                :d="mergeConnectionPath(version)" class="merge-connection" fill="none" stroke="#8a5c83"
-                stroke-width="3" stroke-dasharray="8 5" marker-end="url(#merge-arrow)"
-                :opacity="version.id === active.id || version.mergeSourceId === active.id ? 0.98 : 0.7">
-                <title>Merge connection from {{ displayVersionId(version.mergeSourceId!) }}</title>
-              </path>
+              <template v-for="version in versions.filter((item) => item.mergeSourceId)" :key="`merge-edge-${version.id}`">
+                <path :d="mergeConnectionPath(version)" class="connection-outline" fill="none" stroke="#f5f7f4"
+                  :stroke-width="connectionWidth(version) + 10" stroke-linecap="round" stroke-linejoin="round" />
+                <path :d="mergeConnectionPath(version)" fill="none" :stroke="mergeConnectionColor(version)"
+                  :stroke-width="connectionWidth(version)" stroke-linecap="round" stroke-linejoin="round"
+                  :opacity="version.id === active.id || version.mergeSourceId === active.id ? 0.96 : 0.76" />
+              </template>
               <template v-for="version in versions.filter((item) => !versions.some((child) => child.parentId === item.id))" :key="`tail-${version.id}`">
                 <path :d="`M ${cardPosition(version).x + CARD_WIDTH} ${cardPosition(version).y + cardHeight(version) / 2} H ${cardPosition(version).x + CARD_WIDTH + terminalTailEnd(version)}`" class="connection-outline" fill="none" stroke="#f5f7f4" :stroke-width="connectionWidth(version) + 10" stroke-linecap="butt" />
                 <path :d="`M ${cardPosition(version).x + CARD_WIDTH} ${cardPosition(version).y + cardHeight(version) / 2} H ${cardPosition(version).x + CARD_WIDTH + terminalTailEnd(version)}`" fill="none" :stroke="versionColor(version)" :stroke-width="connectionWidth(version)" stroke-linecap="butt" marker-end="url(#arrow)" />
@@ -3368,14 +3417,21 @@ function resetWorkspace() {
       </section>
     </div>
 
-    <div v-if="compareMode || mergeMode || showOverview" class="compare-drawer" :class="{ open: compareIds.length === 2, 'merge-view': mergeMode }">
+    <div v-if="compareMode || mergeMode || showOverview"
+      :role="mergeMode && compareIds.length === 2 ? 'dialog' : undefined"
+      :aria-modal="mergeMode && compareIds.length === 2 ? 'true' : undefined"
+      :aria-label="mergeMode ? 'Branch merge' : 'Version comparison'"
+      :class="{ 'merge-modal': mergeMode && compareIds.length === 2 }"
+      @pointerdown.stop @pointerup.stop @pointermove.stop @pointercancel.stop @click.stop
+      @dblclick.stop @contextmenu.stop @wheel.stop @touchmove.stop>
+      <div class="compare-drawer" :class="{ open: compareIds.length === 2, 'merge-view': mergeMode }">
       <div class="drawer-head">
         <div>
           <span class="section-label">{{ mergeMode ? 'BRANCH MERGE' : 'VERSION COMPARISON' }}</span>
           <strong>{{ compareIds.length === 2
             ? `${displayVersionId(compareIds[0]!)} ${mergeMode ? '→' : '↔'} ${displayVersionId(compareIds[1]!)}`
             : mergeMode ? 'Choose source, then target' : 'Choose two versions' }}</strong>
-        </div>
+          </div>
         <button class="quiet-icon" title="Close comparison" aria-label="Abort and close" @click="closeVersionSelection"><X :size="17" /></button>
       </div>
       <div v-if="compareIds.length === 2" class="comparison-content">
@@ -3477,6 +3533,7 @@ function resetWorkspace() {
         <div v-else class="no-diff"><Check :size="17" /> These versions are structurally identical.</div>
       </div>
       <div v-else class="drawer-empty"><Search :size="18" /><span>Select the first version, then the second.</span></div>
+    </div>
     </div>
 
     <div v-if="menu" ref="contextMenuElement" class="context-menu" :style="{ left: `${contextMenuPosition.x}px`, top: `${contextMenuPosition.y}px` }" @click.stop>
