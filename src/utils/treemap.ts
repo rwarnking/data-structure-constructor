@@ -76,8 +76,13 @@ export function fitMapViewToLayout(
     manual: true,
   }
 }
-function childLayouts(node: TreeNode, positions?: Record<string, { x: number; y: number }>) {
-  const children = node.children.map((child) => ({ node: child, ...treeDimensions(child, positions) }))
+type ChildLayout = { node: TreeNode; x: number; y: number; width: number; height: number }
+type LayoutCache = Map<TreeNode, { width: number; height: number; children: ChildLayout[] }>
+
+function childLayouts(node: TreeNode, positions: Record<string, { x: number; y: number }> | undefined, cache: LayoutCache): ChildLayout[] {
+  const cached = cache.get(node)
+  if (cached) return cached.children
+  const children = node.children.map((child) => ({ node: child, ...treeDimensions(child, positions, cache) }))
   if (!children.length) return []
 
   let best: { score: number; layouts: Array<typeof children[number] & { x: number; y: number }> } | null = null
@@ -109,21 +114,33 @@ function childLayouts(node: TreeNode, positions?: Record<string, { x: number; y:
   }
   return best!.layouts
 }
-export function outerTreemapDimensions(node: TreeNode, positions?: Record<string, { x: number; y: number }>): { width: number; height: number } {
-  const size = treeDimensions(node, positions)
+function outerDimensions(node: TreeNode, positions: Record<string, { x: number; y: number }> | undefined, cache: LayoutCache) {
+  const size = treeDimensions(node, positions, cache)
   const width = Math.max(size.width, size.height * VERSION_TREEMAP_ASPECT)
   return {
     width,
     height: Math.max(size.height, width / VERSION_TREEMAP_ASPECT),
   }
 }
-function treeDimensions(node: TreeNode, positions?: Record<string, { x: number; y: number }>): { width: number; height: number } {
-  if (!node.children.length) return { width: LEAF_TILE_WIDTH, height: LEAF_TILE_HEIGHT }
-  const children = childLayouts(node, positions)
-  return {
+export function outerTreemapDimensions(node: TreeNode, positions?: Record<string, { x: number; y: number }>) {
+  return outerDimensions(node, positions, new Map())
+}
+function treeDimensions(node: TreeNode, positions: Record<string, { x: number; y: number }> | undefined, cache: LayoutCache): { width: number; height: number } {
+  const cached = cache.get(node)
+  if (cached) return cached
+  if (!node.children.length) {
+    const leaf = { width: LEAF_TILE_WIDTH, height: LEAF_TILE_HEIGHT, children: [] }
+    cache.set(node, leaf)
+    return leaf
+  }
+  const children = childLayouts(node, positions, cache)
+  const layout = {
     width: Math.max(...children.map((child) => child.x + child.width)) + TREE_PADDING,
     height: Math.max(...children.map((child) => child.y + child.height)) + TREE_PADDING,
+    children,
   }
+  cache.set(node, layout)
+  return layout
 }
 export function mapGeometry(
   data: TreeNode[],
@@ -131,10 +148,11 @@ export function mapGeometry(
   minWidth = CARD_WIDTH - 12,
   minHeight = CARD_HEIGHT - 65,
 ) {
-  const defaults = defaultPositions(data, positions)
+  const cache: LayoutCache = new Map()
+  const defaults = defaultPositionsWithCache(data, positions, cache)
   const extents = data.map((node) => {
     const position = positions?.[node.id] ?? defaults[node.id]!
-    const size = outerTreemapDimensions(node, positions)
+    const size = outerDimensions(node, positions, cache)
     const left = position.x * CARD_WIDTH
     const top = position.y * TREE_MAP_HEIGHT
     return { left, top, right: left + size.width, bottom: top + size.height }
@@ -151,12 +169,19 @@ export function defaultPositions(
   data: TreeNode[],
   positions?: Record<string, { x: number; y: number }>,
 ): Record<string, { x: number; y: number }> {
+  return defaultPositionsWithCache(data, positions, new Map())
+}
+function defaultPositionsWithCache(
+  data: TreeNode[],
+  positions: Record<string, { x: number; y: number }> | undefined,
+  cache: LayoutCache,
+): Record<string, { x: number; y: number }> {
   const columns = Math.max(1, Math.ceil(Math.sqrt(data.length)))
   const columnWidths = Array.from({ length: Math.min(columns, data.length) }, (_, column) =>
-    Math.max(...data.filter((_, index) => index % columns === column).map((node) => outerTreemapDimensions(node, positions).width)))
+    Math.max(...data.filter((_, index) => index % columns === column).map((node) => outerDimensions(node, positions, cache).width)))
   const rowCount = Math.ceil(data.length / columns)
   const rowHeights = Array.from({ length: rowCount }, (_, row) =>
-    Math.max(...data.slice(row * columns, (row + 1) * columns).map((node) => outerTreemapDimensions(node, positions).height)))
+    Math.max(...data.slice(row * columns, (row + 1) * columns).map((node) => outerDimensions(node, positions, cache).height)))
   const columnOffsets = columnWidths.map((_, column) =>
     columnWidths.slice(0, column).reduce((sum, width) => sum + width + MAP_PADDING, MAP_PADDING))
   const rowOffsets = rowHeights.map((_, row) =>
@@ -294,8 +319,16 @@ export function tilesFor(
   _index: number,
   positions?: Record<string, { x: number; y: number }>,
 ): Tile[] {
-  const position = positions?.[root.id] ?? defaultPositions(forest, positions)[root.id]!
-  const size = outerTreemapDimensions(root)
+  return tilesForWithCache(root, forest, positions, new Map())
+}
+function tilesForWithCache(
+  root: TreeNode,
+  forest: TreeNode[],
+  positions: Record<string, { x: number; y: number }> | undefined,
+  cache: LayoutCache,
+): Tile[] {
+  const position = positions?.[root.id] ?? defaultPositionsWithCache(forest, positions, cache)[root.id]!
+  const size = outerDimensions(root, undefined, cache)
   const offsetX = position.x * CARD_WIDTH
   const offsetY = position.y * TREE_MAP_HEIGHT
   const tiles: Tile[] = []
@@ -305,7 +338,7 @@ export function tilesFor(
       x, y, width, height, depth, hasChildren: node.children.length > 0,
     })
     if (!node.children.length) return
-    for (const childLayout of childLayouts(node)) {
+    for (const childLayout of childLayouts(node, undefined, cache)) {
       place(
         childLayout.node,
         x + childLayout.x,
@@ -319,13 +352,22 @@ export function tilesFor(
   place(root, offsetX, offsetY, size.width, size.height, 0)
   return tiles
 }
+export function tilesForForest(data: TreeNode[], positions?: Record<string, { x: number; y: number }>) {
+  const cache: LayoutCache = new Map()
+  const resolved = data.some((root) => !positions?.[root.id])
+    ? { ...defaultPositionsWithCache(data, positions, cache), ...positions } : positions
+  return data.flatMap((root) => tilesForWithCache(root, data, resolved, cache))
+}
 export function tileForNode(
   data: TreeNode[],
   positions: Record<string, { x: number; y: number }> | undefined,
   nodeId: string,
 ) {
-  for (const [index, root] of data.entries()) {
-    const tile = tilesFor(root, data, index, positions).find((item) => item.id === nodeId)
+  const cache: LayoutCache = new Map()
+  const resolved = data.some((root) => !positions?.[root.id])
+    ? { ...defaultPositionsWithCache(data, positions, cache), ...positions } : positions
+  for (const root of data) {
+    const tile = tilesForWithCache(root, data, resolved, cache).find((item) => item.id === nodeId)
     if (tile) return tile
   }
   return undefined

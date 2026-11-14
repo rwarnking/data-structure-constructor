@@ -53,6 +53,32 @@ async function focusActive(page) {
   await expect(page.locator('.version-card.active')).toBeInViewport()
 }
 
+async function expectCentered(page, versionId) {
+  await expect.poll(async () => page.locator(`.version-card[data-version="${versionId}"]`).evaluate((card) => {
+    const canvas = card.closest('.graph-canvas').getBoundingClientRect()
+    const bounds = card.getBoundingClientRect()
+    return Math.max(
+      Math.abs((bounds.left + bounds.right - canvas.left - canvas.right) / 2),
+      Math.abs((bounds.top + bounds.bottom - canvas.top - canvas.bottom) / 2),
+    )
+  })).toBeLessThan(2)
+}
+
+async function emptyMapPoint(map) {
+  const point = await map.evaluate((element) => {
+    const bounds = element.getBoundingClientRect()
+    for (let y = bounds.top + 6; y < bounds.bottom - 20; y += 12) {
+      for (let x = bounds.left + 6; x < bounds.right - 20; x += 12) {
+        const hit = document.elementFromPoint(x, y)
+        if (hit && element.contains(hit) && !hit.closest('.tree-tile')) return { x, y }
+      }
+    }
+    return null
+  })
+  expect(point).toBeTruthy()
+  return point
+}
+
 async function contextAction(page, room, name, action) {
   await focusActive(page)
   const tile = await activeTile(page, room, name)
@@ -144,7 +170,7 @@ test('branching, comparison and merge result controls update the graph', async (
   await expect.poll(async () => (await state(page, room)).activeId).toBe(first)
 
   await page.keyboard.press('Shift+a')
-  await expect(page.locator(`#version-connector-${first}`)).toHaveAttribute('d', /M /)
+  await expect(page.locator(`[data-version-connectors~="${first}"]`)).toHaveAttribute('d', /M /)
   await page.keyboard.press('Shift+c')
   await page.locator(`.version-card[data-version="${first}"]`).click()
   await page.locator(`.version-card[data-version="${second}"]`).click()
@@ -180,6 +206,55 @@ test('branching, comparison and merge result controls update the graph', async (
   const merge = mergedState.versions.find((version) => version.id === mergedState.activeId)
   expect(new Set([merge.parentId, merge.mergeSourceId])).toEqual(new Set([first, second]))
   await expect(page.locator(`#merge-connector-${merge.id}`)).toHaveAttribute('d', /M /)
+})
+
+test('long version and copy connectors stay visible across offscreen endpoints and straight lanes are batched', async ({ page }) => {
+  const room = `test-${randomUUID()}`
+  const entry = { id: 'n1', value: 'Shared', children: [] }
+  const versions = [{ id: 'v0', parentId: null, step: 0, lane: 0, branch: 'ROOT', change: 'Empty structure', data: [], createdAt: 0 }]
+  for (let step = 1; step <= 30; step++) {
+    versions.push({
+      id: `v${step}`, parentId: step === 20 ? 'v1' : `v${step - 1}`,
+      ...(step === 20 ? { mergeSourceId: 'v19' } : step === 21 ? { mergeSourceId: 'v1' } : {}),
+      step, lane: 0, branch: 'Branch 1', change: 'Edit', data: [entry], createdAt: step,
+    })
+  }
+  await page.addInitScript(({ room, versions }) => {
+    localStorage.setItem(`canopy-room-data-v1-${encodeURIComponent(room)}`, JSON.stringify({
+      versions, activeId: 'v10', nextNode: 2, nextVersion: 31, nextLane: 1,
+      copyLinks: [{ sourceVersionId: 'v1', sourceNodeId: 'n1', targetVersionId: 'v20', targetNodeId: 'n1' }],
+    }))
+  }, { room, versions })
+  await openRoom(page, room)
+  await focusActive(page)
+  await expect(page.locator('.version-card[data-version="v1"]')).toHaveCount(0)
+  await expect(page.locator('.version-card[data-version="v20"]')).toHaveCount(0)
+  await expect(page.locator('.version-card[data-version="v21"]')).toHaveCount(0)
+  await expect(page.locator('[data-version-connectors~="v20"]')).toHaveAttribute('d', /M .* H /)
+  await expect(page.locator('#merge-connector-v21')).toHaveAttribute('d', /M .* H /)
+  await expect(page.locator('.copy-link-hit')).toHaveCount(1)
+  await expect(page.locator('.copy-link')).toHaveAttribute('d', /M .* Q /)
+  await page.locator('.copy-link-hit').focus()
+  await page.keyboard.press('Enter')
+  await expect.poll(async () => (await state(page, room)).activeId).toBe('v1')
+  await page.keyboard.press('Shift+a')
+  await expect.poll(async () => page.locator('[data-version-connectors]').evaluateAll((paths) =>
+    Math.max(...paths.map((path) => path.getAttribute('data-version-connectors').split(' ').length)))).toBeGreaterThan(1)
+  const grouped = await page.locator('[data-version-connectors]').evaluateAll((paths) => {
+    const path = paths.find((item) => item.getAttribute('data-version-connectors').includes(' '))
+    return {
+      count: path.getAttribute('data-version-connectors').split(' ').length,
+      moves: (path.getAttribute('d').match(/M /g) ?? []).length,
+      color: path.getAttribute('stroke'),
+      width: Number(path.getAttribute('stroke-width')),
+      opacity: Number(path.getAttribute('opacity')),
+    }
+  })
+  expect(grouped.moves).toBe(grouped.count)
+  expect(grouped.color).toBe('#176b68')
+  expect(grouped.width).toBeGreaterThan(0)
+  expect(grouped.opacity).toBe(0.76)
+  await expect(page.locator('#merge-connector-v20')).toHaveAttribute('d', /M /)
 })
 
 test('dragging attaches a root, outside drops cancel, and shortcut detaches a child', async ({ page }) => {
@@ -344,6 +419,76 @@ test('double-click focuses versions and focused blank-space dragging pans withou
   await tile.dblclick({ position: { x: 8, y: 8 } })
   await expect(page.getByLabel('New value')).toHaveValue('Selectable')
   await page.getByRole('button', { name: 'Cancel', exact: true }).click()
+})
+
+test('version clicks activate without moving, while double-clicks activate and focus at low zoom', async ({ page }) => {
+  const room = await openRoom(page)
+  for (let index = 0; index < 6; index++) await addEntries(page, [`Zoom ${index}`])
+  const saved = await state(page, room)
+  const first = saved.versions[1].id
+  const second = saved.versions[2].id
+  await page.keyboard.press('Shift+a')
+  await expect(page.locator(`.version-card[data-version="${first}"] .overview-map`)).toBeVisible()
+  await page.waitForTimeout(500)
+  const world = page.locator('.graph-world')
+  const fitted = await world.getAttribute('style')
+  await page.locator(`.version-card[data-version="${first}"] .overview-map`).click()
+  await expect.poll(async () => (await state(page, room)).activeId).toBe(first)
+  expect(await world.getAttribute('style')).toBe(fitted)
+  await page.locator(`.version-card[data-version="${second}"] .overview-map`).dblclick()
+  await expect.poll(async () => (await state(page, room)).activeId).toBe(second)
+  await expectCentered(page, second)
+  await page.waitForTimeout(300)
+  expect((await state(page, room)).activeId).toBe(second)
+})
+
+test('double-clicking a version at normal zoom focuses it, including empty map space', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['One'])
+  const first = (await state(page, room)).activeId
+  await addEntries(page, ['Two'])
+  const second = (await state(page, room)).activeId
+  await page.keyboard.press('Shift+a')
+  await expect(page.locator(`.version-card[data-version="${first}"] .mini-map`)).toBeVisible()
+  await page.waitForTimeout(500)
+  const world = page.locator('.graph-world')
+  const fitted = await world.getAttribute('style')
+  await page.locator(`.version-card[data-version="${first}"] .version-card-head`).click()
+  await expect.poll(async () => (await state(page, room)).activeId).toBe(first)
+  expect(await world.getAttribute('style')).toBe(fitted)
+  const map = page.locator(`.version-card[data-version="${second}"] .mini-map`)
+  const inactivePoint = await emptyMapPoint(map)
+  await page.mouse.dblclick(inactivePoint.x, inactivePoint.y)
+  await expect.poll(async () => (await state(page, room)).activeId).toBe(second)
+  await expectCentered(page, second)
+
+  const point = await emptyMapPoint(map)
+  await map.evaluate((element) => element.addEventListener('dblclick', () => { element.dataset.doubleClicked = 'true' }))
+  await page.mouse.dblclick(point.x, point.y)
+  await expect(map).toHaveAttribute('data-double-clicked', 'true')
+  await expectCentered(page, second)
+})
+
+test('double-clicking in comparison selection activates and focuses without selecting twice', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['First'])
+  const first = (await state(page, room)).activeId
+  await addEntries(page, ['Second'])
+  const second = (await state(page, room)).activeId
+  await page.keyboard.press('Shift+a')
+  await page.waitForTimeout(500)
+  await page.locator(`.version-card[data-version="${first}"] .version-card-head`).click()
+  await expect.poll(async () => (await state(page, room)).activeId).toBe(first)
+  await page.keyboard.press('Shift+c')
+  await page.locator(`.version-card[data-version="${first}"] .version-card-head`).click()
+  await expect(page.locator(`.version-card[data-version="${first}"]`)).toHaveClass(/compared/)
+  await page.locator(`.version-card[data-version="${second}"] .version-card-head`).dblclick()
+  await expect.poll(async () => (await state(page, room)).activeId).toBe(second)
+  await expectCentered(page, second)
+  await page.waitForTimeout(600)
+  await expect(page.locator('.comparison-content')).toHaveCount(0)
+  await expect(page.locator(`.version-card[data-version="${first}"]`)).toHaveClass(/compared/)
+  await expect(page.locator(`.version-card[data-version="${second}"]`)).not.toHaveClass(/compared/)
 })
 
 test('creator indicator tracks the card header and long entry labels wrap within the tile', async ({ page }) => {

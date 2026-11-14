@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { toRefs } from 'vue'
+import { computed, toRefs } from 'vue'
 import { MoreHorizontal } from '@lucide/vue'
 import type { Version } from '../types/workspace'
 import type { VersionCardModel } from '../types/graph'
@@ -9,12 +9,14 @@ import { displayVersionId } from '../utils/versions'
 
 const props = defineProps<{ version: Version; model: VersionCardModel }>()
 const { active, compareIds, compareMode, zoom, overNode, invalidNode, hoveredNode, selectedNodes, draggedSubtreeIds, draggedOriginalTile, windowDimensions, clientId, isReadOnly, versionTiles, duplicateValueLinks, displayCardPosition, cardHeight, versionAuthorColor, activeUsersFor, descendantsCount, isPreviewing, previewLabel, versionAction, cardData, mapViewport, mapTransform, tileStrokeColor, tileStrokeWidth, dragOverlayTiles, handleVersionClick, handleVersionDoubleClick, onVersionContext, onVersionMenu, startMapPan, zoomMap, startMapTileGesture, enterTile, moveTileTooltip, leaveTile, onTileClick, onTileDoubleClick, onTileContext } = toRefs(props.model)
+const overlayTiles = computed(() => dragOverlayTiles.value(props.version))
+const overlayIds = computed(() => new Set(overlayTiles.value.map((tile) => tile.id)))
 </script>
 
 <template>
   <article class="version-card" :class="{ active: version.id === active.id, compared: compareIds.includes(version.id), 'compare-pick': compareMode, compact: zoom < 0.66, previewing: isPreviewing(version), 'root-version': version.id === 'v0' }"
     :data-version="version.id" :style="{ left: `${displayCardPosition(version).x}px`, top: `${displayCardPosition(version).y}px`, width: `${windowDimensions.width}px`, height: `${cardHeight(version)}px`, '--branch-color': versionColor(version), '--user-color': userColor(clientId), '--author-color': versionAuthorColor(version) }"
-    @click="handleVersionClick(version)" @dblclick.stop="handleVersionDoubleClick(version, $event)" @contextmenu="onVersionContext(version, $event)" :data-over="overNode === version.id">
+    @click="handleVersionClick(version, $event)" @dblclick.stop="handleVersionDoubleClick(version)" @contextmenu="onVersionContext(version, $event)" :data-over="overNode === version.id">
     <span v-for="(user, index) in activeUsersFor(version.id)" :key="`active-${user.id}`"
       class="version-user-outline" :style="{ borderColor: user.color, inset: `${-2 - index * 3}px` }"></span>
     <div v-if="version.id !== 'v0'" class="version-card-head">
@@ -22,7 +24,7 @@ const { active, compareIds, compareMode, zoom, overNode, invalidNode, hoveredNod
       <span class="version-header-id">{{ version.branch }} | {{ displayVersionId(version.id).replace(/^v/, 'V') }} | S{{ version.step }} |</span>
       <strong class="version-action">{{ version.change }}</strong>
       <span class="version-count">({{ descendantsCount(version.data) }} Entries)</span>
-      <button class="card-menu quiet-icon" title="Version actions" @click.stop="onVersionMenu(version, $event)"><MoreHorizontal :size="17" /></button>
+      <button class="card-menu quiet-icon" title="Version actions" @click.stop="onVersionMenu(version, $event)" @dblclick.stop><MoreHorizontal :size="17" /></button>
     </div>
     <div v-if="isPreviewing(version)" class="preview-badge">{{ previewLabel() }}</div>
     <div v-if="isReadOnly" class="overview-map">
@@ -57,14 +59,14 @@ const { active, compareIds, compareMode, zoom, overNode, invalidNode, hoveredNod
             <path v-for="link in duplicateValueLinks.get(version.id) ?? []" :key="link.id"
               :d="link.path" fill="none" stroke="#748a7d" stroke-width="1.5"
               stroke-dasharray="4 3" opacity=".72" pointer-events="none" />
-            <g v-for="tile in dragOverlayTiles(version)" :key="`drag-overlay-${tile.id}`" pointer-events="none">
+            <g v-for="tile in overlayTiles" :key="`drag-overlay-${tile.id}`" pointer-events="none">
               <rect :x="tile.x" :y="tile.y" :width="tile.width" :height="tile.height"
                 :class="['dragged-overlay', `depth-${tile.depth}`]"
                 :fill="tile.depth === 0 ? '#deebe4' : tile.depth % 2 ? '#c1d9cc' : '#a9cab9'" />
               <TileLabel :tile="tile" class="tile-label" />
             </g>
             <TileLabel v-for="tile in (versionTiles.get(version.id) ?? []).filter((item) =>
-              !dragOverlayTiles(version).some((overlay) => overlay.id === item.id))" :key="`label-${tile.id}`"
+              !overlayIds.has(item.id))" :key="`label-${tile.id}`"
               :tile="tile" class="tile-label" />
             <rect v-if="version.id === active.id && draggedOriginalTile" class="drag-source-ghost"
               :x="draggedOriginalTile.x" :y="draggedOriginalTile.y"

@@ -8,7 +8,7 @@ Define and implement consistent mouse and keyboard interactions throughout the a
 
 **Version graph (outside version windows):**
 - Single-click on a version: Select and activate the version.
-- Double-click on a version: Smoothly center and zoom into the version (animated).
+- Double-click on a version: Activate it, then smoothly center and zoom into it (animated).
 - Drag on empty canvas: Pan the overall version graph.
 - Scroll on empty canvas: Zoom the overall version graph.
 
@@ -17,7 +17,7 @@ Define and implement consistent mouse and keyboard interactions throughout the a
 - Single-click on an selected entry: Deselect the entry.
 - Single-click on empty canvas: Clear the current entry selection.
 - Double-click on an entry: Open the entry for editing.
-- Double-click on empty canvas: No action.
+- Double-click on an empty version canvas: Activate and focus its version.
 - Drag an entry onto another valid entry: Attach it as a child of the target entry.
 - Drag an attached entry onto empty canvas: Detach it and make it a free-floating treemap.
 - Drag on empty canvas with **Shift + left mouse button**: Pan the version canvas.
@@ -73,6 +73,13 @@ Define and implement consistent mouse and keyboard interactions throughout the a
 - Ensure that elements become visible immediately when they enter the viewport through panning or zooming.
 - Account for animations and drag operations so that elements are not incorrectly removed from rendering while being interacted with.
 - Use an appropriate visibility margin around the viewport to avoid visible pop-in during panning and zooming.
+
+### 7.2 Further performance investigations
+
+1. Profile large treemaps and consider culling offscreen tiles and labels inside each version, while retaining drag, selection, and connector behavior.
+2. Reduce the quadratic candidate generation and sorting for large groups of duplicate entry values, preserving their current connection choices.
+3. Profile graph panning with many versions and copy links; consider a spatial index to avoid scanning every connection on each camera update.
+4. Profile persistence and collaboration with large histories; investigate incremental serialization or updates without weakening conflict resolution.
 
 ## 8. Misc
 

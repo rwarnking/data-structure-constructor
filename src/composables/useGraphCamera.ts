@@ -108,12 +108,14 @@ export function useGraphCamera(options: {
     cancelPanAnimation()
     draggingCanvas.value = true
     dragOrigin.value = { x: event.clientX, y: event.clientY, panX: pan.value.x, panY: pan.value.y, moved: false }
-    ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
   }
   function moveCanvasPan(event: PointerEvent) {
     if (!draggingCanvas.value) return
     if (!dragOrigin.value.moved && Math.hypot(event.clientX - dragOrigin.value.x, event.clientY - dragOrigin.value.y) <= 3) return
-    dragOrigin.value.moved = true
+    if (!dragOrigin.value.moved) {
+      dragOrigin.value.moved = true
+      ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
+    }
     focusedVersionId.value = null
     pan.value = { x: dragOrigin.value.panX + event.clientX - dragOrigin.value.x, y: dragOrigin.value.panY + event.clientY - dragOrigin.value.y }
   }
@@ -137,7 +139,7 @@ export function useGraphCamera(options: {
     }, 420)
   }
   function focusActive() { focusVersion(active.value) }
-  const visibleVersions = computed(() => {
+  const visibleVersions = computed<Version[]>((previous) => {
     const marginX = windowDimensions.value.width + GRAPH_GAP_X
     const marginY = windowDimensions.value.height + GRAPH_GAP_Y
     const left = -pan.value.x / zoom.value - marginX
@@ -147,22 +149,47 @@ export function useGraphCamera(options: {
     const retained = new Set([state.value.activeId, ...compareIds.value])
     const draggedVersion = draggedVersionId()
     if (draggedVersion) retained.add(draggedVersion)
-    return versions.value.filter((version) => {
+    const visible = versions.value.filter((version) => {
       if (retained.has(version.id)) return true
       const position = cardPosition(version)
       return position.x <= right && position.x + windowDimensions.value.width >= left
         && position.y <= bottom && position.y + cardHeight(version) >= top
     })
+    return previous && previous.length === visible.length && visible.every((version, index) => version === previous[index])
+      ? previous : visible
   })
+  function intersectsViewport(bounds: { left: number; top: number; right: number; bottom: number }, margin = 0) {
+    return bounds.left <= (canvasSize.value.width - pan.value.x) / zoom.value + margin
+      && bounds.right >= -pan.value.x / zoom.value - margin
+      && bounds.top <= (canvasSize.value.height - pan.value.y) / zoom.value + margin
+      && bounds.bottom >= -pan.value.y / zoom.value - margin
+  }
+  const versionsById = computed(() => new Map(versions.value.map((version) => [version.id, version])))
+  function connectionInViewport(source: Version, destination: Version) {
+    const from = displayCardPosition(source)
+    const to = displayCardPosition(destination)
+    const startX = from.x + windowDimensions.value.width
+    const startY = from.y + cardHeight(source) / 2
+    const endY = to.y + cardHeight(destination) / 2
+    // Include the label position as well as the path, including the root's horizontal route.
+    return intersectsViewport({
+      left: Math.min(startX, to.x),
+      right: Math.max(startX, to.x),
+      top: Math.min(startY, endY),
+      bottom: Math.max(startY, endY),
+    }, windowDimensions.value.height / 3 + 100)
+  }
   const visibleConnectionVersions = computed(() => {
-    const visible = new Set(visibleVersions.value.map((version) => version.id))
-    return versions.value.filter((version) =>
-      visible.has(version.id) || !!version.parentId && visible.has(version.parentId))
+    return versions.value.filter((version) => {
+      const parent = version.parentId && versionsById.value.get(version.parentId)
+      return !!parent && connectionInViewport(parent, version)
+    })
   })
   const visibleMergeConnectionVersions = computed(() => {
-    const visible = new Set(visibleVersions.value.map((version) => version.id))
-    return versions.value.filter((version) =>
-      !!version.mergeSourceId && (visible.has(version.id) || visible.has(version.mergeSourceId)))
+    return versions.value.filter((version) => {
+      const source = version.mergeSourceId && versionsById.value.get(version.mergeSourceId)
+      return !!source && connectionInViewport(source, version)
+    })
   })
   function cancelPanAnimation() {
     if (panAnimationFrame !== null) cancelAnimationFrame(panAnimationFrame)
@@ -240,7 +267,7 @@ export function useGraphCamera(options: {
   }
 
   return { focusedVersionId, cardPosition, cardHeight, displayCardPosition, startVersionArrival, graphBounds,
-    visibleVersions, visibleConnectionVersions, visibleMergeConnectionVersions, zoomAt, zoomIn, zoomOut, fitGraph,
+    visibleVersions, visibleConnectionVersions, visibleMergeConnectionVersions, intersectsViewport, zoomAt, zoomIn, zoomOut, fitGraph,
     startCanvasPan, moveCanvasPan, endCanvasPan, onWheel, focusVersion, focusActive, animateCamera,
     isVersionCentered, panToVersion, stopGraphAnimations }
 }

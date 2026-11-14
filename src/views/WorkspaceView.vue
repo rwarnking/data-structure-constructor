@@ -20,9 +20,9 @@ import EntryEditor from '../components/EntryEditor.vue'
 import EntryOperationDialog from '../components/EntryOperationDialog.vue'
 import RoomManager from '../components/RoomManager.vue'
 import type { CopyLink, StoredState, Tile, TreeNode, Version } from '../types/workspace'
-import { countNodes, findNode, findParent, flattenPaths } from '../utils/tree'
+import { countNodes, findNode, findParent, flattenNodes, nodeParentIds } from '../utils/tree'
 import { compareCopyLinks, displayVersionId, reflowVersionLayout } from '../utils/versions'
-import { CARD_WIDTH, TREE_MAP_HEIGHT, tilesFor, tileForNode } from '../utils/treemap'
+import { CARD_WIDTH, TREE_MAP_HEIGHT, tilesForForest, tileForNode } from '../utils/treemap'
 import {
   GitBranch, GitCompareArrows, Plus, Maximize, Copy, Trash2,
   Pencil, Unlink, X, Layers3, ClipboardPaste, ZoomIn, ZoomOut, Radio,
@@ -41,6 +41,7 @@ const localRooms = ref(initialRooms.rooms)
 const currentRoomName = ref(initialRooms.currentRoom)
 const state = ref<StoredState>(readRoomState(currentRoomName.value, initialRooms.canMigrateLegacy))
 const versions = computed(() => state.value.versions)
+const versionsById = computed(() => new Map(versions.value.map((version) => [version.id, version])))
 const active = computed(() => versions.value.find((version) => version.id === state.value.activeId) ?? versions.value[0]!)
 const comparisonController = useVersionComparison(versions, (version) => mapViewFor(version), (version) => mapViewport(version))
 const comparisonModel = reactive(comparisonController)
@@ -66,6 +67,7 @@ let suppressVersionClick = false
 let suppressTileClick = false
 let suppressCanvasClick = false
 let versionClickTimer = 0
+let pendingCompareVersion: Version | null = null
 let tileClickTimer = 0
 let suppressPingClick = false
 let pingPointer: { id: number; x: number; y: number; moved: boolean } | null = null
@@ -105,6 +107,11 @@ let presenceTimer = 0
 let pingClickTimer = 0
 let tileTooltipTimer = 0
 let tilePointer = { x: 0, y: 0 }
+
+watch([compareMode, mergeMode], () => {
+  window.clearTimeout(versionClickTimer)
+  pendingCompareVersion = null
+})
 
 const graphCamera = useGraphCamera({ versions, active, state, compareIds, draggedVersionId: () => treeDrag.value?.versionId,
   zoom, pan, canvasSize, windowDimensions, suppressClicks: suppressGraphClicks })
@@ -153,6 +160,7 @@ function suppressGraphClicks() {
   suppressTileClick = true
   suppressCanvasClick = true
   window.clearTimeout(versionClickTimer)
+  pendingCompareVersion = null
   window.clearTimeout(tileClickTimer)
   window.setTimeout(() => { suppressVersionClick = false; suppressTileClick = false; suppressCanvasClick = false }, 0)
 }
@@ -397,19 +405,30 @@ function selectVersion(version: Version) {
   menu.value = null
 }
 
-function handleVersionClick(version: Version) {
+function handleVersionClick(version: Version, event: MouseEvent) {
   if (compareMode.value || mergeMode.value) {
-    selectVersion(version)
+    if (event.detail > 1) return
+    if (pendingCompareVersion) {
+      window.clearTimeout(versionClickTimer)
+      selectVersion(pendingCompareVersion)
+    }
+    const mode = compareMode.value ? 'compare' : 'merge'
+    pendingCompareVersion = version
+    versionClickTimer = window.setTimeout(() => {
+      pendingCompareVersion = null
+      if ((mode === 'compare' && compareMode.value) || (mode === 'merge' && mergeMode.value)) selectVersion(version)
+    }, 500)
     return
   }
   window.clearTimeout(versionClickTimer)
+  pendingCompareVersion = null
   versionClickTimer = window.setTimeout(() => selectVersion(version), 220)
 }
 
-function handleVersionDoubleClick(version: Version, event: MouseEvent) {
+function handleVersionDoubleClick(version: Version) {
   window.clearTimeout(versionClickTimer)
-  if ((event.target as HTMLElement).closest('.mini-map')) return
-  if (!compareMode.value && !mergeMode.value) focusVersion(version)
+  pendingCompareVersion = null
+  activateAndFocusVersion(version)
 }
 
 function setSelectedNodes(nodeIds: string[]) {
@@ -463,7 +482,7 @@ const branchCount = computed(() => new Set(versions.value.filter((version) => ve
 const activeChildren = computed(() => versions.value.filter((version) => version.parentId === active.value.id).length)
 
 function connectionPath(version: Version) {
-  const parent = versions.value.find((item) => item.id === version.parentId)
+  const parent = version.parentId ? versionsById.value.get(version.parentId) : undefined
   if (!parent) return ''
   return versionConnectionPath(parent, version)
 }
@@ -491,26 +510,26 @@ function versionConnectionPath(source: Version, destination: Version, endOffsetY
   return `M ${startX} ${startY} H ${cornerX - radius} Q ${cornerX} ${startY} ${cornerX} ${startY + direction * radius} V ${endY - direction * radius} Q ${cornerX} ${endY} ${cornerX + radius} ${endY} H ${endX}`
 }
 function mergeConnectionPath(version: Version) {
-  const source = versions.value.find((item) => item.id === version.mergeSourceId)
+  const source = version.mergeSourceId ? versionsById.value.get(version.mergeSourceId) : undefined
   if (!source) return ''
   return versionConnectionPath(source, version)
 }
 function mergeConnectorLabelPosition(version: Version) {
-  const source = versions.value.find((item) => item.id === version.mergeSourceId)
+  const source = version.mergeSourceId ? versionsById.value.get(version.mergeSourceId) : undefined
   return connectorLabelPosition(source ?? version, version)
 }
 function mergeConnectionColor(version: Version) {
-  const source = versions.value.find((item) => item.id === version.mergeSourceId)
+  const source = version.mergeSourceId ? versionsById.value.get(version.mergeSourceId) : undefined
   return versionColor(source ?? version)
 }
 function isBranchCurve(version: Version) {
-  const parent = versions.value.find((item) => item.id === version.parentId)
+  const parent = version.parentId ? versionsById.value.get(version.parentId) : undefined
   if (!parent || parent.id === 'v0') return false
   return Math.abs(cardPosition(parent).y + cardHeight(parent) / 2
     - cardPosition(version).y - cardHeight(version) / 2) >= 1
 }
 function connectionWidth(version: Version) {
-  const parent = versions.value.find((item) => item.id === version.parentId)
+  const parent = version.parentId ? versionsById.value.get(version.parentId) : undefined
   return Math.min(windowDimensions.value.height, cardHeight(version), parent ? cardHeight(parent) : windowDimensions.value.height) / 3
 }
 function terminalTailEnd(version: Version) {
@@ -558,7 +577,7 @@ function tileStrokeWidth(versionId: string, nodeId: string) {
 }
 function descendantsCount(nodes: TreeNode[]) { return countNodes(nodes) }
 function versionAction(version: Version) {
-  const previous = version.parentId ? versions.value.find((item) => item.id === version.parentId) : undefined
+  const previous = version.parentId ? versionsById.value.get(version.parentId) : undefined
   if (!previous) return { label: 'root', symbol: '•' }
   if (version.mergeSourceId || /^Merge \d+ entries into /.test(version.change)) {
     return { label: 'merge', symbol: '⋈' }
@@ -566,8 +585,8 @@ function versionAction(version: Version) {
   if (/^Split .+ into \d+ entries$/.test(version.change)) {
     return { label: 'split', symbol: 'Y' }
   }
-  const before = flattenPaths(previous.data)
-  const after = flattenPaths(version.data)
+  const before = flattenNodes(previous.data)
+  const after = flattenNodes(version.data)
   const added = [...after.keys()].filter((id) => !before.has(id)).length
   const removed = [...before.keys()].filter((id) => !after.has(id)).length
   let renamed = 0
@@ -575,10 +594,8 @@ function versionAction(version: Version) {
   for (const [id, item] of after) {
     const old = before.get(id)
     if (!old) continue
-    const oldNode = findNode(previous.data, id)
-    const newNode = findNode(version.data, id)
-    if (item.value !== old.value) renamed += 1
-    if ((oldNode?.description ?? '') !== (newNode?.description ?? '')) modified += 1
+    if (item.node.value !== old.node.value) renamed += 1
+    if ((old.node.description ?? '') !== (item.node.description ?? '')) modified += 1
   }
   const moved = [...after].filter(([id, item]) => before.has(id) && before.get(id)!.parentId !== item.parentId)
   if (added && !removed && !renamed && !modified) return { label: 'add', symbol: '+' }
@@ -605,7 +622,7 @@ const versionTiles = computed(() => {
   for (const version of visibleVersions.value) {
     const data = cardData(version)
     const positions = cardPositions(version)
-    const tiles = data.flatMap((root, index) => tilesFor(root, data, index, positions))
+    const tiles = tilesForForest(data, positions)
     if (version.id === active.value.id && draggedNode.value) {
       const dragged = new Set(draggedSubtreeIds.value)
       tiles.sort((left, right) => Number(dragged.has(right.id)) - Number(dragged.has(left.id)))
@@ -617,6 +634,7 @@ const versionTiles = computed(() => {
 const duplicateValueLinks = computed(() => {
   const result = new Map<string, Array<{ id: string; path: string }>>()
   for (const version of visibleVersions.value) {
+    const parents = nodeParentIds(cardData(version))
     const groups = new Map<string, Tile[]>()
     for (const tile of versionTiles.value.get(version.id) ?? []) {
       const group = groups.get(tile.label) ?? []
@@ -640,8 +658,7 @@ const duplicateValueLinks = computed(() => {
       const candidates = tiles.flatMap((first, index) => tiles.slice(index + 1).map((second) => ({
         first,
         second,
-        isParentChild: findParent(cardData(version), first.id)?.id === second.id
-          || findParent(cardData(version), second.id)?.id === first.id,
+        isParentChild: parents.get(first.id) === second.id || parents.get(second.id) === first.id,
         distance: (first.x + first.width / 2 - second.x - second.width / 2) ** 2
           + (first.y + first.height / 2 - second.y - second.height / 2) ** 2,
       }))).sort((left, right) => Number(right.isParentChild) - Number(left.isParentChild)
@@ -652,8 +669,8 @@ const duplicateValueLinks = computed(() => {
         const firstRoot = rootOf(first.id)
         const secondRoot = rootOf(second.id)
         if (firstRoot === secondRoot) continue
-        const firstParent = findParent(cardData(version), first.id)?.id
-        const secondParent = findParent(cardData(version), second.id)?.id
+        const firstParent = parents.get(first.id)
+        const secondParent = parents.get(second.id)
         if (firstParent && secondParent && firstParent !== secondParent
           && rootOf(firstParent) === rootOf(secondParent)) {
           connected.set(firstRoot, secondRoot)
@@ -702,7 +719,7 @@ function previewLabel() {
   return 'LAYOUT PREVIEW'
 }
 function nodeGraphBounds(versionId: string, nodeId: string) {
-  const version = versions.value.find((item) => item.id === versionId)
+  const version = versionsById.value.get(versionId)
   if (!version) return null
   const view = mapViewFor(version)
   const viewport = mapViewport(version)
@@ -710,9 +727,8 @@ function nodeGraphBounds(versionId: string, nodeId: string) {
   const mapHeight = version.id === 'v0' ? cardHeight(version) - 2 : cardHeight(version) - 47
   const scaleX = mapWidth / viewport.width
   const scaleY = mapHeight / viewport.height
-  for (const [index, root] of version.data.entries()) {
-    const tile = tilesFor(root, version.data, index, version.positions).find((item) => item.id === nodeId)
-    if (!tile) continue
+  const tile = tileForNode(version.data, version.positions, nodeId)
+  if (tile) {
     const position = displayCardPosition(version)
     const mapLeft = version.id === 'v0' ? 1 : 6
     const mapTop = version.id === 'v0' ? 1 : 39
@@ -725,18 +741,20 @@ function nodeGraphBounds(versionId: string, nodeId: string) {
   }
   return null
 }
-const visibleCopyLinks = computed(() => state.value.copyLinks.filter((link) => {
-  const source = versions.value.find((version) => version.id === link.sourceVersionId)
-  const target = versions.value.find((version) => version.id === link.targetVersionId)
-  return !!source && !!target
-    && !!findNode(source.data, link.sourceNodeId)
-    && !!findNode(target.data, link.targetNodeId)
-    && visibleVersions.value.some((version) => version.id === source.id || version.id === target.id)
-}))
-function copyLinkPath(link: CopyLink) {
+const copyLinksWithBounds = computed(() => state.value.copyLinks.flatMap((link) => {
   const source = nodeGraphBounds(link.sourceVersionId, link.sourceNodeId)
   const target = nodeGraphBounds(link.targetVersionId, link.targetNodeId)
-  if (!source || !target) return ''
+  return source && target ? [{ link, source, target, path: copyLinkPath(source, target) }] : []
+}))
+const visibleCopyLinks = computed(() => copyLinksWithBounds.value.filter(({ source, target }) =>
+  graphCamera.intersectsViewport({
+    left: Math.min(source.left, target.left),
+    right: Math.max(source.right, target.right),
+    top: Math.min(source.top, target.top),
+    bottom: Math.max(source.bottom, target.bottom),
+  }, 90 + 20 / zoom.value)
+))
+function copyLinkPath(source: NonNullable<ReturnType<typeof nodeGraphBounds>>, target: NonNullable<ReturnType<typeof nodeGraphBounds>>) {
   const sourceCenter = { x: (source.left + source.right) / 2, y: (source.top + source.bottom) / 2 }
   const targetCenter = { x: (target.left + target.right) / 2, y: (target.top + target.bottom) / 2 }
   const dx = targetCenter.x - sourceCenter.x
@@ -1045,17 +1063,17 @@ const cardModel: VersionCardModel = reactive({
               :visible-merge-connection-versions="visibleMergeConnectionVersions" :active-id="active.id"
               :connection-path="connectionPath" :connection-width="connectionWidth" :is-branch-curve="isBranchCurve"
               :merge-connection-path="mergeConnectionPath" :merge-connection-color="mergeConnectionColor"
-              :card-position="cardPosition" :card-height="cardHeight" :terminal-tail-end="terminalTailEnd"
+              :card-position="cardPosition" :display-card-position="displayCardPosition" :card-height="cardHeight" :terminal-tail-end="terminalTailEnd"
               :connector-label-position="connectorLabelPosition" :merge-connector-label-position="mergeConnectorLabelPosition"
               :version-action="versionAction" />
 
             <VersionCard v-for="version in visibleVersions" :key="version.id" :version="version" :model="cardModel" />
             <svg class="copy-connection-layer" :width="graphBounds.width + 260" :height="graphBounds.height">
-              <g v-for="(link, index) in visibleCopyLinks" :key="`copy-${index}`" class="copy-link-group">
-                <path :d="copyLinkPath(link)" class="copy-link" fill="none" stroke="#cf7b32"
+              <g v-for="({ link, path }, index) in visibleCopyLinks" :key="`copy-${index}`" class="copy-link-group">
+                <path :d="path" class="copy-link" fill="none" stroke="#cf7b32"
                   stroke-width="3" vector-effect="non-scaling-stroke" stroke-dasharray="7 4"
                   pointer-events="none" />
-                <path :d="copyLinkPath(link)" class="copy-link-hit" fill="none" stroke="transparent"
+                <path :d="path" class="copy-link-hit" fill="none" stroke="transparent"
                   stroke-width="8" vector-effect="non-scaling-stroke" pointer-events="stroke"
                   role="button" tabindex="0"
                   :aria-label="`Copied entry connection from ${displayVersionId(link.sourceVersionId)} to ${displayVersionId(link.targetVersionId)}. Click to switch versions.`"

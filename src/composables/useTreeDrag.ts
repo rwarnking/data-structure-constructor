@@ -1,7 +1,7 @@
 import { computed, ref, type ComputedRef, type Ref } from 'vue'
 import type { MapView, SpatialPreview, StoredState, TreeNode, Version } from '../types/workspace'
 import { descendants, findNode, findParent, removeNode } from '../utils/tree'
-import { CARD_WIDTH, TREE_MAP_HEIGHT, defaultPositions, fitMapViewToLayout, nearestPositionIsFree, outerTreemapDimensions, positionsForData, tileForNode, tilesFor } from '../utils/treemap'
+import { CARD_WIDTH, TREE_MAP_HEIGHT, defaultPositions, fitMapViewToLayout, nearestPositionIsFree, outerTreemapDimensions, positionsForData, tileForNode, tilesForForest } from '../utils/treemap'
 
 export function useTreeDrag(options: {
   state: Ref<StoredState>; versions: ComputedRef<Version[]>; active: ComputedRef<Version>
@@ -106,7 +106,7 @@ export function useTreeDrag(options: {
     const localY = (clientY - rect.top) / zoom.value * viewport.height / (rect.height / zoom.value)
     const x = (localX - view.panX) / view.zoom
     const y = (localY - view.panY) / view.zoom
-    const tiles = active.value.data.flatMap((root, index) => tilesFor(root, active.value.data, index, active.value.positions))
+    const tiles = tilesForForest(active.value.data, active.value.positions)
     const draggedIds = new Set(draggedSubtreeIds.value)
     if (tiles.some((tile) => draggedIds.has(tile.id)
       && x >= tile.x && x <= tile.x + tile.width && y >= tile.y && y <= tile.y + tile.height)) return null

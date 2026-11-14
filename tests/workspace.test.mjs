@@ -16,7 +16,8 @@ after(() => vite.close())
 const { useHierarchyEditor } = await vite.ssrLoadModule('/src/composables/useHierarchyEditor.ts')
 const { useVersionComparison } = await vite.ssrLoadModule('/src/composables/useVersionComparison.ts')
 const { reflowVersionLayout } = await vite.ssrLoadModule('/src/utils/versions.ts')
-const { layoutTileLabel } = await vite.ssrLoadModule('/src/utils/treemap.ts')
+const { layoutTileLabel, tilesForForest, tilesFor } = await vite.ssrLoadModule('/src/utils/treemap.ts')
+const { useGraphCamera } = await vite.ssrLoadModule('/src/composables/useGraphCamera.ts')
 
 function node(id, children = []) {
   return { id, value: id, children }
@@ -125,6 +126,46 @@ test('entry labels wrap within the available size, including long unbroken words
   const unbroken = layoutTileLabel({ ...tile, label: 'abcdefghijklmnopqrstuvwxyz' })
   assert.equal(unbroken.lines.join(''), 'abcdefghijklmnopqrstuvwxyz')
   assert.ok(unbroken.lines.length > 1)
+})
+
+test('treemap layout reuses subtree geometry and reflects later edits', () => {
+  let deep = node('leaf')
+  for (let index = 0; index < 24; index++) deep = node(`parent-${index}`, [deep])
+  const forest = [deep, node('other')]
+  const tiles = tilesForForest(forest)
+  assert.equal(tiles.length, 26)
+  assert.deepEqual(tiles, forest.flatMap((root, index) => tilesFor(root, forest, index)))
+  deep.children.push(node('new-child'))
+  const updated = tilesForForest(forest)
+  assert.equal(updated.length, 27)
+  assert.ok(updated.some((tile) => tile.id === 'new-child'))
+  assert.deepEqual(updated, forest.flatMap((root, index) => tilesFor(root, forest, index)))
+})
+
+test('connections crossing the viewport remain visible without either endpoint card', () => {
+  const scope = effectScope()
+  scope.run(() => {
+    const root = version('v0', [])
+    const source = version('source', [], 'v0', 1)
+    const destination = { ...version('destination', [], 'source', 20), lane: 2, mergeSourceId: 'source' }
+    const activeVersion = { ...version('active', [], 'v0', 50), lane: 5 }
+    const graph = [root, source, destination, activeVersion]
+    const state = ref({ versions: graph, activeId: 'active', nextNode: 1, nextVersion: 51, nextLane: 6, copyLinks: [] })
+    const pan = ref({ x: -4150, y: -350 })
+    const camera = useGraphCamera({
+      versions: computed(() => state.value.versions), active: computed(() => state.value.versions[3]),
+      state, compareIds: ref([]), draggedVersionId: () => undefined,
+      zoom: ref(1), pan, canvasSize: ref({ width: 200, height: 600 }),
+      windowDimensions: computed(() => ({ width: 100, height: 100 })), suppressClicks: () => {},
+    })
+    assert.ok(!camera.visibleVersions.value.some((item) => item.id === 'source' || item.id === 'destination'))
+    assert.ok(camera.visibleConnectionVersions.value.some((item) => item.id === 'destination'))
+    assert.ok(camera.visibleMergeConnectionVersions.value.some((item) => item.id === 'destination'))
+    pan.value = { x: -12000, y: -350 }
+    assert.ok(!camera.visibleConnectionVersions.value.some((item) => item.id === 'destination'))
+    assert.ok(!camera.visibleMergeConnectionVersions.value.some((item) => item.id === 'destination'))
+  })
+  scope.stop()
 })
 
 test('attachment rejects cycles and moves a subtree without losing descendants', () => {

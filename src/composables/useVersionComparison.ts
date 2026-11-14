@@ -1,7 +1,7 @@
 import { computed, ref, type ComputedRef } from 'vue'
 import type { MapView, TreeNode, Version } from '../types/workspace'
 import { descendants, findNode, flattenNodes, type FlatNode } from '../utils/tree'
-import { CARD_WIDTH, TREE_MAP_HEIGHT, MAP_PADDING, positionsAfterMove, positionsForData, tilesFor } from '../utils/treemap'
+import { CARD_WIDTH, TREE_MAP_HEIGHT, MAP_PADDING, positionsAfterMove, positionsForData, tilesForForest } from '../utils/treemap'
 
 export function useVersionComparison(
   versions: ComputedRef<Version[]>,
@@ -261,7 +261,7 @@ export function useVersionComparison(
     ]
     return panels.map((panel) => ({
       ...panel,
-      tiles: panel.data.flatMap((root, index) => tilesFor(root, panel.data, index, panel.positions)),
+      tiles: tilesForForest(panel.data, panel.positions),
     }))
   })
   const comparisonViewBox = computed(() => {
@@ -290,7 +290,7 @@ export function useVersionComparison(
   const mergePreviewTiles = computed(() => {
     const result = mergeResult.value
     if (!result) return []
-    return result.data.flatMap((root, index) => tilesFor(root, result.data, index, result.positions))
+    return tilesForForest(result.data, result.positions)
   })
   const mergePreviewViewBox = computed(() => {
     const tiles = mergePreviewTiles.value
