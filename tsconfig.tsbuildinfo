@@ -1,1 +1,1 @@
-{"root":["./src/collaboration.ts","./src/main.ts","./src/app.vue","./vite.config.ts"],"version":"5.7.3"}
+{"root":["./src/collaboration.ts","./src/main.ts","./src/types/workspace.ts","./src/utils/tree.ts","./src/utils/treemap.ts","./src/utils/validation.ts","./src/app - kopie.vue","./src/app.vue","./src/components/entryeditor.vue","./src/components/entryoperationdialog.vue","./src/components/roommanager.vue","./src/views/workspaceview.vue","./vite.config.ts"],"version":"5.7.3"}
