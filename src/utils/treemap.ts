@@ -19,7 +19,6 @@ export const MAP_ZOOM_MIN = 0.0001
 export const MAP_ZOOM_MAX = 8
 
 export function fitMapViewToLayout(
-  versionId: string,
   data: TreeNode[],
   positions: Record<string, { x: number; y: number }> | undefined,
   view: MapView,

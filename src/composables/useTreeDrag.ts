@@ -52,7 +52,7 @@ export function useTreeDrag(options: {
       return {
         data,
         positions,
-        view: fitMapViewToLayout(active.value.id, data, positions, mapViewFor(active.value), 0),
+        view: fitMapViewToLayout(data, positions, mapViewFor(active.value), 0),
         kind: 'attach' as const,
       }
     }
@@ -121,7 +121,6 @@ export function useTreeDrag(options: {
     version: Version,
     nodeId: string,
     position: { x: number; y: number },
-    map: HTMLElement,
     data = version.data,
     positions = version.positions,
     sizeOverride?: { width: number; height: number },
@@ -131,7 +130,7 @@ export function useTreeDrag(options: {
     const node = findNode(data, nodeId)
     if (!node || !data.some((root) => root.id === nodeId)) return false
     const candidatePositions = { ...positions, [nodeId]: position }
-    const view = fitMapViewToLayout(version.id, data, candidatePositions, mapViewFor(version), 0)
+    const view = fitMapViewToLayout(data, candidatePositions, mapViewFor(version), 0)
     const size = sizeOverride ?? outerTreemapDimensions(node)
     const left = position.x * CARD_WIDTH
     const top = position.y * TREE_MAP_HEIGHT
@@ -150,7 +149,6 @@ export function useTreeDrag(options: {
     version: Version,
     nodeId: string,
     position: { x: number; y: number },
-    map: HTMLElement,
   ): SpatialPreview {
     const data = clone(version.data)
     const existingPositions = { ...defaultPositions(data, version.positions), ...version.positions }
@@ -186,7 +184,6 @@ export function useTreeDrag(options: {
       version,
       nodeId,
       position,
-      map,
       nextData,
       positions,
       !isRoot ? tileForNode(version.data, version.positions, nodeId) : undefined,
@@ -201,12 +198,12 @@ export function useTreeDrag(options: {
       valid,
       data: nextData,
       positions,
-      view: valid ? fitMapViewToLayout(version.id, nextData, positions, mapViewFor(version), 0) : mapViewFor(version),
+      view: valid ? fitMapViewToLayout(nextData, positions, mapViewFor(version), 0) : mapViewFor(version),
     }
   }
   function placeRoot(version: Version, nodeId: string, preview: SpatialPreview) {
     const map = document.querySelector<HTMLElement>(`.version-card[data-version="${version.id}"] .mini-map`)
-    if (isReadOnly.value || !map || !rootPositionIsAvailable(version, nodeId, preview, map)) return false
+    if (isReadOnly.value || !map || !rootPositionIsAvailable(version, nodeId, preview)) return false
     version.positions = clone(preview.positions)
     version.mapView = clone(preview.view)
     notify('Treemap layout updated')
@@ -280,7 +277,7 @@ export function useTreeDrag(options: {
       && parent?.id !== targetId && !isDraggedDescendant && !canAttach(drag.id, targetId)
       ? targetId : null
     if (map && targetVersion === active.value.id && point) {
-      spatialPreview.value = spatialDropLayout(active.value, drag.id, point, map)
+      spatialPreview.value = spatialDropLayout(active.value, drag.id, point)
     } else {
       spatialPreview.value = null
     }

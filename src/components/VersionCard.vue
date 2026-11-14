@@ -37,7 +37,7 @@ const { active, compareIds, compareMode, zoom, overNode, invalidNode, hoveredNod
       </div>
     </div>
     <div v-else class="mini-map" :class="{ empty: !cardData(version).length, 'root-map': version.id === 'v0' }"
-      @pointerdown="startMapPan($event, version)" @wheel.stop="zoomMap($event, version)">
+      @pointerdown="startMapPan($event, version)" @wheel="zoomMap($event, version)">
       <template v-if="cardData(version).length">
         <svg :viewBox="`0 0 ${mapViewport(version).width} ${mapViewport(version).height}`" preserveAspectRatio="none" class="treemap-svg">
           <g :transform="mapTransform(version)">

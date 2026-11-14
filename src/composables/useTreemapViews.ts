@@ -204,10 +204,7 @@ export function useTreemapViews(options: {
     void nextTick(initializeMapViews)
   }, { flush: 'post' })
   function zoomMap(event: WheelEvent, version: Version) {
-    if (!event.shiftKey) {
-      event.stopPropagation()
-      return
-    }
+    if (!event.shiftKey) return
     event.preventDefault()
     event.stopPropagation()
     const map = event.currentTarget as HTMLElement

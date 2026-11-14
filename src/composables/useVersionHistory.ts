@@ -67,7 +67,7 @@ export function useVersionHistory(options: {
     const viewport = mapViewport(parent)
     const currentMapView = mapViewFor(parent)
     const positions = positionsForData(parent.data, data, parent.positions, currentMapView, viewport)
-    const fittedMapView = fitMapViewToLayout('new-version', data, positions, currentMapView)
+    const fittedMapView = fitMapViewToLayout(data, positions, currentMapView)
     const version: Version = {
       id: `v${state.value.nextVersion++}-${CLIENT_ID}`, parentId: parent.id, step: parent.step + 1,
       lane, branch, change, data, createdBy: CLIENT_ID, positions,

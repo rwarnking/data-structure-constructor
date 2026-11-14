@@ -171,7 +171,6 @@ export function useVersionComparison(
     const source = flattenNodes(merged.source.data)
     const target = flattenNodes(merged.target.data)
     const result = flattenNodes(merged.data)
-    const ids = new Set([...source.keys(), ...target.keys()])
     const depth = (id: string, entries: Map<string, FlatNode>) => {
       let value = 0
       let parentId = entries.get(id)?.parentId

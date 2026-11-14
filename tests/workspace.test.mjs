@@ -6,7 +6,11 @@ import { computed, effectScope, ref } from 'vue'
 
 globalThis.crypto ??= webcrypto
 
-const vite = await createServer({ server: { middlewareMode: true }, appType: 'custom' })
+const vite = await createServer({
+  server: { middlewareMode: true },
+  appType: 'custom',
+  optimizeDeps: { noDiscovery: true },
+})
 after(() => vite.close())
 
 const { useHierarchyEditor } = await vite.ssrLoadModule('/src/composables/useHierarchyEditor.ts')
@@ -89,4 +93,49 @@ test('version layout keeps the main chain together and separates branches', () =
   assert.equal(main.lane, leaf.lane)
   assert.notEqual(side.lane, main.lane)
   assert.deepEqual(state.versions.map((item) => item.id), ['v0', 'v1', 'v2', 'v3', 'v4'])
+})
+
+test('attachment rejects cycles and moves a subtree without losing descendants', () => {
+  const scope = effectScope()
+  scope.run(() => {
+    const state = ref({ versions: [version('v0', [node('a', [node('b')]), node('c')])], activeId: 'v0', nextNode: 1, nextVersion: 1, nextLane: 1, copyLinks: [] })
+    const active = computed(() => state.value.versions[0])
+    let commits = 0
+    const editor = useHierarchyEditor({
+      clientId: 'test', state, active, selectedNodes: ref([]),
+      isReadOnly: computed(() => false), setSelectedNodes: () => {},
+      createVersion: (data) => {
+        commits++
+        return state.value.versions[0] = version('v1', data)
+      },
+    })
+    assert.equal(editor.canAttach('a', 'b'), false)
+    assert.equal(editor.attachEntry('a', 'b'), null)
+    assert.equal(commits, 0)
+    editor.attachEntry('a', 'c')
+    assert.deepEqual(active.value.data, [node('c', [node('a', [node('b')])])])
+    editor.attachEntry('b', 'c')
+    assert.deepEqual(active.value.data, [node('c', [node('a'), node('b')])])
+    editor.detachEntry('a')
+    assert.deepEqual(active.value.data, [node('c', [node('b')]), node('a')])
+  })
+  scope.stop()
+})
+
+test('bulk deletion keeps unselected descendants even when selected nodes are nested', () => {
+  const scope = effectScope()
+  scope.run(() => {
+    const state = ref({ versions: [version('v0', [node('a', [node('b', [node('c')]), node('d')])])], activeId: 'v0', nextNode: 1, nextVersion: 1, nextLane: 1, copyLinks: [] })
+    const active = computed(() => state.value.versions[0])
+    const selected = ref(['a', 'b'])
+    const editor = useHierarchyEditor({
+      clientId: 'test', state, active, selectedNodes: selected,
+      isReadOnly: computed(() => false), setSelectedNodes: (ids) => { selected.value = ids },
+      createVersion: (data) => state.value.versions[0] = version('v1', data),
+    })
+    editor.deleteSelectedEntries('keep-children')
+    assert.deepEqual(active.value.data, [node('c'), node('d')])
+    assert.deepEqual(selected.value, [])
+  })
+  scope.stop()
 })

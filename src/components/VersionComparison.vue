@@ -160,7 +160,6 @@ const { compareMode, mergeMode, showOverview, compareIds, closeVersionSelection,
           </button>
         </div>
       </div>
-      <div v-else class="no-diff"><Check :size="17" /> These versions are structurally identical.</div>
     </div>
     <div v-else class="drawer-empty"><Search :size="18" /><span>Select the first version, then the second.</span></div>
   </div>

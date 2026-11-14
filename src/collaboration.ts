@@ -22,12 +22,11 @@ export class PeerRoom {
   private hostConnections = new Set<DataConnection>()
   private hubConnection: DataConnection | null = null
   private host = false
-  private room = ''
   private onMessage: RoomMessageHandler = () => undefined
   private onStatus: (status: RoomStatus) => void = () => undefined
 
   async hostRoom(room: string, onMessage: RoomMessageHandler, onStatus: (status: RoomStatus) => void) {
-    this.prepare(room, onMessage, onStatus)
+    this.prepare(onMessage, onStatus)
     this.host = true
     this.publishStatus('hosting', 1, 'Waiting for peers')
     const peer = new Peer(roomPeerId(room))
@@ -39,7 +38,7 @@ export class PeerRoom {
   }
 
   async joinRoom(room: string, onMessage: RoomMessageHandler, onStatus: (status: RoomStatus) => void) {
-    this.prepare(room, onMessage, onStatus)
+    this.prepare(onMessage, onStatus)
     this.publishStatus('joining', 1, 'Connecting to host')
     const peer = new Peer()
     this.peer = peer
@@ -108,9 +107,8 @@ export class PeerRoom {
     this.publishStatus('idle', 0, 'Not connected')
   }
 
-  private prepare(room: string, onMessage: RoomMessageHandler, onStatus: (status: RoomStatus) => void) {
+  private prepare(onMessage: RoomMessageHandler, onStatus: (status: RoomStatus) => void) {
     this.close()
-    this.room = room
     this.onMessage = onMessage
     this.onStatus = onStatus
   }

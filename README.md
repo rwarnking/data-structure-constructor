@@ -32,11 +32,18 @@ collaboration controllers. Room persistence is in `src/services/`, shared types
 are in `src/types/`, and tree, layout, and validation helpers are in `src/utils/`.
 Peer connectivity is implemented in `src/collaboration.ts`.
 
-Run the focused workspace regression tests with `npm test`.
-
 The Vite UI runs at `http://127.0.0.1:5173`. Room state is persisted in browser storage in both development and deployed builds; the local workspace API is not used for room data.
 
 For a production build, run `npm run build` followed by `npm start`. The production server serves the built UI and the same workspace API on port `4173`.
+
+## Tests
+
+Install the browser once with `npx playwright install chromium`, then run
+`npm test` for both unit and browser integration tests. Run `npm run test:unit`
+or `npm run test:ui` separately, and `npm run typecheck` for a non-incremental
+type-check. The browser suite starts its own Vite and PeerJS signaling servers
+on ports 19100 and 19101; it uses real local WebRTC connections without relying
+on the public signaling service. Each test uses isolated browser storage.
 
 ## GitHub Pages
 

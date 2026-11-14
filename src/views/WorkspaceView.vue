@@ -545,9 +545,6 @@ function tileStrokeWidth(versionId: string, nodeId: string) {
   return 3 + (1 - normalizedZoom) * (7 / 0.65)
 }
 function descendantsCount(nodes: TreeNode[]) { return countNodes(nodes) }
-function treeDepth(nodes: TreeNode[]): number {
-  return nodes.length ? 1 + Math.max(...nodes.map((node) => treeDepth(node.children))) : 0
-}
 function versionAction(version: Version) {
   const previous = version.parentId ? versions.value.find((item) => item.id === version.parentId) : undefined
   if (!previous) return { label: 'root', symbol: '•' }
@@ -818,10 +815,6 @@ function startMapTileGesture(event: PointerEvent, version: Version, nodeId: stri
   }
   startTreeDrag(event, version, nodeId)
 }
-function focusVersionById(versionId?: string | null) {
-  const version = versions.value.find((item) => item.id === versionId)
-  if (version) focusVersion(version)
-}
 function activateAndFocusVersion(version: Version) {
   state.value.activeId = version.id
   setSelectedNodes([])
@@ -967,12 +960,6 @@ function pasteEntry() {
 function pasteEntryToVersion(versionId?: string) {
   if (versionId) state.value.activeId = versionId
   pasteEntry()
-}
-function resetWorkspace() {
-  if (window.confirm('Reset all local versions?')) {
-    clearTransientMapViews()
-    state.value = clone(seed)
-  }
 }
 function onVersionMenu(version: Version, event: MouseEvent) {
   menu.value = { x: event.clientX, y: event.clientY, kind: 'version', versionId: version.id }
