@@ -38,3 +38,24 @@ export function nodeParentIds(nodes: TreeNode[], parentId: string | null = null,
   }
   return result
 }
+export type FlatNode = { node: TreeNode; parentId: string | null; path: string; order: number }
+
+export function flattenPaths(nodes: TreeNode[], parentId: string | null = null, parentPath = ''): Map<string, { value: string; parentId: string | null; path: string }> {
+  const result = new Map<string, { value: string; parentId: string | null; path: string }>()
+  for (const node of nodes) {
+    const path = parentPath ? `${parentPath}/${node.value}` : node.value
+    result.set(node.id, { value: node.value, parentId, path })
+    for (const [id, info] of flattenPaths(node.children, node.id, path)) result.set(id, info)
+  }
+  return result
+}
+
+export function flattenNodes(nodes: TreeNode[], parentId: string | null = null, parentPath = ''): Map<string, FlatNode> {
+  const result = new Map<string, FlatNode>()
+  for (const [order, node] of nodes.entries()) {
+    const path = parentPath ? `${parentPath}/${node.value}` : node.value
+    result.set(node.id, { node, parentId, path, order })
+    for (const [id, info] of flattenNodes(node.children, node.id, path)) result.set(id, info)
+  }
+  return result
+}

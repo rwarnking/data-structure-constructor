@@ -1,283 +1,71 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { getClientId, PeerRoom, type RoomStatus } from '../collaboration'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { getClientId } from '../collaboration'
+import { useCollaboration } from '../composables/useCollaboration'
+import type { InteractionEntry } from '../types/collaboration'
+import { useVersionComparison } from '../composables/useVersionComparison'
+import { useGraphCamera } from '../composables/useGraphCamera'
+import { useTreemapViews } from '../composables/useTreemapViews'
+import { useTreeDrag } from '../composables/useTreeDrag'
+import { useHierarchyEditor } from '../composables/useHierarchyEditor'
+import { useVersionHistory } from '../composables/useVersionHistory'
+import { createRoomStorage, LAST_ROOM_KEY } from '../services/roomStorage'
+import VersionComparison from '../components/VersionComparison.vue'
+import WorkspaceSidebar from '../components/WorkspaceSidebar.vue'
+import VersionConnections from '../components/VersionConnections.vue'
+import VersionCard from '../components/VersionCard.vue'
+import type { VersionCardModel } from '../types/graph'
+import { selectionColor, userColor, versionColor } from '../utils/colors'
 import EntryEditor from '../components/EntryEditor.vue'
 import EntryOperationDialog from '../components/EntryOperationDialog.vue'
 import RoomManager from '../components/RoomManager.vue'
-import type {
-  CollaborationMetadata, CopyLink, EditorState, EntryDraft, EntryOperation, MapView, Revision,
-  SplitDraft, StoredState, Tile, TreeNode, Version,
-} from '../types/workspace'
-import { hasValidVersionStep, isCollaborationMetadata, isCopyLink, isRecord, isRevision, isStoredState, isVersion } from '../utils/validation'
-import { countNodes, descendants, findNode, findParent, removeNode } from '../utils/tree'
+import type { CopyLink, StoredState, Tile, TreeNode, Version } from '../types/workspace'
+import { countNodes, findNode, findParent, flattenPaths } from '../utils/tree'
+import { compareCopyLinks, displayVersionId, reflowVersionLayout } from '../utils/versions'
+import { CARD_WIDTH, TREE_MAP_HEIGHT, tilesFor, tileForNode } from '../utils/treemap'
 import {
-  CARD_HEIGHT, CARD_WIDTH, TREE_MAP_HEIGHT, MAP_PADDING, MAP_GAP, MAP_ZOOM_MIN, MAP_ZOOM_MAX,
-  fitMapViewToLayout, outerTreemapDimensions, mapGeometry, defaultPositions, positionsAfterMove,
-  positionsForData, nearestPositionIsFree, tilesFor, tileForNode,
-} from '../utils/treemap'
-import {
-  GitBranch, GitCompareArrows, Plus, Maximize, Search, Copy, Trash2,
-  Pencil, Unlink, ChevronDown, X, Check, Layers3, ClipboardPaste,
-  ZoomIn, ZoomOut, RotateCcw, MoreHorizontal, Moon, Sun, Radio,
+  GitBranch, GitCompareArrows, Plus, Maximize, Copy, Trash2,
+  Pencil, Unlink, X, Layers3, ClipboardPaste, ZoomIn, ZoomOut, Radio,
 } from '@lucide/vue'
 
 type ClipboardEntry = { sourceVersionId: string; node: TreeNode }
-type SpatialPreview = {
-  x: number
-  y: number
-  versionId: string
-  nodeId: string
-  kind: 'move' | 'detach' | 'noop' | 'invalid'
-  valid: boolean
-  data: TreeNode[]
-  positions: Record<string, { x: number; y: number }>
-  view: MapView
-}
-type FlatNode = { node: TreeNode; parentId: string | null; path: string; order: number }
-type VersionChange = { version: Version; revision: Revision }
-type VersionRemoval = { id: string; revision: Revision }
-type SyncDelta = {
-  type: 'sync-delta'
-  versions: VersionChange[]
-  removed: VersionRemoval[]
-  active?: { id: string; revision: Revision }
-  copyLinks?: { links: CopyLink[]; revision: Revision }
-  nextNode: number
-  nextVersion: number
-  nextLane: number
-}
-type SyncSnapshot = {
-  type: 'sync-snapshot'
-  state: StoredState
-  versions: Record<string, Revision>
-  removed: Record<string, Revision>
-  active: Revision
-  copyLinks: Revision
-  interactions?: InteractionEntry[]
-  clock: number
-}
-type InteractionEntry = {
-  id: string
-  actorId: string
-  actorName: string
-  action: string
-  createdAt: number
-  versionId?: string
-  nodeId?: string
-  nodeLabel?: string
-  ping?: { x: number; y: number }
-}
-type RemoteUser = { name: string; activeVersionId: string | null; selectedNodeIds: string[]; lastSeen: number }
-type Ping = { id: string; userId: string; x: number; y: number; createdAt: number }
-
-const STORAGE_KEY = 'canopy-data-structure-v1'
-const ROOMS_KEY = 'canopy-local-rooms-v1'
-const LAST_ROOM_KEY = 'canopy-last-room-v1'
-const LEGACY_MIGRATION_KEY = 'canopy-room-data-migrated-v1'
 const CLIENT_ID = getClientId()
 const GRAPH_GAP_X = 300
-const GRAPH_GAP_Y = 72
 const TERMINAL_TAIL_LENGTH = GRAPH_GAP_X
-const TERMINAL_ARROW_SIZE = 1.6
 const TERMINAL_ARROW_BASE_INSET = 0.3
 const SIDEBAR_LAYOUT_WIDTH = 238
 const ZOOM_MAX = 4
-const branchColors = ['#176b68', '#d15a3b', '#a58127', '#4774a8', '#8a5c83', '#5b7d46']
-const animalNames = [
-  'Badger', 'Bison', 'Capybara', 'Dolphin', 'Falcon', 'Fox', 'Gecko', 'Hare',
-  'Heron', 'Koala', 'Lynx', 'Marmot', 'Otter', 'Panda', 'Quokka', 'Raven',
-  'Robin', 'Seal', 'Tiger', 'Wombat',
-]
-const seed: StoredState = {
-  versions: [{
-    id: 'v0', parentId: null, step: 0, lane: 0, branch: 'ROOT', change: 'Empty structure',
-    data: [], createdAt: Date.now(),
-  }],
-  activeId: 'v0', nextNode: 1, nextVersion: 1, nextLane: 3, copyLinks: [],
-}
-
-function readState(): StoredState {
-  try {
-    const saved = localStorage.getItem(STORAGE_KEY)
-    if (saved) {
-      return normalizeState(JSON.parse(saved) as Partial<StoredState>)
-    }
-  } catch { /* Start with a clean graph if saved data is unreadable. */ }
-  return structuredClone(seed)
-}
-
-function roomDataKey(room: string) {
-  return `canopy-room-data-v1-${encodeURIComponent(room)}`
-}
-
-function readLocalRooms() {
-  try {
-    const stored: unknown = JSON.parse(localStorage.getItem(ROOMS_KEY) ?? '[]')
-    return Array.isArray(stored)
-      ? [...new Set(stored.filter((room): room is string =>
-        typeof room === 'string' && !!room.trim() && room.length <= 80))]
-      : []
-  } catch {
-    return []
-  }
-}
-
-function persistLocalRooms(rooms: string[]) {
-  localStorage.setItem(ROOMS_KEY, JSON.stringify(rooms))
-}
-
-function createLocalRoomName() {
-  return `Room ${crypto.randomUUID().replace(/-/g, '').slice(0, 8)}`
-}
-
-function initializeLocalRooms() {
-  const rooms = readLocalRooms()
-  const requestedRoom = new URLSearchParams(location.search).get('room')?.trim()
-  const lastRoom = localStorage.getItem(LAST_ROOM_KEY)
-  const canMigrateLegacy = !requestedRoom && rooms.length === 0
-  const currentRoom = requestedRoom
-    || (lastRoom && rooms.includes(lastRoom) ? lastRoom : '')
-    || rooms[0]
-    || createLocalRoomName()
-  if (!rooms.includes(currentRoom)) rooms.push(currentRoom)
-  persistLocalRooms(rooms)
-  localStorage.setItem(LAST_ROOM_KEY, currentRoom)
-  return { rooms, currentRoom, canMigrateLegacy }
-}
-
-function readRoomState(room: string, migrateLegacy = false): StoredState {
-  const savedRoomState = localStorage.getItem(roomDataKey(room))
-  if (savedRoomState) {
-    try {
-      const parsed: unknown = JSON.parse(savedRoomState)
-      if (isStoredState(parsed)) return normalizeState(parsed)
-    } catch {
-      console.warn(`Could not load saved data for room "${room}"`)
-    }
-  }
-  if (migrateLegacy && localStorage.getItem(LEGACY_MIGRATION_KEY) !== 'true') {
-    const legacy = localStorage.getItem(STORAGE_KEY)
-    if (legacy) {
-      const migrated = readState()
-      localStorage.setItem(roomDataKey(room), JSON.stringify(migrated))
-      localStorage.setItem(LEGACY_MIGRATION_KEY, 'true')
-      return migrated
-    }
-  }
-  return structuredClone(seed)
-}
-
-function normalizeState(value: Partial<StoredState>): StoredState {
-  const normalizedVersions = (value.versions ?? clone(seed.versions)).map((version) => {
-    const positions = version.positions ?? {}
-    const firstRoot = version.data[0]
-    const savedView = version.mapView
-    const validView = savedView && Number.isFinite(savedView.zoom) && savedView.zoom > 0
-      && Number.isFinite(savedView.panX) && Number.isFinite(savedView.panY)
-      && typeof savedView.manual === 'boolean'
-    return {
-      ...version,
-      mapView: validView ? {
-        ...savedView,
-        zoom: Math.min(MAP_ZOOM_MAX, Math.max(MAP_ZOOM_MIN, savedView.zoom)),
-      } : undefined,
-      positions: firstRoot
-        ? positionsAfterMove(version.data, positions, firstRoot.id, positions[firstRoot.id] ?? defaultPositions(version.data, positions)[firstRoot.id]!)
-        : positions,
-    }
-  })
-  const versionsById = new Map(normalizedVersions.map((version) => [version.id, version]))
-  return {
-    ...clone(seed), ...value,
-    versions: normalizedVersions,
-    copyLinks: (value.copyLinks ?? []).filter((link) => {
-      const source = versionsById.get(link.sourceVersionId)
-      const target = versionsById.get(link.targetVersionId)
-      return !!source && !!target
-        && !!findNode(source.data, link.sourceNodeId)
-        && !!findNode(target.data, link.targetNodeId)
-    }).sort(compareCopyLinks),
-  }
-}
-
+const { seed, roomDataKey, persistLocalRooms, initializeLocalRooms, readRoomState, normalizeState } = createRoomStorage()
 const initialRooms = initializeLocalRooms()
 const localRooms = ref(initialRooms.rooms)
 const currentRoomName = ref(initialRooms.currentRoom)
 const state = ref<StoredState>(readRoomState(currentRoomName.value, initialRooms.canMigrateLegacy))
 const versions = computed(() => state.value.versions)
 const active = computed(() => versions.value.find((version) => version.id === state.value.activeId) ?? versions.value[0]!)
+const comparisonController = useVersionComparison(versions, (version) => mapViewFor(version), (version) => mapViewport(version))
+const comparisonModel = reactive(comparisonController)
+const {
+  compareMode, compareIds, mergeMode, chooseCompare, startVersionSelection, closeVersionSelection,
+} = comparisonController
+
 const selectedNode = ref<string | null>(null)
 const selectedNodes = ref<string[]>([])
-const remoteUsers = ref<Record<string, RemoteUser>>({})
-const userName = ref(localStorage.getItem('canopy-user-name')?.trim().slice(0, 32) || animalForUser(CLIENT_ID))
-localStorage.setItem('canopy-user-name', userName.value)
-const interactions = ref<InteractionEntry[]>([])
 const hoveredNode = ref<{ versionId: string; nodeId: string } | null>(null)
 const entryTooltip = ref<{ versionId: string; nodeId: string; description: string; x: number; y: number } | null>(null)
-const pings = ref<Ping[]>([])
 const pingMode = ref(false)
 const darkMode = ref(localStorage.getItem('canopy-theme') === 'dark')
 const sidebarCollapsed = ref(false)
-const compareMode = ref(false)
-const compareIds = ref<string[]>([])
-const showDifferenceColors = ref(true)
-const mergeMode = ref(false)
-const mergeDecisions = ref<Record<string, 'combine' | 'source' | 'target' | 'omit'>>({})
-const mergeParentOverrides = ref<Record<string, string>>({})
-const mergePositionOverrides = ref<Record<string, { x: number; y: number }>>({})
-const mergeDrag = ref<{ id: string; pointerId: number; x: number; y: number; moved: boolean } | null>(null)
-const mergeDropTarget = ref<string | null>(null)
-const comparisonSelectedNode = ref<string | null>(null)
 const zoom = ref(1)
 const isReadOnly = computed(() => zoom.value <= 0.35)
 const pan = ref({ x: 40, y: 0 })
-const versionArrival = ref<{ versionId: string; from: { x: number; y: number }; progress: number } | null>(null)
-let versionArrivalFrame = 0
 const graphCanvas = ref<HTMLElement | null>(null)
 const canvasSize = ref({ width: window.innerWidth, height: Math.max(400, window.innerHeight - 209) })
 const browserViewport = ref({ width: window.innerWidth, height: window.innerHeight })
 let canvasObserver: ResizeObserver | null = null
-let panAnimationFrame: number | null = null
-const draggingCanvas = ref(false)
-const dragOrigin = ref({ x: 0, y: 0, panX: 0, panY: 0 })
-const draggedNode = ref<string | null>(null)
-const draggedPosition = ref<{ x: number; y: number } | null>(null)
-const dragPreviewView = ref<MapView | null>(null)
-const overNode = ref<string | null>(null)
-const invalidNode = ref<string | null>(null)
-const treeDrag = ref<{
-  id: string
-  versionId: string
-  pointerId: number
-  x: number
-  y: number
-  moved: boolean
-  space?: {
-    grabX: number
-    grabY: number
-    width: number
-    height: number
-  }
-} | null>(null)
-const spatialPreview = ref<SpatialPreview | null>(null)
-const mapPanDrag = ref<{
-  versionId: string
-  pointerId: number
-  x: number
-  y: number
-  panX: number
-  panY: number
-  scaleX: number
-  scaleY: number
-  moved: boolean
-} | null>(null)
-const transientMapViews = ref<Record<string, MapView>>({})
-const mapViewTimers = new Map<string, number>()
 let suppressVersionClick = false
 let suppressTileClick = false
 let versionClickTimer = 0
 let tileClickTimer = 0
-let suppressMergeClick = false
 let suppressPingClick = false
 let pingPointer: { id: number; x: number; y: number; moved: boolean } | null = null
 const menu = ref<{
@@ -299,21 +87,6 @@ watch(menu, async (value) => {
     y: Math.max(4, Math.min(value.y, window.innerHeight - element.offsetHeight - 4)),
   }
 })
-const editor = ref<EditorState | null>(null)
-const entryValueInput = ref<HTMLInputElement | null>(null)
-function setEntryValueInput(element: unknown) {
-  entryValueInput.value = element instanceof HTMLInputElement ? element : null
-}
-watch(editor, async (value) => {
-  if (!value) return
-  await nextTick()
-  entryValueInput.value?.focus()
-  const text = value.mode === 'create' ? value.entries[0]?.value ?? '' : value.value
-  entryValueInput.value?.setSelectionRange(text.length, text.length)
-})
-const entryOperation = ref<EntryOperation | null>(null)
-const bulkDeleteMode = ref<'keep-children' | 'subtree' | 'detach-children'>('keep-children')
-const bulkDeleteDialog = ref(false)
 const windowDimensions = computed(() => {
   const viewportWidth = Math.max(320, browserViewport.value.width - SIDEBAR_LAYOUT_WIDTH)
   const viewportHeight = Math.max(300, browserViewport.value.height)
@@ -326,44 +99,62 @@ const clipboard = ref<ClipboardEntry | null>(readClipboard(currentRoomName.value
 const toast = ref('')
 const roomDialogOpen = ref(false)
 const newRoomName = ref('')
-const roomStatus = ref<RoomStatus>({ state: 'idle', peers: 0, message: 'Not connected' })
-const peerRoom = new PeerRoom()
-const connectedUsers = computed(() => {
-  return [
-    { id: CLIENT_ID, name: userName.value.trim() || animalForUser(CLIENT_ID), activeVersionId: active.value.id },
-    ...(roomStatus.value.state === 'connected' || roomStatus.value.state === 'hosting'
-      ? Object.entries(remoteUsers.value).map(([id, user]) => ({
-      id, name: user.name, activeVersionId: user.activeVersionId,
-      }))
-      : []),
-  ]
-})
-const recentInteractions = computed(() => [...interactions.value]
-  .sort((left, right) => right.createdAt - left.createdAt || right.id.localeCompare(left.id))
-  .slice(0, 10))
 let toastTimer = 0
 let presenceTimer = 0
 let pingClickTimer = 0
-let pingSequence = 0
-let interactionSequence = 0
 let tileTooltipTimer = 0
 let tilePointer = { x: 0, y: 0 }
-let collaborationRoom = ''
-let collaborationMetadata: CollaborationMetadata | null = null
-let lastObservedState = JSON.stringify(state.value)
-let applyingRemoteState = false
+
+const graphCamera = useGraphCamera({ versions, active, state, compareIds, draggedVersionId: () => treeDrag.value?.versionId,
+  zoom, pan, canvasSize, windowDimensions })
+const { cardPosition, cardHeight, displayCardPosition, graphBounds,
+  visibleVersions, visibleConnectionVersions, visibleMergeConnectionVersions, zoomIn, zoomOut, fitGraph,
+  startCanvasPan, moveCanvasPan, endCanvasPan, onWheel, focusVersion, focusActive, animateCamera,
+  stopGraphAnimations,
+} = graphCamera
+
+const treemapViews = useTreemapViews({ state, versions, windowDimensions, zoom, cardHeight, notify, suppressClicks: suppressGraphClicks })
+const { mapViewTimers, cardData, cardPositions, mapViewport, mapViewFor,
+  centerVersionTreemaps, compactVersionTreemaps, commitMapView, clearTransientMapViews, initializeMapViews,
+  zoomMap, startMapPan, moveMapPan, endMapPan,
+} = treemapViews
+
+const {
+  remoteUsers, pings, roomStatus, peerRoom, connectedUsers, recentInteractions, metadataKey,
+  interactionStorageKey, logInteraction, initializeCollaborationMetadata, sendPingAt,
+  expireRemoteUsers, connectAutomatically, resetRoomTracking, setObservedState, finishRoomSwitch,
+} = useCollaboration({
+  clientId: CLIENT_ID, state, active, selectedNodes, currentRoomName, graphCanvas, pan, zoom,
+  normalizeState, roomDataKey, reflowLayout, fitGraph, notify,
+})
+
+const { createVersion, confirmMerge, pruneVersion } = useVersionHistory({
+  clientId: CLIENT_ID, state, versions, active, selectedNode, windowDimensions,
+  comparison: comparisonController, camera: graphCamera, treemaps: treemapViews,
+  reflowLayout, setSelectedNodes, notify, logInteraction,
+})
+
+const { editor, setEntryValueInput, entryOperation, bulkDeleteMode, bulkDeleteDialog,
+  addEntry, commitEditor, renameEntry, addEditorEntryRow, removeEditorEntryRow, deleteEntry,
+  deleteSelectedEntries, openBulkDelete, openMergeEntries, openSplitEntry, addSplitEntry,
+  removeSplitEntry, commitEntryOperation, detachEntry, canAttach, attachEntry,
+} = useHierarchyEditor({ clientId: CLIENT_ID, state, active, selectedNodes, isReadOnly, createVersion, setSelectedNodes })
+
+function suppressGraphClicks() {
+  suppressVersionClick = true
+  suppressTileClick = true
+  window.setTimeout(() => { suppressVersionClick = false; suppressTileClick = false }, 0)
+}
+
+const { draggedNode, draggedPosition, dragPreviewView, overNode, invalidNode, treeDrag, spatialPreview,
+  previewLayout, draggedSubtreeIds, draggedOriginalTile, startTreeDrag, moveTreeDrag, finishTreeDrag, cancelTreeDrag,
+} = useTreeDrag({ state, versions, active, zoom, isReadOnly, hoveredNode, entryTooltip, mapViewFor, mapViewport,
+  canAttach, attachEntry, detachEntry, setSelectedNodes, notify, suppressClicks: suppressGraphClicks })
 
 watch(selectedNode, (nodeId) => {
   if (!nodeId) selectedNodes.value = []
   else if (!selectedNodes.value.includes(nodeId)) selectedNodes.value = [nodeId]
 })
-watch([selectedNodes, () => active.value.id, userName], publishPresence, { deep: true })
-watch(userName, (name) => {
-  localStorage.setItem('canopy-user-name', name.trim().slice(0, 32) || animalForUser(CLIENT_ID))
-})
-watch(interactions, (entries) => {
-  if (collaborationRoom) localStorage.setItem(interactionStorageKey(collaborationRoom), JSON.stringify(entries))
-}, { deep: true })
 watch(isReadOnly, (readOnly) => {
   if (!readOnly) return
   setSelectedNodes([])
@@ -382,405 +173,6 @@ watch(() => active.value.data, (data) => {
   if (valid.length !== selectedNodes.value.length) setSelectedNodes(valid)
 }, { deep: true })
 watch(darkMode, (enabled) => localStorage.setItem('canopy-theme', enabled ? 'dark' : 'light'))
-
-watch(state, (value) => {
-  const snapshot = JSON.stringify(value)
-  localStorage.setItem(roomDataKey(currentRoomName.value), snapshot)
-  if (!applyingRemoteState && snapshot !== lastObservedState) publishLocalChanges(value)
-  lastObservedState = snapshot
-}, { deep: true })
-
-function revisionIsNewer(candidate: Revision | undefined, current: Revision | undefined) {
-  return !!candidate && (!current || candidate.clock > current.clock
-    || (candidate.clock === current.clock && candidate.actor.localeCompare(current.actor) > 0))
-}
-
-function compareCopyLinks(left: CopyLink, right: CopyLink) {
-  return left.sourceVersionId.localeCompare(right.sourceVersionId)
-    || left.sourceNodeId.localeCompare(right.sourceNodeId)
-    || left.targetVersionId.localeCompare(right.targetVersionId)
-    || left.targetNodeId.localeCompare(right.targetNodeId)
-}
-
-function metadataKey(room: string) {
-  return `canopy-collaboration-${room}`
-}
-
-function interactionStorageKey(room: string) {
-  return `canopy-interactions-${encodeURIComponent(room)}`
-}
-
-function animalForUser(userId: string) {
-  let hash = 2166136261
-  for (const character of userId) hash = Math.imul(hash ^ character.charCodeAt(0), 16777619)
-  return animalNames[(hash >>> 0) % animalNames.length]!
-}
-
-function isInteractionEntry(value: unknown): value is InteractionEntry {
-  if (!isRecord(value) || typeof value.id !== 'string' || typeof value.actorId !== 'string'
-    || typeof value.actorName !== 'string' || typeof value.action !== 'string'
-    || !Number.isFinite(value.createdAt)
-    || (value.versionId !== undefined && typeof value.versionId !== 'string')
-    || (value.nodeId !== undefined && typeof value.nodeId !== 'string')
-    || (value.nodeLabel !== undefined && typeof value.nodeLabel !== 'string')) return false
-  return value.ping === undefined || (isRecord(value.ping)
-    && Number.isFinite(value.ping.x) && Number.isFinite(value.ping.y))
-}
-
-function addInteraction(entry: InteractionEntry, broadcast = true) {
-  if (interactions.value.some((item) => item.id === entry.id)) return
-  interactions.value = [...interactions.value, entry]
-    .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))
-    .slice(-10)
-  if (broadcast && collaborationRoom) peerRoom.send({ type: 'interaction', entry })
-}
-
-function logInteraction(
-  action: string,
-  reference: { versionId?: string; nodeId?: string; nodeLabel?: string; ping?: { x: number; y: number } } = {},
-) {
-  addInteraction({
-    id: `${CLIENT_ID}-${Date.now()}-${++interactionSequence}`,
-    actorId: CLIENT_ID,
-    actorName: userName.value.trim() || animalForUser(CLIENT_ID),
-    action,
-    createdAt: Date.now(),
-    ...reference,
-  })
-}
-
-function newRevision(clock: number): Revision {
-  return { clock, actor: CLIENT_ID }
-}
-
-function initializeCollaborationMetadata(room: string) {
-  collaborationRoom = room
-  try {
-    const savedInteractions: unknown = JSON.parse(localStorage.getItem(interactionStorageKey(room)) ?? '[]')
-    interactions.value = Array.isArray(savedInteractions) && savedInteractions.every(isInteractionEntry)
-      ? savedInteractions.slice(-10)
-      : []
-  } catch {
-    interactions.value = []
-  }
-  const raw = localStorage.getItem(metadataKey(room))
-  if (raw) {
-    try {
-      const value: unknown = JSON.parse(raw)
-      if (isCollaborationMetadata(value)) {
-        collaborationMetadata = value
-      }
-    } catch {
-      collaborationMetadata = null
-    }
-  }
-  if (!collaborationMetadata) {
-    const baseline = newRevision(1)
-    collaborationMetadata = {
-      clock: 1,
-      versions: Object.fromEntries(state.value.versions.map((version) => [version.id, baseline])),
-      removed: {},
-      active: baseline,
-      copyLinks: baseline,
-    }
-  } else {
-    for (const version of state.value.versions) {
-      collaborationMetadata.versions[version.id] ??= newRevision(collaborationMetadata.clock)
-    }
-  }
-  persistCollaborationMetadata()
-}
-
-function persistCollaborationMetadata() {
-  if (collaborationMetadata && collaborationRoom) {
-    localStorage.setItem(metadataKey(collaborationRoom), JSON.stringify(collaborationMetadata))
-  }
-}
-
-function publishLocalChanges(value: StoredState) {
-  const previous = JSON.parse(lastObservedState) as StoredState
-  if (!collaborationMetadata || !collaborationRoom) return
-  const clock = ++collaborationMetadata.clock
-  const revision = newRevision(clock)
-  const previousVersions = new Map(previous.versions.map((version) => [version.id, version]))
-  const currentVersions = new Map(value.versions.map((version) => [version.id, version]))
-  const changed: VersionChange[] = []
-  const removed: VersionRemoval[] = []
-  for (const version of value.versions) {
-    if (JSON.stringify(previousVersions.get(version.id)) === JSON.stringify(version)) continue
-    collaborationMetadata.versions[version.id] = revision
-    delete collaborationMetadata.removed[version.id]
-    changed.push({ version, revision })
-  }
-  for (const version of previous.versions) {
-    if (currentVersions.has(version.id)) continue
-    collaborationMetadata.removed[version.id] = revision
-    delete collaborationMetadata.versions[version.id]
-    removed.push({ id: version.id, revision })
-  }
-  const copyLinks = JSON.stringify(previous.copyLinks) !== JSON.stringify(value.copyLinks)
-    ? (collaborationMetadata.copyLinks = revision, { links: value.copyLinks, revision })
-    : undefined
-  const delta: SyncDelta = {
-    type: 'sync-delta', versions: changed, removed, copyLinks,
-    nextNode: value.nextNode, nextVersion: value.nextVersion, nextLane: value.nextLane,
-  }
-  persistCollaborationMetadata()
-  peerRoom.send(delta)
-}
-
-function sendSyncSnapshot(reply: (message: unknown) => void) {
-  if (!collaborationMetadata) return
-  const snapshot: SyncSnapshot = {
-    type: 'sync-snapshot',
-    state: clone(state.value),
-    versions: clone(collaborationMetadata.versions),
-    removed: clone(collaborationMetadata.removed),
-    active: clone(collaborationMetadata.active),
-    copyLinks: clone(collaborationMetadata.copyLinks),
-    interactions: clone(interactions.value),
-    clock: collaborationMetadata.clock,
-  }
-  reply(snapshot)
-}
-
-function applySyncSnapshot(message: SyncSnapshot) {
-  if (!isStoredState(message.state) || !isRevision(message.active) || !isRevision(message.copyLinks)
-    || !Number.isFinite(message.clock) || !isRecord(message.versions) || !isRecord(message.removed)
-    || !Object.values(message.versions).every(isRevision) || !Object.values(message.removed).every(isRevision)
-    || (message.interactions !== undefined
-      && (!Array.isArray(message.interactions) || !message.interactions.every(isInteractionEntry)))) {
-    notify('Ignored an invalid shared-state snapshot')
-    return
-  }
-  collaborationMetadata = {
-    clock: Object.values(message.versions).reduce(
-      (clock, revision) => Math.max(clock, revision.clock),
-      Math.max(1, message.clock, message.active.clock),
-    ),
-    versions: message.versions,
-    removed: message.removed,
-    active: message.active,
-    copyLinks: message.copyLinks,
-  }
-  const localActiveId = state.value.activeId
-  state.value = normalizeState(message.state)
-  interactions.value = (message.interactions ?? []).slice(-10)
-  state.value.activeId = state.value.versions.some((version) => version.id === localActiveId)
-    ? localActiveId
-    : state.value.versions.find((version) => version.id === 'v0')!.id
-  reflowLayout()
-  lastObservedState = JSON.stringify(state.value)
-  applyingRemoteState = true
-  persistCollaborationMetadata()
-  localStorage.setItem(roomDataKey(currentRoomName.value), lastObservedState)
-  requestAnimationFrame(fitGraph)
-  void nextTick(() => { applyingRemoteState = false })
-}
-
-function applySyncDelta(message: SyncDelta) {
-  if (!collaborationMetadata || !Array.isArray(message.versions) || !Array.isArray(message.removed)
-    || !Number.isInteger(message.nextNode) || !Number.isInteger(message.nextVersion)
-    || !Number.isInteger(message.nextLane)) {
-    notify('Ignored an invalid shared-state update')
-    return
-  }
-  const versionsById = new Map(state.value.versions.map((version) => [version.id, version]))
-  let changed = false
-  for (const change of message.versions) {
-    if (change && isRevision(change.revision)) collaborationMetadata.clock = Math.max(collaborationMetadata.clock, change.revision.clock)
-  }
-  for (const removal of message.removed) {
-    if (removal && isRevision(removal.revision)) collaborationMetadata.clock = Math.max(collaborationMetadata.clock, removal.revision.clock)
-  }
-  for (const removal of message.removed) {
-    if (!removal || removal.id === 'v0' || typeof removal.id !== 'string' || !isRevision(removal.revision)
-      || !revisionIsNewer(removal.revision, collaborationMetadata.removed[removal.id])) continue
-    collaborationMetadata.removed[removal.id] = removal.revision
-    const currentRevision = collaborationMetadata.versions[removal.id]
-    if (revisionIsNewer(removal.revision, currentRevision)) {
-      versionsById.delete(removal.id)
-      delete collaborationMetadata.versions[removal.id]
-      changed = true
-    }
-  }
-  for (const change of message.versions) {
-    if (!change || !isVersion(change.version) || !isRevision(change.revision)) {
-      notify('Ignored an invalid shared version update')
-      continue
-    }
-    const parent = change.version.parentId ? versionsById.get(change.version.parentId) : undefined
-    const mergeSource = change.version.mergeSourceId
-      ? versionsById.get(change.version.mergeSourceId)
-      : undefined
-    const validParent = change.version.id === 'v0'
-      ? change.version.parentId === null && change.version.step === 0
-      : !!parent && hasValidVersionStep(change.version, parent, mergeSource)
-    if (!validParent) {
-      notify('Ignored a shared version with a missing or invalid connection')
-      continue
-    }
-    const currentRevision = collaborationMetadata.versions[change.version.id]
-    const removedRevision = collaborationMetadata.removed[change.version.id]
-    if (!revisionIsNewer(change.revision, currentRevision) || revisionIsNewer(removedRevision, change.revision)) continue
-    collaborationMetadata.versions[change.version.id] = change.revision
-    delete collaborationMetadata.removed[change.version.id]
-    versionsById.set(change.version.id, change.version)
-    changed = true
-  }
-  let removedOrphan = true
-  while (removedOrphan) {
-    removedOrphan = false
-    for (const [id, version] of versionsById) {
-      if (id === 'v0' || !version.parentId || versionsById.has(version.parentId)) continue
-      const currentRevision = collaborationMetadata.versions[id]
-      const parentRemoval = collaborationMetadata.removed[version.parentId]
-      const removalRevision = revisionIsNewer(currentRevision, parentRemoval) ? currentRevision : parentRemoval
-      if (removalRevision) collaborationMetadata.removed[id] = removalRevision
-      delete collaborationMetadata.versions[id]
-      versionsById.delete(id)
-      changed = true
-      removedOrphan = true
-    }
-  }
-  if (message.copyLinks && Array.isArray(message.copyLinks.links)
-    && message.copyLinks.links.every(isCopyLink) && isRevision(message.copyLinks.revision)) {
-    collaborationMetadata.clock = Math.max(collaborationMetadata.clock, message.copyLinks.revision.clock)
-    const merged = new Map(state.value.copyLinks.map((link) => [JSON.stringify(link), link]))
-    for (const link of message.copyLinks.links) merged.set(JSON.stringify(link), link)
-    const links = [...merged.values()].filter((link) => {
-      const source = versionsById.get(link.sourceVersionId)
-      const target = versionsById.get(link.targetVersionId)
-      return !!source && !!target
-        && !!findNode(source.data, link.sourceNodeId)
-        && !!findNode(target.data, link.targetNodeId)
-    }).sort(compareCopyLinks)
-    if (JSON.stringify(links) !== JSON.stringify(state.value.copyLinks)) {
-      state.value.copyLinks = links
-      changed = true
-    }
-    if (revisionIsNewer(message.copyLinks.revision, collaborationMetadata.copyLinks)) {
-      collaborationMetadata.copyLinks = message.copyLinks.revision
-    }
-  }
-  const nextNode = Math.max(state.value.nextNode, message.nextNode || 1)
-  const nextVersion = Math.max(state.value.nextVersion, message.nextVersion || 1)
-  const nextLane = Math.max(state.value.nextLane, message.nextLane || 1)
-  if (nextNode !== state.value.nextNode || nextVersion !== state.value.nextVersion || nextLane !== state.value.nextLane) changed = true
-  state.value.nextNode = nextNode
-  state.value.nextVersion = nextVersion
-  state.value.nextLane = nextLane
-  if (!versionsById.has(state.value.activeId)) {
-    state.value.activeId = versionsById.has('v0') ? 'v0' : versionsById.keys().next().value ?? ''
-    changed = true
-  }
-  if (!changed) {
-    persistCollaborationMetadata()
-    return
-  }
-  state.value.versions = [...versionsById.values()].sort((left, right) =>
-    left.step - right.step || left.id.localeCompare(right.id))
-  reflowLayout()
-  lastObservedState = JSON.stringify(state.value)
-  applyingRemoteState = true
-  persistCollaborationMetadata()
-  localStorage.setItem(roomDataKey(currentRoomName.value), lastObservedState)
-  void nextTick(() => { applyingRemoteState = false })
-}
-
-function handleRoomMessage(message: unknown, reply: (message: unknown) => void) {
-  if (!message || typeof message !== 'object') return
-  const packet = message as { type?: string }
-  if (packet.type === 'sync-request') {
-    sendSyncSnapshot(reply)
-  } else if (packet.type === 'sync-snapshot') {
-    applySyncSnapshot(packet as SyncSnapshot)
-  } else if (packet.type === 'sync-delta') {
-    applySyncDelta(packet as SyncDelta)
-  } else if (packet.type === 'presence') {
-    const presence = message as { userId?: unknown; name?: unknown; activeVersionId?: unknown; selectedNodeIds?: unknown }
-    if (typeof presence.userId !== 'string' || !presence.userId || presence.userId === CLIENT_ID
-      || !(typeof presence.activeVersionId === 'string' || presence.activeVersionId === null)
-      || !Array.isArray(presence.selectedNodeIds)
-      || !presence.selectedNodeIds.every((id) => typeof id === 'string')) return
-    remoteUsers.value = {
-      ...remoteUsers.value,
-      [presence.userId]: {
-        name: typeof presence.name === 'string' && presence.name.trim()
-          ? presence.name.trim().slice(0, 32)
-          : animalForUser(presence.userId),
-        activeVersionId: presence.activeVersionId,
-        selectedNodeIds: presence.selectedNodeIds,
-        lastSeen: Date.now(),
-      },
-    }
-  } else if (packet.type === 'presence-leave') {
-    const userId = (message as { userId?: unknown }).userId
-    if (typeof userId === 'string' && userId !== CLIENT_ID) {
-      const { [userId]: _leaving, ...remainingUsers } = remoteUsers.value
-      remoteUsers.value = remainingUsers
-    }
-  } else if (packet.type === 'ping') {
-    const ping = message as { id?: unknown; userId?: unknown; x?: unknown; y?: unknown }
-    if (typeof ping.id !== 'string' || typeof ping.userId !== 'string' || ping.userId === CLIENT_ID
-      || !Number.isFinite(ping.x) || !Number.isFinite(ping.y)) return
-    const entry = { id: ping.id, userId: ping.userId, x: ping.x as number, y: ping.y as number, createdAt: Date.now() }
-    showPing(entry)
-  } else if (packet.type === 'interaction') {
-    const entry = (message as { entry?: unknown }).entry
-    if (isInteractionEntry(entry) && entry.actorId !== CLIENT_ID) addInteraction(entry, false)
-  }
-}
-
-function userColor(userId: string) {
-  let hash = 2166136261
-  for (const character of userId) {
-    hash ^= character.charCodeAt(0)
-    hash = Math.imul(hash, 16777619)
-  }
-  const value = hash >>> 0
-  const hue = value % 360
-  const saturation = 58 + ((value >>> 9) % 22)
-  const lightness = 35 + ((value >>> 17) % 19)
-  return `hsl(${hue} ${saturation}% ${lightness}%)`
-}
-function selectionColor(userId: string, secondary = false) {
-  if (!secondary) return userColor(userId)
-  let hash = 2166136261
-  for (const character of userId) hash = Math.imul(hash ^ character.charCodeAt(0), 16777619)
-  return `hsl(${((hash >>> 0) + 52) % 360} 68% 46%)`
-}
-function publishPresence() {
-  if (!collaborationRoom) return
-  peerRoom.send({
-    type: 'presence',
-    userId: CLIENT_ID,
-    name: userName.value.trim() || animalForUser(CLIENT_ID),
-    activeVersionId: active.value.id,
-    selectedNodeIds: selectedNodes.value,
-  })
-}
-function showPing(ping: Ping) {
-  pings.value = [...pings.value.filter((item) => item.id !== ping.id), ping]
-  window.setTimeout(() => {
-    pings.value = pings.value.filter((item) => item.id !== ping.id)
-  }, 1600)
-  playPingSound()
-}
-function sendPingAt(clientX: number, clientY: number) {
-  const rect = graphCanvas.value?.getBoundingClientRect()
-  if (!rect) return
-  const ping = {
-    id: `${CLIENT_ID}-${Date.now()}-${++pingSequence}`,
-    userId: CLIENT_ID,
-    x: (clientX - rect.left - pan.value.x) / zoom.value,
-    y: (clientY - rect.top - pan.value.y) / zoom.value,
-    createdAt: Date.now(),
-  }
-  showPing(ping)
-  peerRoom.send({ type: 'ping', ...ping })
-  logInteraction('Ping', { ping: { x: ping.x, y: ping.y } })
-}
 
 function focusCollaborator(userId: string) {
   const collaborator = connectedUsers.value.find((user) => user.id === userId)
@@ -809,29 +201,6 @@ function navigateInteraction(entry: InteractionEntry, kind: 'version' | 'node' |
   }
   const version = versions.value.find((item) => item.id === entry.versionId)
   if (version) focusVersion(version)
-}
-function playPingSound() {
-  try {
-    const context = new window.AudioContext()
-    const play = () => {
-      const oscillator = context.createOscillator()
-      const gain = context.createGain()
-      oscillator.type = 'sine'
-      oscillator.frequency.setValueAtTime(660, context.currentTime)
-      oscillator.frequency.exponentialRampToValueAtTime(440, context.currentTime + 0.11)
-      gain.gain.setValueAtTime(0.045, context.currentTime)
-      gain.gain.exponentialRampToValueAtTime(0.001, context.currentTime + 0.12)
-      oscillator.connect(gain)
-      gain.connect(context.destination)
-      oscillator.start()
-      oscillator.stop(context.currentTime + 0.12)
-      window.setTimeout(() => { void context.close().catch(() => undefined) }, 200)
-    }
-    if (context.state === 'suspended') void context.resume().then(play).catch(() => { void context.close() })
-    else play()
-  } catch {
-    // Audio is optional; the visual ping still works when browser audio is unavailable.
-  }
 }
 function handlePingPointer(event: PointerEvent) {
   if (pingMode.value) {
@@ -874,11 +243,6 @@ function suppressPingClickEvent(event: MouseEvent) {
   suppressPingClick = false
   window.clearTimeout(pingClickTimer)
 }
-function onRoomStatus(status: RoomStatus) {
-  roomStatus.value = status
-  if (status.state === 'connected' || status.state === 'hosting') publishPresence()
-  if (status.state === 'idle') remoteUsers.value = {}
-}
 function enterTile(event: PointerEvent, version: Version, nodeId: string) {
   if (draggedNode.value && draggedSubtreeIds.value.includes(nodeId)) return
   hoveredNode.value = { versionId: version.id, nodeId }
@@ -905,34 +269,6 @@ function leaveTile(versionId: string, nodeId: string) {
   if (entryTooltip.value?.versionId === versionId && entryTooltip.value.nodeId === nodeId) entryTooltip.value = null
   window.clearTimeout(tileTooltipTimer)
 }
-function expireRemoteUsers() {
-  const cutoff = Date.now() - 15000
-  remoteUsers.value = Object.fromEntries(Object.entries(remoteUsers.value)
-    .filter(([, user]) => user.lastSeen >= cutoff))
-  publishPresence()
-}
-
-async function connectAutomatically(room: string) {
-  initializeCollaborationMetadata(room)
-  try {
-    await peerRoom.hostRoom(room, handleRoomMessage, onRoomStatus)
-  } catch {
-    try {
-      await peerRoom.joinRoom(room, handleRoomMessage, onRoomStatus)
-    } catch {
-      notify(`Could not connect to room "${room}": ${roomStatus.value.message}`)
-      return
-    }
-  }
-  if (roomStatus.value.state === 'hosting' || roomStatus.value.state === 'connected') {
-    publishPresence()
-    const url = new URL(location.href)
-    url.searchParams.set('room', currentRoomName.value)
-    history.replaceState(null, '', url)
-    requestAnimationFrame(fitGraph)
-  }
-}
-
 async function activateRoom(room: string, createEmpty = false) {
   const name = room.trim()
   if (!name || name.length > 80) {
@@ -948,8 +284,7 @@ async function activateRoom(room: string, createEmpty = false) {
   entryOperation.value = null
   bulkDeleteDialog.value = false
   menu.value = null
-  collaborationRoom = ''
-  collaborationMetadata = null
+  resetRoomTracking()
   if (!localRooms.value.includes(name)) {
     localRooms.value = [...localRooms.value, name]
     persistLocalRooms(localRooms.value)
@@ -961,10 +296,10 @@ async function activateRoom(room: string, createEmpty = false) {
   history.replaceState(null, '', url)
   const nextState = createEmpty ? clone(seed) : readRoomState(name)
   clipboard.value = readClipboard(name)
-  lastObservedState = JSON.stringify(nextState)
+  setObservedState(nextState)
   state.value = nextState
   await nextTick()
-  applyingRemoteState = false
+  finishRoomSwitch()
   initializeCollaborationMetadata(name)
   localStorage.setItem(roomDataKey(name), JSON.stringify(state.value))
   reflowLayout()
@@ -1035,974 +370,7 @@ function readClipboard(room: string): ClipboardEntry | null {
   }
   catch { return null }
 }
-function makeNode(value: string, description = ''): TreeNode {
-  return { id: `n${state.value.nextNode++}-${CLIENT_ID}`, value, ...(description ? { description } : {}), children: [] }
-}
-function structureSignature(data: TreeNode[]): string {
-  const normalize = (node: TreeNode): [string, string, unknown[]] => [node.value, node.description ?? '', node.children.map(normalize)]
-  return JSON.stringify(data.map(normalize))
-}
-function displayVersionId(id: string) {
-  const peerId = id.match(/^(v\d+)-([a-f0-9]{12})$/)
-  return peerId ? `${peerId[1]}-${peerId[2]!.slice(0, 4)}` : id
-}
-function reflowLayout() {
-  const graph = state.value.versions
-  const root = graph.find((version) => version.parentId === null)
-  if (!root) return
-  const byId = new Map(graph.map((version) => [version.id, version]))
-  const children = new Map<string, Version[]>()
-  for (const version of graph) {
-    if (!version.parentId) continue
-    children.set(version.parentId, [...(children.get(version.parentId) ?? []), version])
-  }
-  const lengthCache = new Map<string, number>()
-  const branchLength = (version: Version): number => {
-    const cached = lengthCache.get(version.id)
-    if (cached !== undefined) return cached
-    const length = 1 + Math.max(0, ...(children.get(version.id) ?? []).map(branchLength))
-    lengthCache.set(version.id, length)
-    return length
-  }
-  const orderedChildren = (version: Version) => [...(children.get(version.id) ?? [])]
-    .sort((left, right) => branchLength(right) - branchLength(left) || left.createdAt - right.createdAt || left.id.localeCompare(right.id))
-  const pending: { parent: Version; root: Version }[] = []
-
-  const placeMainChain = (first: Version, lane: number) => {
-    let current: Version | undefined = first
-    while (current) {
-      current.lane = lane
-      const next = orderedChildren(current)
-      for (const sideBranch of next.slice(1)) {
-        pending.push({ parent: current, root: sideBranch })
-      }
-      current = next[0]
-    }
-  }
-
-  root.lane = 0
-  const origins = orderedChildren(root)
-  for (const sideBranch of origins.slice(1)) pending.push({ parent: root, root: sideBranch })
-  if (origins[0]) placeMainChain(origins[0], 0)
-
-  let nextLane = 1
-  while (pending.length) {
-    pending.sort((left, right) => right.parent.step - left.parent.step
-      || branchLength(right.root) - branchLength(left.root)
-      || left.root.createdAt - right.root.createdAt
-      || left.root.id.localeCompare(right.root.id))
-    const branch = pending.shift()!
-    if (!byId.has(branch.root.id)) continue
-    placeMainChain(branch.root, nextLane)
-    nextLane += 1
-  }
-
-  const mergeVersions = graph.filter((item) => item.mergeSourceId)
-    .sort((left, right) => left.step - right.step || left.createdAt - right.createdAt)
-  for (const version of mergeVersions) {
-    const parent = version.parentId ? byId.get(version.parentId) : undefined
-    const source = version.mergeSourceId ? byId.get(version.mergeSourceId) : undefined
-    if (!parent || !source) continue
-    const mergeLine: Version[] = []
-    let current: Version | undefined = version
-    while (current) {
-      mergeLine.push(current)
-      current = orderedChildren(current)[0]
-    }
-    const mergeLineIds = new Set(mergeLine.map((item) => item.id))
-    if (version.branch === parent.branch) {
-      mergeLine.forEach((lineVersion) => { lineVersion.lane = parent.lane })
-      continue
-    }
-
-    const lane = Math.min(parent.lane, source.lane) + 1
-    for (const other of graph) {
-      if (!mergeLineIds.has(other.id) && other.lane >= lane) other.lane += 1
-    }
-    mergeLine.forEach((lineVersion) => { lineVersion.lane = lane })
-    nextLane += 1
-  }
-
-  graph.sort((left, right) => left.step - right.step || left.id.localeCompare(right.id))
-  state.value.nextLane = nextLane
-}
-
-function createVersion(data: TreeNode[], change: string, forceNew = false) {
-  const parent = active.value
-  const wasCentered = isVersionCentered(parent)
-  const parentPosition = cardPosition(parent)
-  const arrivalFrom = {
-    x: parentPosition.x,
-    y: parentPosition.y + (cardHeight(parent) - windowDimensions.value.height) / 2,
-  }
-  const siblings = versions.value.filter((version) => version.parentId === parent.id)
-  if (structureSignature(data) === structureSignature(parent.data)) {
-    notify('No change · version not created')
-    return null
-  }
-  const signature = structureSignature(data)
-  const duplicate = forceNew
-    ? undefined
-    : siblings.find((version) => structureSignature(version.data) === signature)
-  if (duplicate) {
-    state.value.activeId = duplicate.id
-    selectedNode.value = null
-    notify(`Reopened existing ${duplicate.id}`)
-    panToVersion(duplicate, wasCentered)
-    return duplicate
-  }
-  const lane = parent.lane
-  const branchNumber = siblings.reduce((highest, version) => {
-    if (parent.id === 'v0') {
-      return Math.max(highest, Number(version.branch.match(/^B(\d+)$/)?.[1] ?? 0))
-    }
-    const prefix = `${parent.branch}.`
-    if (!version.branch.startsWith(prefix)) return highest
-    const branchPart = version.branch.slice(prefix.length).split('.')[0]
-    return Math.max(highest, Number(branchPart) || 0)
-  }, 0) + 1
-  const branch = parent.id === 'v0'
-    ? `B${branchNumber}`
-    : siblings.length ? `${parent.branch}.${branchNumber}` : parent.branch
-  const viewport = mapViewport(parent)
-  const currentMapView = mapViewFor(parent)
-  const positions = positionsForData(parent.data, data, parent.positions, currentMapView, viewport)
-  const fittedMapView = fitMapViewToLayout('new-version', data, positions, currentMapView)
-  const version: Version = {
-    id: `v${state.value.nextVersion++}-${CLIENT_ID}`, parentId: parent.id, step: parent.step + 1,
-    lane, branch, change, data, createdBy: CLIENT_ID, positions,
-    ...(currentMapView.manual ? { mapView: clone(fittedMapView) } : {}),
-    createdAt: Date.now(),
-  }
-  state.value.versions.push(version)
-  reflowLayout()
-  startVersionArrival(version, arrivalFrom)
-  state.value.activeId = version.id
-  selectedNode.value = null
-  compareMode.value = false
-  if (!parent.data.length && data.length) centerVersionTreemaps(version.id, false)
-  const previousNodes = flattenPaths(parent.data)
-  const nextNodes = flattenPaths(version.data)
-  const addedNodeId = [...nextNodes.keys()].find((nodeId) => !previousNodes.has(nodeId))
-  const removedNodeId = [...previousNodes.keys()].find((nodeId) => !nextNodes.has(nodeId))
-  const changedNodeId = [...nextNodes].find(([nodeId, item]) =>
-    previousNodes.get(nodeId)?.value !== item.value)?.[0]
-  const movedNodeId = [...nextNodes].find(([nodeId, item]) =>
-    previousNodes.has(nodeId) && previousNodes.get(nodeId)?.parentId !== item.parentId)?.[0]
-  const referenceNodeId = addedNodeId ?? removedNodeId ?? changedNodeId ?? movedNodeId
-  logInteraction(`Created ${branch} · ${change}`, {
-    versionId: version.id,
-    nodeId: referenceNodeId,
-    nodeLabel: referenceNodeId
-      ? findNode(version.data, referenceNodeId)?.value ?? findNode(parent.data, referenceNodeId)?.value
-      : undefined,
-  })
-  notify(`Created ${version.id} · ${change}`)
-  panToVersion(version, wasCentered)
-  return version
-}
-
-function addEntry(parentId: string | null = null) {
-  editor.value = { mode: 'create', parentId, entries: [newEntryDraft()] }
-}
-
-function commitEditor() {
-  if (!editor.value || (isReadOnly.value && editor.value.mode === 'rename')) return
-  const currentEditor = editor.value
-  if (currentEditor.mode === 'create') {
-    const entries = currentEditor.entries.map((entry) => ({
-      value: entry.value.trim(),
-      description: entry.description.trim(),
-    }))
-    if (!entries.length || entries.some((entry) => !entry.value)) return
-    const data = clone(active.value.data)
-    const nodes = entries.map((entry) => makeNode(entry.value, entry.description))
-    if (currentEditor.parentId) {
-      const parent = findNode(data, currentEditor.parentId)
-      if (!parent) return
-      parent.children.push(...nodes)
-    } else data.push(...nodes)
-    editor.value = null
-    const operation = currentEditor.parentId ? 'Add' : 'Create'
-    const summary = nodes.length === 1
-      ? `${operation} ${entries[0]!.value}`
-      : `${operation} ${entries.length} entries: ${entries.map((entry) => entry.value).join(', ')}`
-    createVersion(data, summary, nodes.length > 1)
-    return
-  }
-  const { nodeId, value: rawValue, description: rawDescription } = currentEditor
-  const value = rawValue.trim()
-  const description = rawDescription.trim()
-  if (!value) return
-  const data = clone(active.value.data)
-  const node = nodeId ? findNode(data, nodeId) : undefined
-  if (!node || (node.value === value && (node.description ?? '') === description)) { editor.value = null; return }
-  node.value = value
-  if (description) node.description = description
-  else delete node.description
-  editor.value = null
-  createVersion(data, `Rename to ${value}`)
-}
-
-function renameEntry(id: string) {
-  if (isReadOnly.value) return
-  const node = findNode(active.value.data, id)
-  if (!node) return
-  editor.value = { mode: 'rename', parentId: null, nodeId: id, value: node.value, description: node.description ?? '' }
-}
-
-function newEntryDraft(): EntryDraft {
-  return { id: `draft-${crypto.randomUUID()}`, value: '', description: '' }
-}
-
-function addEditorEntryRow() {
-  if (editor.value?.mode === 'create') editor.value.entries.push(newEntryDraft())
-}
-
-function removeEditorEntryRow(id: string) {
-  if (editor.value?.mode === 'create' && editor.value.entries.length > 1) {
-    editor.value.entries = editor.value.entries.filter((entry) => entry.id !== id)
-  }
-}
-
-function deleteEntry(id: string, mode: 'keep-children' | 'subtree' | 'detach-children') {
-  if (isReadOnly.value) return
-  const data = clone(active.value.data)
-  const node = findNode(data, id)
-  if (!node) return
-  if (mode === 'subtree' && node.children.length
-    && !window.confirm(`Delete ${node.value} and all ${countNodes(node.children)} descendant entries?`)) return
-  const parent = findParent(data, id)
-  const siblings = parent?.children ?? data
-  const index = siblings.findIndex((entry) => entry.id === id)
-  if (index < 0) return
-  if (mode === 'keep-children') siblings.splice(index, 1, ...node.children)
-  else if (mode === 'detach-children' && node.children.length) {
-    const detached = node.children
-    siblings.splice(index, 1)
-    data.push(...detached)
-  } else siblings.splice(index, 1)
-  createVersion(data, `Delete ${node.value}`)
-}
-
-function deleteSelectedEntries(mode: 'keep-children' | 'subtree' | 'detach-children') {
-  if (isReadOnly.value || selectedNodes.value.length < 2) return
-  const selected = new Set(selectedNodes.value.filter((id) => !!findNode(active.value.data, id)))
-  if (selected.size < 2) return
-  const selectedRoots = [...selected].filter((id) => {
-    let parent = findParent(active.value.data, id)
-    while (parent) {
-      if (selected.has(parent.id)) return false
-      parent = findParent(active.value.data, parent.id)
-    }
-    return true
-  })
-  if (mode === 'subtree') {
-    const count = selectedRoots.reduce((sum, id) => {
-      const node = findNode(active.value.data, id)
-      return sum + (node ? countNodes([node]) : 0)
-    }, 0)
-    if (!window.confirm(`Delete ${count} entries in the selected subtrees?`)) return
-  }
-  const data = clone(active.value.data)
-  const detachedRoots: TreeNode[] = []
-  const removeSelected = (nodes: TreeNode[]): TreeNode[] => nodes.flatMap((node) => {
-    if (!selected.has(node.id)) {
-      return [{ ...node, children: removeSelected(node.children) }]
-    }
-    if (mode === 'subtree') return []
-    if (mode === 'detach-children') {
-      for (const child of node.children) {
-        if (selected.has(child.id)) removeSelected([child])
-        else detachedRoots.push({ ...child, children: removeSelected(child.children) })
-      }
-      return []
-    }
-    return removeSelected(node.children)
-  })
-  const nextData = removeSelected(data)
-  if (mode === 'detach-children') nextData.push(...detachedRoots)
-  const count = selected.size
-  const version = createVersion(nextData, `Delete ${count} selected entries`, true)
-  if (version) setSelectedNodes([])
-  entryOperation.value = null
-  bulkDeleteDialog.value = false
-}
-
-function openBulkDelete() {
-  if (selectedNodes.value.length < 2) return
-  bulkDeleteMode.value = 'keep-children'
-  bulkDeleteDialog.value = true
-}
-
-function highestSelectedNode(nodeIds: string[], data: TreeNode[]) {
-  const flat = flattenNodes(data)
-  const selected = new Set(nodeIds)
-  const depthOf = (id: string) => {
-    let depth = 0
-    let parentId = flat.get(id)?.parentId
-    while (parentId) {
-      depth += 1
-      parentId = flat.get(parentId)?.parentId ?? null
-    }
-    return depth
-  }
-  const order = new Map([...flat.keys()].map((id, index) => [id, index]))
-  return nodeIds.filter((id) => {
-    let parentId = flat.get(id)?.parentId
-    while (parentId) {
-      if (selected.has(parentId)) return false
-      parentId = flat.get(parentId)?.parentId ?? null
-    }
-    return true
-  }).sort((left, right) => depthOf(left) - depthOf(right)
-    || order.get(left)! - order.get(right)!)[0]
-}
-
-function openMergeEntries() {
-  const nodeIds = selectedNodes.value.filter((id) => !!findNode(active.value.data, id))
-  if (nodeIds.length < 2) return
-  const highest = highestSelectedNode(nodeIds, active.value.data)
-  if (!highest) return
-  const original = findNode(active.value.data, highest)!
-  entryOperation.value = {
-    mode: 'merge',
-    nodeIds,
-    value: original.value,
-    description: original.description ?? '',
-  }
-}
-
-function openSplitEntry(nodeId: string) {
-  const node = findNode(active.value.data, nodeId)
-  if (!node) return
-  const first = newSplitDraft()
-  entryOperation.value = {
-    mode: 'split',
-    nodeId,
-    entries: [first, newSplitDraft()],
-    assignments: Object.fromEntries(node.children.map((child) => [child.id, first.id])),
-  }
-}
-
-function newSplitDraft(): SplitDraft {
-  return { id: `split-${crypto.randomUUID()}`, value: '', description: '' }
-}
-
-function addSplitEntry() {
-  if (entryOperation.value?.mode === 'split') {
-    entryOperation.value.entries.push(newSplitDraft())
-  }
-}
-
-function removeSplitEntry(id: string) {
-  const operation = entryOperation.value
-  if (operation?.mode !== 'split' || operation.entries.length <= 2) return
-  const removed = operation.entries.find((entry) => entry.id === id)
-  if (!removed) return
-  const replacement = operation.entries.find((entry) => entry.id !== id)!
-  operation.entries = operation.entries.filter((entry) => entry.id !== id)
-  for (const [childId, destination] of Object.entries(operation.assignments)) {
-    if (destination === id) operation.assignments[childId] = replacement.id
-  }
-}
-
-function commitEntryOperation() {
-  if (isReadOnly.value || !entryOperation.value) return
-  const operation = entryOperation.value
-  const data = clone(active.value.data)
-  if (operation.mode === 'merge') {
-    const value = operation.value.trim()
-    if (!value) return
-    const selected = new Set(operation.nodeIds.filter((id) => !!findNode(data, id)))
-    if (selected.size < 2) return
-    const flat = flattenNodes(data)
-    const highest = highestSelectedNode([...selected], data)
-    if (!highest) return
-    const parentId = flat.get(highest)!.parentId
-    const targetSiblings = parentId ? findNode(data, parentId)?.children : data
-    if (!targetSiblings) return
-    const originalIndex = targetSiblings.findIndex((node) => node.id === highest)
-    if (originalIndex < 0) return
-    const removedBefore = targetSiblings.slice(0, originalIndex).filter((node) => selected.has(node.id)).length
-    const children: TreeNode[] = []
-    const appendSelectedChildren = (node: TreeNode) => {
-      for (const child of node.children) {
-        if (selected.has(child.id)) appendSelectedChildren(child)
-        else children.push(stripSelectedDescendants(child))
-      }
-    }
-    const stripSelectedDescendants = (node: TreeNode): TreeNode => ({
-      ...node,
-      children: node.children.flatMap((child) => {
-        if (selected.has(child.id)) {
-          appendSelectedChildren(child)
-          return []
-        }
-        return [stripSelectedDescendants(child)]
-      }),
-    })
-    for (const id of selected) {
-      const selectedNode = findNode(data, id)
-      if (selectedNode && ![...selected].some((otherId) => {
-        if (otherId === id) return false
-        let parentId = flat.get(id)?.parentId
-        while (parentId) {
-          if (parentId === otherId) return true
-          parentId = flat.get(parentId)?.parentId ?? null
-        }
-        return false
-      })) appendSelectedChildren(selectedNode)
-    }
-    const removeSelected = (nodes: TreeNode[]): TreeNode[] => nodes.flatMap((node) =>
-      selected.has(node.id) ? [] : [{ ...node, children: removeSelected(node.children) }])
-    const nextData = removeSelected(data)
-    const siblings = parentId ? findNode(nextData, parentId)?.children : nextData
-    if (!siblings) return
-    const mergeNode = makeNode(value, operation.description.trim())
-    mergeNode.children = children
-    siblings.splice(Math.max(0, originalIndex - removedBefore), 0, mergeNode)
-    entryOperation.value = null
-    const version = createVersion(nextData, `Merge ${selected.size} entries into ${value}`, true)
-    if (version) setSelectedNodes([mergeNode.id])
-    return
-  }
-
-  const original = findNode(data, operation.nodeId)
-  if (!original || operation.entries.length < 2) return
-  const entries = operation.entries.map((entry) => ({
-    ...entry,
-    value: entry.value.trim(),
-    description: entry.description.trim(),
-  }))
-  if (entries.some((entry) => !entry.value)) return
-  const validIds = new Set(entries.map((entry) => entry.id))
-  if (original.children.some((child) => !validIds.has(operation.assignments[child.id]))) return
-  const parent = findParent(data, operation.nodeId)
-  const siblings = parent?.children ?? data
-  const index = siblings.findIndex((node) => node.id === operation.nodeId)
-  if (index < 0) return
-  const childrenByEntry = new Map(entries.map((entry) => [entry.id, [] as TreeNode[]]))
-  for (const child of original.children) {
-    childrenByEntry.get(operation.assignments[child.id])!.push(child)
-  }
-  const replacements = entries.map((entry) => {
-    const node = makeNode(entry.value, entry.description)
-    node.children = childrenByEntry.get(entry.id)!
-    return node
-  })
-  const nextData = data
-  siblings.splice(index, 1, ...replacements)
-  entryOperation.value = null
-  const version = createVersion(nextData, `Split ${original.value} into ${entries.length} entries`, true)
-  if (version) setSelectedNodes(replacements.map((node) => node.id))
-}
-
-function detachEntry(id: string, preview?: SpatialPreview) {
-  if (isReadOnly.value) return null
-  const data = clone(active.value.data)
-  const parent = findParent(data, id)
-  if (!parent) return null
-  const detached = removeNode(data, id)
-  let version: Version | null = null
-  if (detached) {
-    data.push(detached)
-    version = createVersion(data, `Detach ${detached.value}`)
-    if (version && preview) {
-      version.positions = clone(preview.positions)
-      version.mapView = clone(preview.view)
-    }
-  }
-  return version
-}
-
-function canAttach(sourceId: string, targetId: string, data = active.value.data) {
-  const source = findNode(data, sourceId)
-  return sourceId !== targetId && !!source && !descendants(source).includes(targetId)
-}
-
-const previewLayout = computed(() => {
-  if (!draggedNode.value) return null
-  if (overNode.value && canAttach(draggedNode.value, overNode.value)) {
-    const data = clone(active.value.data)
-    const parent = findParent(data, draggedNode.value)
-    if (parent?.id === overNode.value) return null
-    const source = removeNode(data, draggedNode.value)
-    const target = findNode(data, overNode.value)
-    if (!source || !target) return null
-    target.children.push(source)
-    const positions = positionsForData(active.value.data, data, active.value.positions)
-    return {
-      data,
-      positions,
-      view: fitMapViewToLayout(active.value.id, data, positions, mapViewFor(active.value), 0),
-      kind: 'attach' as const,
-    }
-  }
-  if (!spatialPreview.value) return null
-  if (!spatialPreview.value.valid) return null
-  return {
-    data: spatialPreview.value.data,
-    positions: spatialPreview.value.positions,
-    view: spatialPreview.value.view,
-    kind: spatialPreview.value.kind === 'detach' ? 'detach' as const : 'layout' as const,
-  }
-})
-
-function attachEntry(sourceId: string, targetId: string, preview?: { data: TreeNode[]; positions: Record<string, { x: number; y: number }>; view: MapView }) {
-  if (isReadOnly.value) return null
-  if (!canAttach(sourceId, targetId)) return null
-  const parent = findParent(active.value.data, sourceId)
-  if (parent?.id === targetId) return null
-  const data = clone(active.value.data)
-  const source = removeNode(data, sourceId)
-  const target = findNode(data, targetId)
-  if (!source || !target) return null
-  target.children.push(source)
-  const version = createVersion(data, `Attach ${source.value} to ${target.value}`)
-  if (version && preview) {
-    version.positions = clone(preview.positions)
-    version.mapView = clone(preview.view)
-  }
-  return version
-}
-function flattenPaths(nodes: TreeNode[], parentId: string | null = null, parentPath = ''): Map<string, { value: string; parentId: string | null; path: string }> {
-  const result = new Map<string, { value: string; parentId: string | null; path: string }>()
-  for (const node of nodes) {
-    const path = parentPath ? `${parentPath}/${node.value}` : node.value
-    result.set(node.id, { value: node.value, parentId, path })
-    for (const [id, info] of flattenPaths(node.children, node.id, path)) result.set(id, info)
-  }
-  return result
-}
-
-function flattenNodes(nodes: TreeNode[], parentId: string | null = null, parentPath = ''): Map<string, FlatNode> {
-  const result = new Map<string, FlatNode>()
-  for (const [order, node] of nodes.entries()) {
-    const path = parentPath ? `${parentPath}/${node.value}` : node.value
-    result.set(node.id, { node, parentId, path, order })
-    for (const [id, info] of flattenNodes(node.children, node.id, path)) result.set(id, info)
-  }
-  return result
-}
-
-function chooseCompare(id: string) {
-  if (compareIds.value.includes(id)) compareIds.value = compareIds.value.filter((item) => item !== id)
-  else compareIds.value = [...compareIds.value.slice(-1), id]
-  mergeDecisions.value = {}
-  mergeParentOverrides.value = {}
-  mergePositionOverrides.value = {}
-  mergeDrag.value = null
-  mergeDropTarget.value = null
-  comparisonSelectedNode.value = null
-  if (compareIds.value.length === 2) showOverview.value = true
-}
-
-const showOverview = ref(false)
-function startVersionSelection(mode: 'compare' | 'merge') {
-  compareMode.value = mode === 'compare'
-  mergeMode.value = mode === 'merge'
-  compareIds.value = []
-  mergeDecisions.value = {}
-  mergeParentOverrides.value = {}
-  mergePositionOverrides.value = {}
-  mergeDrag.value = null
-  mergeDropTarget.value = null
-  comparisonSelectedNode.value = null
-  showOverview.value = false
-}
-function closeVersionSelection() {
-  compareMode.value = false
-  mergeMode.value = false
-  showOverview.value = false
-  compareIds.value = []
-  mergeDecisions.value = {}
-  mergeParentOverrides.value = {}
-  mergePositionOverrides.value = {}
-  mergeDrag.value = null
-  mergeDropTarget.value = null
-  comparisonSelectedNode.value = null
-}
-const comparison = computed(() => {
-  if (compareIds.value.length !== 2) return []
-  const left = versions.value.find((item) => item.id === compareIds.value[0])
-  const right = versions.value.find((item) => item.id === compareIds.value[1])
-  if (!left || !right) return []
-  const a = flattenNodes(left.data)
-  const b = flattenNodes(right.data)
-  const changes: { id: string; kind: string; label: string }[] = []
-  for (const [id, item] of a) {
-    const other = b.get(id)
-    if (!other) changes.push({ id, kind: 'Removed', label: item.path })
-    else {
-      if (item.parentId !== other.parentId || item.order !== other.order
-      || (item.parentId === null && other.parentId === null
-        && (Math.abs((left.positions?.[id]?.x ?? 0) - (right.positions?.[id]?.x ?? 0)) > 0.002
-          || Math.abs((left.positions?.[id]?.y ?? 0) - (right.positions?.[id]?.y ?? 0)) > 0.002))) {
-        changes.push({ id, kind: 'Relocated', label: item.path === other.path ? `${item.path} (position or parent changed)` : `${item.path} → ${other.path}` })
-      }
-      if (item.node.value !== other.node.value || item.node.description !== other.node.description) {
-        changes.push({ id, kind: 'Modified', label: item.path === other.path ? item.path : `${item.path} → ${other.path}` })
-      }
-    }
-  }
-  for (const [id, item] of b) if (!a.has(id)) changes.push({ id, kind: 'Added', label: item.path })
-  return changes
-})
-const differentEntryCount = computed(() => new Set(comparison.value.map((change) => change.id)).size)
-const comparisonStatus = computed(() => {
-  const statuses = new Map<string, string[]>()
-  for (const change of comparison.value) {
-    const kinds = statuses.get(change.id) ?? []
-    kinds.push(change.kind.toLowerCase())
-    statuses.set(change.id, kinds)
-  }
-  return statuses
-})
-const mergeResult = computed(() => {
-  if (!mergeMode.value || compareIds.value.length !== 2) return null
-  const source = versions.value.find((item) => item.id === compareIds.value[0])
-  const target = versions.value.find((item) => item.id === compareIds.value[1])
-  if (!source || !target || source.id === target.id) return null
-  const sourceNodes = flattenNodes(source.data)
-  const targetNodes = flattenNodes(target.data)
-  const values = new Map<string, { value: string; description?: string; parentId: string | null; order: number }>()
-  const ids = [...new Set([...targetNodes.keys(), ...sourceNodes.keys()])]
-  for (const id of ids) {
-    const sourceEntry = sourceNodes.get(id)
-    const targetEntry = targetNodes.get(id)
-    const decision = mergeDecisions.value[id]
-    if (decision === 'omit') continue
-    const selected = decision === 'source' ? sourceEntry : decision === 'target' ? targetEntry : targetEntry ?? sourceEntry
-    if (!selected) continue
-    values.set(id, {
-      value: selected.node.value,
-      description: selected.node.description,
-      parentId: selected.parentId,
-      order: selected.order,
-    })
-  }
-
-  const parentById = new Map([...values].map(([id, value]) => [id, value.parentId]))
-  for (const [id, parentId] of Object.entries(mergeParentOverrides.value)) {
-    if (!values.has(id) || (parentId && !values.has(parentId))) continue
-    parentById.set(id, parentId || null)
-  }
-  for (const [id, parentId] of parentById) {
-    if (parentId && !values.has(parentId)) parentById.set(id, null)
-  }
-  const checked = new Set<string>()
-  for (const id of values.keys()) {
-    if (checked.has(id)) continue
-    const path: string[] = []
-    const pathIndex = new Map<string, number>()
-    let current: string | null | undefined = id
-    while (current && values.has(current) && !checked.has(current)) {
-      const cycleStart = pathIndex.get(current)
-      if (cycleStart !== undefined) {
-        for (const cycleId of path.slice(cycleStart)) parentById.set(cycleId, null)
-        break
-      }
-      pathIndex.set(current, path.length)
-      path.push(current)
-      current = parentById.get(current)
-    }
-    path.forEach((item) => checked.add(item))
-  }
-
-  const nodes = new Map([...values].map(([id, value]) => [id, {
-    id, value: value.value, ...(value.description ? { description: value.description } : {}), children: [] as TreeNode[],
-  }]))
-  const roots: TreeNode[] = []
-  for (const id of [...values.keys()].sort((left, right) => values.get(left)!.order - values.get(right)!.order
-    || ids.indexOf(left) - ids.indexOf(right))) {
-    const node = nodes.get(id)
-    if (!node) continue
-    const parentId = parentById.get(id)
-    const parent = parentId ? nodes.get(parentId) : undefined
-    if (parent) parent.children.push(node)
-    else roots.push(node)
-  }
-  const positions = positionsForData(target.data, roots, target.positions, mapViewFor(target), mapViewport(target))
-  for (const [id, position] of Object.entries(mergePositionOverrides.value)) {
-    if (roots.some((node) => node.id === id)) {
-      Object.assign(positions, positionsAfterMove(roots, positions, id, position))
-    }
-  }
-  return { source, target, data: roots, positions }
-})
-const mergeRows = computed(() => {
-  const merged = mergeResult.value
-  if (!merged) return []
-  const source = flattenNodes(merged.source.data)
-  const target = flattenNodes(merged.target.data)
-  const result = flattenNodes(merged.data)
-  const ids = new Set([...source.keys(), ...target.keys()])
-  const depth = (id: string, entries: Map<string, FlatNode>) => {
-    let value = 0
-    let parentId = entries.get(id)?.parentId
-    while (parentId && entries.has(parentId)) {
-      value += 1
-      parentId = entries.get(parentId)?.parentId ?? null
-    }
-    return value
-  }
-  const makeRow = (id: string) => {
-    const sourceEntry = source.get(id)
-    const targetEntry = target.get(id)
-    return {
-      id, sourceEntry, targetEntry, resultEntry: result.get(id),
-      label: sourceEntry?.node.value ?? targetEntry!.node.value,
-      shared: !!sourceEntry && !!targetEntry,
-      depth: Math.max(sourceEntry ? depth(id, source) : 0, targetEntry ? depth(id, target) : 0),
-    }
-  }
-  const sourceOnly = [...source.keys()].filter((id) => !target.has(id)).map(makeRow)
-  const targetOnly = [...target.keys()].filter((id) => !source.has(id)).map(makeRow)
-  const shared = [...source.keys()].filter((id) => target.has(id)).map(makeRow)
-  return [...sourceOnly, ...targetOnly, ...shared]
-})
-function mergeParentOptions(nodeId: string) {
-  const data = mergeResult.value?.data ?? []
-  const entry = findNode(data, nodeId)
-  const excluded = new Set(entry ? descendants(entry) : [nodeId])
-  return [...flattenNodes(data)].filter(([id]) => !excluded.has(id))
-}
-function setMergeParent(nodeId: string, parentId: string) {
-  const validParent = !parentId || mergeParentOptions(nodeId).some(([id]) => id === parentId)
-  if (!validParent) return
-  mergeParentOverrides.value = { ...mergeParentOverrides.value, [nodeId]: parentId }
-}
-function mergeDecisionFor(row: { id: string; sourceEntry?: FlatNode; targetEntry?: FlatNode }) {
-  return mergeDecisions.value[row.id]
-    ?? (row.sourceEntry && row.targetEntry ? 'combine' : row.sourceEntry ? 'source' : 'target')
-}
-function setMergeDecision(nodeId: string, decision: 'combine' | 'source' | 'target' | 'omit') {
-  mergeDecisions.value = { ...mergeDecisions.value, [nodeId]: decision }
-  const overrides = { ...mergeParentOverrides.value }
-  delete overrides[nodeId]
-  mergeParentOverrides.value = overrides
-}
-function setMergePicked(nodeId: string, picked: boolean) {
-  const decisions = { ...mergeDecisions.value }
-  if (picked) {
-    if (decisions[nodeId] === 'omit') delete decisions[nodeId]
-  } else decisions[nodeId] = 'omit'
-  mergeDecisions.value = decisions
-  if (!picked) {
-    const overrides = { ...mergeParentOverrides.value }
-    delete overrides[nodeId]
-    mergeParentOverrides.value = overrides
-  }
-}
-function toggleMergeEntry(nodeId: string) {
-  const isIncluded = !!mergeResult.value?.data.some((node) =>
-    !!findNode([node], nodeId))
-  setMergePicked(nodeId, !isIncluded)
-}
-function onMergeTileClick(nodeId: string) {
-  if (suppressMergeClick) {
-    suppressMergeClick = false
-    return
-  }
-  toggleMergeEntry(nodeId)
-}
-function onMergeParentChange(nodeId: string, event: Event) {
-  setMergeParent(nodeId, (event.target as HTMLSelectElement).value)
-}
-function resetMerge() {
-  mergeDecisions.value = {}
-  mergeParentOverrides.value = {}
-  mergePositionOverrides.value = {}
-  mergeDrag.value = null
-  mergeDropTarget.value = null
-}
-const comparisonPanels = computed(() => {
-  if (compareIds.value.length !== 2) return []
-  const source = versions.value.find((item) => item.id === compareIds.value[0])
-  const target = versions.value.find((item) => item.id === compareIds.value[1])
-  if (!source || !target) return []
-  const panels = [
-    { id: source.id, label: 'Source', version: source, data: source.data, positions: source.positions, role: 'source' },
-    { id: target.id, label: 'Target', version: target, data: target.data, positions: target.positions, role: 'target' },
-  ]
-  return panels.map((panel) => ({
-    ...panel,
-    tiles: panel.data.flatMap((root, index) => tilesFor(root, panel.data, index, panel.positions)),
-  }))
-})
-const comparisonViewBox = computed(() => {
-  const tiles = comparisonPanels.value.flatMap((panel) => panel.tiles)
-  if (!tiles.length) return '0 0 260 220'
-  const left = Math.min(...tiles.map((tile) => tile.x))
-  const top = Math.min(...tiles.map((tile) => tile.y))
-  const right = Math.max(...tiles.map((tile) => tile.x + tile.width))
-  const bottom = Math.max(...tiles.map((tile) => tile.y + tile.height))
-  return `${left - MAP_PADDING} ${top - MAP_PADDING} ${Math.max(1, right - left) + MAP_PADDING * 2} ${Math.max(1, bottom - top) + MAP_PADDING * 2}`
-})
-function comparisonKinds(nodeId: string) {
-  if (!showDifferenceColors.value) return ['unchanged']
-  return comparisonStatus.value.get(nodeId) ?? ['unchanged']
-}
-function comparisonGhosts(panelIndex: number) {
-  const counterpart = comparisonPanels.value[panelIndex === 0 ? 1 : 0]
-  const panel = comparisonPanels.value[panelIndex]
-  if (!panel || !counterpart) return []
-  const present = new Set(panel.tiles.map((tile) => tile.id))
-  return counterpart.tiles.filter((tile) => !present.has(tile.id))
-}
-function selectComparedNode(nodeId: string) {
-  comparisonSelectedNode.value = comparisonSelectedNode.value === nodeId ? null : nodeId
-}
-const mergePreviewTiles = computed(() => {
-  const result = mergeResult.value
-  if (!result) return []
-  return result.data.flatMap((root, index) => tilesFor(root, result.data, index, result.positions))
-})
-const mergePreviewViewBox = computed(() => {
-  const tiles = mergePreviewTiles.value
-  if (!tiles.length) return '0 0 260 220'
-  const left = Math.min(...tiles.map((tile) => tile.x))
-  const top = Math.min(...tiles.map((tile) => tile.y))
-  const right = Math.max(...tiles.map((tile) => tile.x + tile.width))
-  const bottom = Math.max(...tiles.map((tile) => tile.y + tile.height))
-  return `${left - MAP_PADDING} ${top - MAP_PADDING} ${Math.max(1, right - left) + MAP_PADDING * 2} ${Math.max(1, bottom - top) + MAP_PADDING * 2}`
-})
-function startMergeDrag(event: PointerEvent, nodeId: string) {
-  if (event.button !== 0) return
-  event.preventDefault()
-  mergeDrag.value = { id: nodeId, pointerId: event.pointerId, x: event.clientX, y: event.clientY, moved: false }
-  ;(event.currentTarget as SVGRectElement).setPointerCapture(event.pointerId)
-}
-function moveMergeDrag(event: PointerEvent) {
-  const drag = mergeDrag.value
-  if (!drag || drag.pointerId !== event.pointerId) return
-  if (!drag.moved && Math.hypot(event.clientX - drag.x, event.clientY - drag.y) > 5) drag.moved = true
-  if (!drag.moved) return
-  const hit = document.elementFromPoint(event.clientX, event.clientY)?.closest<SVGRectElement>('.merge-preview-tile')
-  mergeDropTarget.value = hit?.dataset.node ?? null
-}
-function finishMergeDrag(event: PointerEvent) {
-  const drag = mergeDrag.value
-  if (!drag || drag.pointerId !== event.pointerId) return
-  if (drag.moved) {
-    suppressMergeClick = true
-    moveMergeDrag(event)
-    const hit = document.elementFromPoint(event.clientX, event.clientY)
-    const targetTile = hit?.closest<SVGRectElement>('.merge-preview-tile')
-    if (targetTile && targetTile.dataset.node !== drag.id) {
-      setMergeParent(drag.id, targetTile.dataset.node ?? '')
-    } else if (!targetTile) {
-      const svg = document.querySelector<SVGSVGElement>('.merge-preview-canvas')
-      const rect = svg?.getBoundingClientRect()
-      if (svg && rect && hit && svg.contains(hit)) {
-        const { x: viewX, y: viewY, width: viewWidth, height: viewHeight } = svg.viewBox.baseVal
-        const x = viewX + (event.clientX - rect.left) / rect.width * viewWidth
-        const y = viewY + (event.clientY - rect.top) / rect.height * viewHeight
-        setMergeParent(drag.id, '')
-        mergePositionOverrides.value = {
-          ...mergePositionOverrides.value,
-          [drag.id]: { x: x / CARD_WIDTH, y: y / TREE_MAP_HEIGHT },
-        }
-      }
-    }
-  }
-  mergeDrag.value = null
-  mergeDropTarget.value = null
-}
-function cancelMergeDrag(event: PointerEvent) {
-  if (mergeDrag.value?.pointerId !== event.pointerId) return
-  mergeDrag.value = null
-  mergeDropTarget.value = null
-}
-
-function confirmMerge() {
-  const result = mergeResult.value
-  if (!result) return
-  const isLatestOnBranch = (candidate: Version) => !versions.value.some((version) =>
-    version.branch === candidate.branch && version.step > candidate.step)
-  const sourceIsLatest = isLatestOnBranch(result.source)
-  const targetIsLatest = isLatestOnBranch(result.target)
-  const laneParent = sourceIsLatest && targetIsLatest
-    ? result.source.lane <= result.target.lane ? result.source : result.target
-    : sourceIsLatest ? result.source
-      : targetIsLatest ? result.target
-        : result.target
-  const mergeSource = laneParent.id === result.source.id ? result.target : result.source
-  const parentPosition = cardPosition(laneParent)
-  const arrivalFrom = {
-    x: parentPosition.x,
-    y: parentPosition.y + (cardHeight(laneParent) - windowDimensions.value.height) / 2,
-  }
-  const nextVersionNumber = state.value.nextVersion++
-  const needsMergeLane = !sourceIsLatest && !targetIsLatest
-  const branch = needsMergeLane ? `${result.target.branch}.M${nextVersionNumber}` : laneParent.branch
-  const version: Version = {
-    id: `v${nextVersionNumber}-${CLIENT_ID}`,
-    parentId: laneParent.id,
-    mergeSourceId: mergeSource.id,
-    step: Math.max(result.source.step, result.target.step) + 1,
-    lane: laneParent.lane,
-    branch,
-    change: `Merge ${result.source.branch} into ${result.target.branch}`,
-    data: clone(result.data),
-    positions: clone(result.positions),
-    createdBy: CLIENT_ID,
-    createdAt: Date.now(),
-  }
-  const wasCentered = isVersionCentered(result.target)
-  state.value.versions.push(version)
-  compactVersionTreemaps(version.id, false)
-  reflowLayout()
-  startVersionArrival(version, arrivalFrom)
-  state.value.activeId = version.id
-  setSelectedNodes([])
-  mergeMode.value = false
-  compareMode.value = false
-  showOverview.value = false
-  compareIds.value = []
-  mergeDecisions.value = {}
-  mergeParentOverrides.value = {}
-  mergePositionOverrides.value = {}
-  notify(`Created merge ${displayVersionId(version.id)}`)
-  logInteraction(`Merged ${result.source.branch} into ${result.target.branch}`, { versionId: version.id })
-  panToVersion(version, wasCentered)
-}
-
-function pruneVersion(id: string) {
-  if (id === 'v0') return
-  const removeIds = new Set<string>([id])
-  let changed = true
-  while (changed) {
-    changed = false
-    for (const version of versions.value) {
-      if (version.parentId && removeIds.has(version.parentId) && !removeIds.has(version.id)) {
-        removeIds.add(version.id)
-        changed = true
-      }
-    }
-  }
-  if (versions.value.some((version) => !removeIds.has(version.id)
-    && version.mergeSourceId && removeIds.has(version.mergeSourceId))) {
-    notify('Cannot prune a version referenced by a merge')
-    return
-  }
-  const fallbackId = versions.value.find((version) => version.id === id)?.parentId ?? 'v0'
-  if (!window.confirm(`Prune ${removeIds.size} version${removeIds.size === 1 ? '' : 's'} from this branch?`)) return
-  for (const versionId of removeIds) {
-    const timer = mapViewTimers.get(versionId)
-    if (timer !== undefined) window.clearTimeout(timer)
-    mapViewTimers.delete(versionId)
-    delete transientMapViews.value[versionId]
-  }
-  state.value.copyLinks = state.value.copyLinks.filter((link) =>
-    !removeIds.has(link.sourceVersionId) && !removeIds.has(link.targetVersionId))
-  state.value.versions = versions.value.filter((version) => !removeIds.has(version.id))
-  reflowLayout()
-  if (removeIds.has(state.value.activeId)) state.value.activeId = fallbackId
-  compareIds.value = compareIds.value.filter((versionId) => !removeIds.has(versionId))
-  notify('Branch pruned')
-}
+function reflowLayout() { reflowVersionLayout(state.value) }
 
 function selectVersion(version: Version) {
   if (suppressVersionClick) {
@@ -2080,60 +448,8 @@ function onCanvasClick(event: MouseEvent) {
 
 const activeNodes = computed(() => countNodes(active.value.data))
 const branchCount = computed(() => new Set(versions.value.filter((version) => version.id !== 'v0').map((version) => version.branch.split('.')[0])).size)
-const maxStep = computed(() => Math.max(...versions.value.map((version) => version.step)))
-const maxLane = computed(() => Math.max(...versions.value.map((version) => version.lane)))
 const activeChildren = computed(() => versions.value.filter((version) => version.parentId === active.value.id).length)
 
-function cardPosition(version: Version) {
-  const { width, height } = windowDimensions.value
-  const mainRow = canvasSize.value.height / 2 - height / 2
-  if (version.id === 'v0') return { x: 0, y: 0 }
-  return { x: version.step * (width + GRAPH_GAP_X), y: mainRow + version.lane * (height + GRAPH_GAP_Y) }
-}
-function cardHeight(version: Version) {
-  return version.id === 'v0' ? graphBounds.value.height : windowDimensions.value.height
-}
-function displayCardPosition(version: Version) {
-  const arrival = versionArrival.value
-  const target = cardPosition(version)
-  if (!arrival || arrival.versionId !== version.id) return target
-  const progress = 1 - (1 - arrival.progress) ** 3
-  return {
-    x: arrival.from.x + (target.x - arrival.from.x) * progress,
-    y: arrival.from.y + (target.y - arrival.from.y) * progress,
-  }
-}
-function startVersionArrival(version: Version, from: { x: number; y: number }) {
-  if (versionArrivalFrame) cancelAnimationFrame(versionArrivalFrame)
-  const startedAt = performance.now()
-  versionArrival.value = { versionId: version.id, from, progress: 0 }
-  const animate = (time: number) => {
-    const progress = Math.min(1, (time - startedAt) / 460)
-    if (progress === 1) {
-      versionArrival.value = null
-      versionArrivalFrame = 0
-      return
-    }
-    versionArrival.value = { versionId: version.id, from, progress }
-    versionArrivalFrame = requestAnimationFrame(animate)
-  }
-  versionArrivalFrame = requestAnimationFrame(animate)
-}
-const graphBounds = computed(() => ({
-  width: Math.max(windowDimensions.value.width, maxStep.value * (windowDimensions.value.width + GRAPH_GAP_X) + windowDimensions.value.width + 140),
-  height: Math.max(
-    canvasSize.value.height,
-    canvasSize.value.height / 2 + windowDimensions.value.height / 2 + maxLane.value * (windowDimensions.value.height + GRAPH_GAP_Y) + 140,
-  ),
-}))
-const fitZoom = computed(() => Math.max(0.005, Math.min(
-  1,
-  Math.max(1, canvasSize.value.width - 100) / graphBounds.value.width,
-  Math.max(1, canvasSize.value.height - 100) / graphBounds.value.height,
-)))
-watch(canvasSize, () => {
-  if (zoom.value < fitZoom.value) fitGraph()
-})
 function connectionPath(version: Version) {
   const parent = versions.value.find((item) => item.id === version.parentId)
   if (!parent) return ''
@@ -2187,31 +503,6 @@ function connectionWidth(version: Version) {
 }
 function terminalTailEnd(version: Version) {
   return TERMINAL_TAIL_LENGTH - TERMINAL_ARROW_BASE_INSET * connectionWidth(version)
-}
-function zoomAt(nextZoom: number, x = canvasSize.value.width / 2, y = canvasSize.value.height / 2) {
-  cancelPanAnimation()
-  if (nextZoom <= fitZoom.value) {
-    fitGraph()
-    return
-  }
-  const next = Math.max(fitZoom.value, Math.min(ZOOM_MAX, nextZoom))
-  const ratio = next / zoom.value
-  pan.value = { x: x - (x - pan.value.x) * ratio, y: y - (y - pan.value.y) * ratio }
-  zoom.value = next
-}
-function zoomIn() { zoomAt(zoom.value * 1.25) }
-function zoomOut() { zoomAt(zoom.value / 1.25) }
-function fitGraph() {
-  const targetZoom = fitZoom.value
-  animateCamera(targetZoom, {
-    x: (canvasSize.value.width - graphBounds.value.width * targetZoom) / 2,
-    y: (canvasSize.value.height - graphBounds.value.height * targetZoom) / 2,
-  })
-}
-function versionColor(version: Version) {
-  if (version.id === 'v0') return '#7b8580'
-  const index = Math.max(0, Number(version.branch.match(/\d+/)?.[0] ?? 1) - 1)
-  return branchColors[index % branchColors.length]!
 }
 function versionAuthorColor(version: Version) {
   const author = version.createdBy ?? version.id.match(/-([a-f0-9]{12})$/)?.[1]
@@ -2295,183 +586,6 @@ function versionAction(version: Version) {
   }
   return { label: 'modify', symbol: '~' }
 }
-function cardData(version: Version): TreeNode[] {
-  return version.data
-}
-function cardPositions(version: Version) {
-  return version.positions
-}
-const mapGeometries = computed(() => {
-  const geometries = new Map<string, ReturnType<typeof mapGeometry>>()
-  for (const version of versions.value) {
-    const viewport = mapViewport(version)
-    geometries.set(version.id, mapGeometry(cardData(version), cardPositions(version), viewport.width, viewport.height))
-  }
-  return geometries
-})
-function mapViewport(version: Version) {
-  if (version.id === 'v0') {
-    return {
-      width: windowDimensions.value.width - 2,
-      height: cardHeight(version) - 2,
-    }
-  }
-  return {
-    width: CARD_WIDTH - 14,
-    height: CARD_HEIGHT - 47,
-  }
-}
-function mapViewFor(version: Version): MapView {
-  const transient = transientMapViews.value[version.id]
-  if (transient) return transient
-  if (version.mapView && (version.id !== 'v0' || version.mapView.manual)) return version.mapView
-  const geometry = mapGeometries.value.get(version.id) ?? mapGeometry(version.data, version.positions)
-  const viewport = mapViewport(version)
-  const fit = Math.min(1, (viewport.width - MAP_PADDING * 2) / geometry.width, (viewport.height - MAP_PADDING * 2) / geometry.height)
-  const scale = Math.max(MAP_ZOOM_MIN, fit)
-  return {
-    zoom: scale,
-    panX: (viewport.width - geometry.width * scale) / 2 - geometry.minX * scale,
-    panY: (viewport.height - geometry.height * scale) / 2 - geometry.minY * scale,
-    manual: false,
-  }
-}
-function centerVersionTreemaps(versionId: string, notifyUser = true) {
-  const version = versions.value.find((item) => item.id === versionId)
-  if (!version) return
-  if (!version.data.length) {
-    const viewport = mapViewport(version)
-    version.mapView = {
-      zoom: 1,
-      panX: viewport.width / 2,
-      panY: viewport.height / 2,
-      manual: true,
-    }
-    if (notifyUser) notify('Treemaps centered and fitted')
-    return
-  }
-  const positions = { ...defaultPositions(version.data, version.positions), ...version.positions }
-  const extents = version.data.map((node) => {
-    const position = positions[node.id]!
-    const size = outerTreemapDimensions(node, positions)
-    return {
-      left: position.x * CARD_WIDTH,
-      top: position.y * TREE_MAP_HEIGHT,
-      right: position.x * CARD_WIDTH + size.width,
-      bottom: position.y * TREE_MAP_HEIGHT + size.height,
-    }
-  })
-  const left = Math.min(...extents.map((item) => item.left))
-  const top = Math.min(...extents.map((item) => item.top))
-  const right = Math.max(...extents.map((item) => item.right))
-  const bottom = Math.max(...extents.map((item) => item.bottom))
-  const viewport = mapViewport(version)
-  const width = Math.max(1, right - left)
-  const height = Math.max(1, bottom - top)
-  const targetZoom = Math.max(MAP_ZOOM_MIN, Math.min(
-    MAP_ZOOM_MAX,
-    (viewport.width - MAP_PADDING * 2) / width,
-    (viewport.height - MAP_PADDING * 2) / height,
-  ))
-  const offsetX = (viewport.width / targetZoom - width) / 2 - left
-  const offsetY = (viewport.height / targetZoom - height) / 2 - top
-  version.positions = Object.fromEntries(version.data.map((node) => {
-    const position = positions[node.id]!
-    return [node.id, {
-      x: (position.x * CARD_WIDTH + offsetX) / CARD_WIDTH,
-      y: (position.y * TREE_MAP_HEIGHT + offsetY) / TREE_MAP_HEIGHT,
-    }]
-  }))
-  version.mapView = { zoom: targetZoom, panX: 0, panY: 0, manual: true }
-  if (notifyUser) notify('Treemaps centered and fitted')
-}
-function compactVersionTreemaps(versionId: string, notifyUser = true) {
-  const version = versions.value.find((item) => item.id === versionId)
-  if (!version || !version.data.length) return
-  const ordered = version.data.map((node, index) => ({
-    node, index, size: outerTreemapDimensions(node, version.positions),
-  })).sort((left, right) => right.size.height - left.size.height
-    || right.size.width - left.size.width || left.index - right.index)
-  const candidateWidths = [...new Set(ordered.reduce<number[]>((widths, item) => {
-    widths.push((widths.at(-1) ?? MAP_PADDING) + item.size.width + (widths.length ? MAP_GAP : 0))
-    return widths
-  }, []))]
-  let best: {
-    area: number
-    aspectDelta: number
-    fitScale: number
-    positions: Record<string, { x: number; y: number }>
-  } | null = null
-  for (const targetWidth of candidateWidths) {
-    let x = MAP_PADDING
-    let y = MAP_PADDING
-    let rowHeight = 0
-    let maxRight = MAP_PADDING
-    let maxBottom = MAP_PADDING
-    const placed = new Map<string, { x: number; y: number }>()
-    for (const { node, size } of ordered) {
-      if (x > MAP_PADDING && x + size.width > MAP_PADDING + targetWidth) {
-        x = MAP_PADDING
-        y += rowHeight + MAP_GAP
-        rowHeight = 0
-      }
-      placed.set(node.id, { x, y })
-      x += size.width + MAP_GAP
-      rowHeight = Math.max(rowHeight, size.height)
-      maxRight = Math.max(maxRight, x - MAP_GAP)
-      maxBottom = Math.max(maxBottom, y + size.height)
-    }
-    const width = maxRight - MAP_PADDING
-    const height = maxBottom - MAP_PADDING
-    const area = width * height
-    const viewport = mapViewport(version)
-    const aspectDelta = Math.abs(Math.log((width / Math.max(1, height)) / (viewport.width / viewport.height)))
-    const fitScale = Math.min(1, viewport.width / Math.max(1, width), viewport.height / Math.max(1, height))
-    if (best && (fitScale < best.fitScale
-      || (fitScale === best.fitScale && aspectDelta > best.aspectDelta)
-      || (fitScale === best.fitScale && aspectDelta === best.aspectDelta && area >= best.area))) continue
-    best = {
-      area, aspectDelta, fitScale,
-      positions: Object.fromEntries(version.data.map((node) => {
-        const position = placed.get(node.id)!
-        return [node.id, { x: position.x / CARD_WIDTH, y: position.y / TREE_MAP_HEIGHT }]
-      })),
-    }
-  }
-  if (!best) return
-  version.positions = best.positions
-  centerVersionTreemaps(version.id, false)
-  if (notifyUser) notify('Treemap layout compacted')
-}
-function commitMapView(versionId: string) {
-  const view = transientMapViews.value[versionId]
-  const version = versions.value.find((item) => item.id === versionId)
-  if (!view || !version) return
-  const timer = mapViewTimers.get(versionId)
-  if (timer !== undefined) window.clearTimeout(timer)
-  mapViewTimers.delete(versionId)
-  version.mapView = clone(view)
-  delete transientMapViews.value[versionId]
-}
-function clearTransientMapViews() {
-  for (const timer of mapViewTimers.values()) window.clearTimeout(timer)
-  mapViewTimers.clear()
-  transientMapViews.value = {}
-  mapPanDrag.value = null
-}
-function scheduleMapViewCommit(versionId: string) {
-  const timer = mapViewTimers.get(versionId)
-  if (timer !== undefined) window.clearTimeout(timer)
-  mapViewTimers.set(versionId, window.setTimeout(() => commitMapView(versionId), 180))
-}
-function initializeMapViews() {
-  for (const version of versions.value) {
-    if (!version.mapView) version.mapView = mapViewFor(version)
-  }
-}
-watch(() => versions.value.map((version) => version.id).join(','), () => {
-  void nextTick(initializeMapViews)
-}, { flush: 'post' })
 function mapTransform(version: Version) {
   const layout = version.id === active.value.id ? previewLayout.value : null
   const view = layout?.view ?? mapViewFor(version)
@@ -2490,10 +604,6 @@ const versionTiles = computed(() => {
     result.set(version.id, tiles)
   }
   return result
-})
-const draggedSubtreeIds = computed(() => {
-  const node = draggedNode.value ? findNode(active.value.data, draggedNode.value) : undefined
-  return node ? descendants(node) : []
 })
 const duplicateValueLinks = computed(() => {
   const result = new Map<string, Array<{ id: string; path: string }>>()
@@ -2581,9 +691,6 @@ function previewLabel() {
   if (previewLayout.value?.kind === 'attach') return 'ATTACH PREVIEW'
   if (previewLayout.value?.kind === 'detach') return 'DETACH PREVIEW'
   return 'LAYOUT PREVIEW'
-}
-function labelFontSize(tile: Tile): number {
-  return Math.max(0, Math.min(24, tile.height - 6, (tile.width - 10) / (tile.label.length * 0.58)))
 }
 function nodeGraphBounds(versionId: string, nodeId: string) {
   const version = versions.value.find((item) => item.id === versionId)
@@ -2677,148 +784,6 @@ function activateCopyLink(link: CopyLink, event?: MouseEvent) {
   focusVersion(version)
 }
 
-const draggedOriginalTile = computed(() => {
-  if (!draggedNode.value) return null
-  return tileForNode(active.value.data, active.value.positions, draggedNode.value) ?? null
-})
-function positionAt(version: Version, clientX: number, clientY: number, map: HTMLElement) {
-  const drag = treeDrag.value
-  const rect = map.getBoundingClientRect()
-  const view = previewLayout.value?.view ?? mapViewFor(version)
-  const viewport = mapViewport(version)
-  const localX = (clientX - rect.left) / zoom.value * viewport.width / (rect.width / zoom.value)
-  const localY = (clientY - rect.top) / zoom.value * viewport.height / (rect.height / zoom.value)
-  if (!drag?.space) {
-    const x = (localX - view.panX) / view.zoom
-    const y = (localY - view.panY) / view.zoom
-    return {
-      x: x / CARD_WIDTH,
-      y: y / TREE_MAP_HEIGHT,
-    }
-  }
-  const pointerX = (localX - view.panX) / view.zoom
-  const pointerY = (localY - view.panY) / view.zoom
-  return {
-    x: (pointerX - drag.space.grabX * drag.space.width) / CARD_WIDTH,
-    y: (pointerY - drag.space.grabY * drag.space.height) / TREE_MAP_HEIGHT,
-  }
-}
-function treeNodeAt(clientX: number, clientY: number, map: HTMLElement) {
-  const versionId = map.closest('.version-card')?.getAttribute('data-version')
-  if (versionId !== active.value.id) return null
-  const rect = map.getBoundingClientRect()
-  const view = previewLayout.value?.view ?? mapViewFor(active.value)
-  const viewport = mapViewport(active.value)
-  const localX = (clientX - rect.left) / zoom.value * viewport.width / (rect.width / zoom.value)
-  const localY = (clientY - rect.top) / zoom.value * viewport.height / (rect.height / zoom.value)
-  const x = (localX - view.panX) / view.zoom
-  const y = (localY - view.panY) / view.zoom
-  const tiles = active.value.data.flatMap((root, index) => tilesFor(root, active.value.data, index, active.value.positions))
-  const draggedIds = new Set(draggedSubtreeIds.value)
-  if (tiles.some((tile) => draggedIds.has(tile.id)
-    && x >= tile.x && x <= tile.x + tile.width && y >= tile.y && y <= tile.y + tile.height)) return null
-  for (let index = tiles.length - 1; index >= 0; index -= 1) {
-    const tile = tiles[index]!
-    if (draggedIds.has(tile.id)) continue
-    if (x >= tile.x && x <= tile.x + tile.width && y >= tile.y && y <= tile.y + tile.height) return tile.id
-  }
-  return null
-}
-function rootPositionIsAvailable(
-  version: Version,
-  nodeId: string,
-  position: { x: number; y: number },
-  map: HTMLElement,
-  data = version.data,
-  positions = version.positions,
-  sizeOverride?: { width: number; height: number },
-  occupiedData = data,
-  occupiedPositions = positions,
-) {
-  const node = findNode(data, nodeId)
-  if (!node || !data.some((root) => root.id === nodeId)) return false
-  const candidatePositions = { ...positions, [nodeId]: position }
-  const view = fitMapViewToLayout(version.id, data, candidatePositions, mapViewFor(version), 0)
-  const size = sizeOverride ?? outerTreemapDimensions(node)
-  const left = position.x * CARD_WIDTH
-  const top = position.y * TREE_MAP_HEIGHT
-  const bounds = {
-    left: -view.panX / view.zoom,
-    top: -view.panY / view.zoom,
-    right: (mapViewport(version).width - view.panX) / view.zoom,
-    bottom: (mapViewport(version).height - view.panY) / view.zoom,
-  }
-  if (left < bounds.left || top < bounds.top
-    || left + size.width > bounds.right || top + size.height > bounds.bottom) return false
-  const occupied = occupiedData.filter((root) => root.id !== nodeId)
-  return nearestPositionIsFree(position, size, occupied, { ...occupiedPositions, [nodeId]: position })
-}
-function spatialDropLayout(
-  version: Version,
-  nodeId: string,
-  position: { x: number; y: number },
-  map: HTMLElement,
-): SpatialPreview {
-  const data = clone(version.data)
-  const existingPositions = { ...defaultPositions(data, version.positions), ...version.positions }
-  const isRoot = data.some((root) => root.id === nodeId)
-  let kind: SpatialPreview['kind'] = isRoot ? 'move' : 'detach'
-  let nextData = data
-  let positions = { ...existingPositions }
-  if (isRoot) {
-    positions[nodeId] = position
-  } else {
-    const parent = findParent(data, nodeId)
-    const draggedTile = tileForNode(data, existingPositions, nodeId)
-    const parentTile = parent ? tileForNode(data, existingPositions, parent.id) : null
-    const center = draggedTile ? {
-      x: position.x * CARD_WIDTH + draggedTile.width / 2,
-      y: position.y * TREE_MAP_HEIGHT + draggedTile.height / 2,
-    } : null
-    const staysInParent = !!parentTile && !!center
-      && center.x >= parentTile.x && center.x <= parentTile.x + parentTile.width
-      && center.y >= parentTile.y && center.y <= parentTile.y + parentTile.height
-    if (staysInParent) {
-      kind = 'noop'
-    } else {
-      const detached = removeNode(data, nodeId)
-      if (detached) {
-        data.push(detached)
-        nextData = data
-        positions[nodeId] = position
-      }
-    }
-  }
-  const valid = kind === 'noop' || rootPositionIsAvailable(
-    version,
-    nodeId,
-    position,
-    map,
-    nextData,
-    positions,
-    !isRoot ? tileForNode(version.data, version.positions, nodeId) : undefined,
-    !isRoot ? version.data : nextData,
-    !isRoot ? existingPositions : positions,
-  )
-  return {
-    ...position,
-    versionId: version.id,
-    nodeId,
-    kind: valid ? kind : 'invalid',
-    valid,
-    data: nextData,
-    positions,
-    view: valid ? fitMapViewToLayout(version.id, nextData, positions, mapViewFor(version), 0) : mapViewFor(version),
-  }
-}
-function placeRoot(version: Version, nodeId: string, preview: SpatialPreview) {
-  const map = document.querySelector<HTMLElement>(`.version-card[data-version="${version.id}"] .mini-map`)
-  if (isReadOnly.value || !map || !rootPositionIsAvailable(version, nodeId, preview, map)) return false
-  version.positions = clone(preview.positions)
-  version.mapView = clone(preview.view)
-  notify('Treemap layout updated')
-  return true
-}
 function onTileContext(event: MouseEvent, nodeId: string) {
   if (isReadOnly.value || event.button !== 2) return
   event.preventDefault()
@@ -2844,69 +809,6 @@ function handleAppClickCapture(event: MouseEvent) {
   }
   if (menu.value && !(event.target as HTMLElement).closest('.context-menu')) menu.value = null
 }
-function startCanvasPan(event: PointerEvent) {
-  if (event.button !== 0
-    || (event.target as HTMLElement).closest('button, .version-card, .tree-tile, .copy-link-hit')) return
-  cancelPanAnimation()
-  draggingCanvas.value = true
-  dragOrigin.value = { x: event.clientX, y: event.clientY, panX: pan.value.x, panY: pan.value.y }
-  ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
-}
-function moveCanvasPan(event: PointerEvent) {
-  if (!draggingCanvas.value) return
-  pan.value = { x: dragOrigin.value.panX + event.clientX - dragOrigin.value.x, y: dragOrigin.value.panY + event.clientY - dragOrigin.value.y }
-}
-function endCanvasPan() { draggingCanvas.value = false }
-function onWheel(event: WheelEvent) {
-  event.preventDefault()
-  zoomAt(zoom.value * Math.exp(-event.deltaY * 0.0012))
-}
-function zoomMap(event: WheelEvent, version: Version) {
-  if (!event.shiftKey) {
-    event.stopPropagation()
-    return
-  }
-  event.preventDefault()
-  event.stopPropagation()
-  const map = event.currentTarget as HTMLElement
-  const rect = map.getBoundingClientRect()
-  const viewport = mapViewport(version)
-  const pointerX = (event.clientX - rect.left) / zoom.value * viewport.width / (rect.width / zoom.value)
-  const pointerY = (event.clientY - rect.top) / zoom.value * viewport.height / (rect.height / zoom.value)
-  const current = mapViewFor(version)
-  const nextZoom = Math.max(MAP_ZOOM_MIN, Math.min(MAP_ZOOM_MAX, current.zoom * Math.exp(-event.deltaY * 0.0012)))
-  const worldX = (pointerX - current.panX) / current.zoom
-  const worldY = (pointerY - current.panY) / current.zoom
-  transientMapViews.value[version.id] = {
-    zoom: nextZoom,
-    panX: pointerX - worldX * nextZoom,
-    panY: pointerY - worldY * nextZoom,
-    manual: true,
-  }
-  scheduleMapViewCommit(version.id)
-}
-function startMapPan(event: PointerEvent, version: Version) {
-  if (!event.shiftKey || event.button !== 0) return
-  event.stopPropagation()
-  state.value.activeId = version.id
-  const view = mapViewFor(version)
-  const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
-  const viewport = mapViewport(version)
-  const timer = mapViewTimers.get(version.id)
-  if (timer !== undefined) window.clearTimeout(timer)
-  mapViewTimers.delete(version.id)
-  mapPanDrag.value = {
-    versionId: version.id,
-    pointerId: event.pointerId,
-    x: event.clientX,
-    y: event.clientY,
-    panX: view.panX,
-    panY: view.panY,
-    scaleX: viewport.width / (rect.width / zoom.value),
-    scaleY: viewport.height / (rect.height / zoom.value),
-    moved: false,
-  }
-}
 function startMapTileGesture(event: PointerEvent, version: Version, nodeId: string) {
   if (isReadOnly.value) return
   state.value.activeId = version.id
@@ -2916,45 +818,6 @@ function startMapTileGesture(event: PointerEvent, version: Version, nodeId: stri
   }
   startTreeDrag(event, version, nodeId)
 }
-function moveMapPan(event: PointerEvent) {
-  const drag = mapPanDrag.value
-  if (!drag || drag.pointerId !== event.pointerId) return
-  const version = versions.value.find((item) => item.id === drag.versionId)
-  if (!version) return
-  if (!drag.moved && Math.hypot(event.clientX - drag.x, event.clientY - drag.y) <= 3) return
-  drag.moved = true
-  transientMapViews.value[version.id] = {
-    ...mapViewFor(version),
-    panX: drag.panX + (event.clientX - drag.x) / zoom.value * drag.scaleX,
-    panY: drag.panY + (event.clientY - drag.y) / zoom.value * drag.scaleY,
-    manual: true,
-  }
-}
-function endMapPan(event: PointerEvent) {
-  if (mapPanDrag.value?.pointerId !== event.pointerId) return
-  const { versionId, moved } = mapPanDrag.value
-  mapPanDrag.value = null
-  if (moved) {
-    commitMapView(versionId)
-    suppressVersionClick = true
-    suppressTileClick = true
-    window.setTimeout(() => {
-      suppressVersionClick = false
-      suppressTileClick = false
-    }, 0)
-  } else if (transientMapViews.value[versionId]) scheduleMapViewCommit(versionId)
-}
-function focusVersion(version: Version) {
-  const position = cardPosition(version)
-  const availableWidth = Math.max(1, canvasSize.value.width - 100)
-  const availableHeight = Math.max(1, canvasSize.value.height - 100)
-  const targetZoom = Math.max(0.005, Math.min(ZOOM_MAX, availableWidth / windowDimensions.value.width, availableHeight / cardHeight(version)))
-  animateCamera(targetZoom, {
-    x: canvasSize.value.width / 2 - (position.x + windowDimensions.value.width / 2) * targetZoom,
-    y: canvasSize.value.height / 2 - (position.y + cardHeight(version) / 2) * targetZoom,
-  }, 420)
-}
-function focusActive() { focusVersion(active.value) }
 function focusVersionById(versionId?: string | null) {
   const version = versions.value.find((item) => item.id === versionId)
   if (version) focusVersion(version)
@@ -2987,239 +850,6 @@ function navigateVersion(direction: 'left' | 'right' | 'up' | 'down') {
     }
   }
   if (destination) activateAndFocusVersion(destination)
-}
-const visibleVersions = computed(() => {
-  const marginX = windowDimensions.value.width + GRAPH_GAP_X
-  const marginY = windowDimensions.value.height + GRAPH_GAP_Y
-  const left = -pan.value.x / zoom.value - marginX
-  const top = -pan.value.y / zoom.value - marginY
-  const right = (canvasSize.value.width - pan.value.x) / zoom.value + marginX
-  const bottom = (canvasSize.value.height - pan.value.y) / zoom.value + marginY
-  const retained = new Set([state.value.activeId, ...compareIds.value])
-  if (treeDrag.value) retained.add(treeDrag.value.versionId)
-  return versions.value.filter((version) => {
-    if (retained.has(version.id)) return true
-    const position = cardPosition(version)
-    return position.x <= right && position.x + windowDimensions.value.width >= left
-      && position.y <= bottom && position.y + cardHeight(version) >= top
-  })
-})
-const visibleConnectionVersions = computed(() => {
-  const visible = new Set(visibleVersions.value.map((version) => version.id))
-  return versions.value.filter((version) =>
-    visible.has(version.id) || !!version.parentId && visible.has(version.parentId))
-})
-const visibleMergeConnectionVersions = computed(() => {
-  const visible = new Set(visibleVersions.value.map((version) => version.id))
-  return versions.value.filter((version) =>
-    !!version.mergeSourceId && (visible.has(version.id) || visible.has(version.mergeSourceId)))
-})
-function cancelPanAnimation() {
-  if (panAnimationFrame !== null) cancelAnimationFrame(panAnimationFrame)
-  panAnimationFrame = null
-}
-function animateCamera(targetZoom: number, targetPan: { x: number; y: number }, duration = 360) {
-  cancelPanAnimation()
-  const start = { zoom: zoom.value, panX: pan.value.x, panY: pan.value.y }
-  const startedAt = performance.now()
-  const animate = (time: number) => {
-    const progress = Math.min(1, (time - startedAt) / duration)
-    const eased = 1 - (1 - progress) ** 3
-    zoom.value = start.zoom + (targetZoom - start.zoom) * eased
-    pan.value = {
-      x: start.panX + (targetPan.x - start.panX) * eased,
-      y: start.panY + (targetPan.y - start.panY) * eased,
-    }
-    if (progress < 1) panAnimationFrame = requestAnimationFrame(animate)
-    else panAnimationFrame = null
-  }
-  panAnimationFrame = requestAnimationFrame(animate)
-}
-function isVersionCentered(version: Version) {
-  const position = cardPosition(version)
-  const centerX = (position.x + windowDimensions.value.width / 2) * zoom.value + pan.value.x
-  const centerY = (position.y + cardHeight(version) / 2) * zoom.value + pan.value.y
-  return Math.abs(centerX - canvasSize.value.width / 2) < 2
-    && Math.abs(centerY - canvasSize.value.height / 2) < 2
-}
-function panToVersion(version: Version, centerImmediately: boolean) {
-  cancelPanAnimation()
-  const position = cardPosition(version)
-  const width = windowDimensions.value.width * zoom.value
-  const height = cardHeight(version) * zoom.value
-  const margin = 50
-  const target = { ...pan.value }
-  const left = position.x * zoom.value + target.x
-  const right = left + width
-  const top = position.y * zoom.value + target.y
-  const bottom = top + height
-
-  if (centerImmediately || width > canvasSize.value.width - margin * 2) {
-    target.x = canvasSize.value.width / 2 - (position.x + windowDimensions.value.width / 2) * zoom.value
-  } else if (left < margin) target.x += margin - left
-  else if (right > canvasSize.value.width - margin) target.x -= right - (canvasSize.value.width - margin)
-
-  if (centerImmediately || height > canvasSize.value.height - margin * 2) {
-    target.y = canvasSize.value.height / 2 - (position.y + cardHeight(version) / 2) * zoom.value
-  } else if (top < margin) target.y += margin - top
-  else if (bottom > canvasSize.value.height - margin) target.y -= bottom - (canvasSize.value.height - margin)
-
-  if (centerImmediately) {
-    pan.value = target
-    return
-  }
-  const start = { ...pan.value }
-  const startedAt = performance.now()
-  const duration = 260
-  const animate = (time: number) => {
-    const progress = Math.min(1, (time - startedAt) / duration)
-    const eased = 1 - (1 - progress) ** 3
-    pan.value = {
-      x: start.x + (target.x - start.x) * eased,
-      y: start.y + (target.y - start.y) * eased,
-    }
-    if (progress < 1) panAnimationFrame = requestAnimationFrame(animate)
-    else panAnimationFrame = null
-  }
-  panAnimationFrame = requestAnimationFrame(animate)
-}
-function startTreeDrag(event: PointerEvent, version: Version, id: string) {
-  if (event.button !== 0) return
-  if (isReadOnly.value) return
-  event.preventDefault()
-  state.value.activeId = version.id
-  const map = (event.currentTarget as SVGRectElement).closest<HTMLElement>('.mini-map')
-  const rect = map?.getBoundingClientRect()
-  const view = mapViewFor(version)
-  const originalTile = tileForNode(version.data, version.positions, id)
-  const viewport = mapViewport(version)
-  const pointerX = rect
-    ? (((event.clientX - rect.left) / zoom.value * viewport.width / (rect.width / zoom.value)) - view.panX) / view.zoom
-    : 0
-  const pointerY = rect
-    ? (((event.clientY - rect.top) / zoom.value * viewport.height / (rect.height / zoom.value)) - view.panY) / view.zoom
-    : 0
-  treeDrag.value = {
-    id, versionId: version.id, pointerId: event.pointerId,
-    x: event.clientX, y: event.clientY, moved: false,
-    space: rect && originalTile ? {
-      grabX: (pointerX - originalTile.x) / originalTile.width,
-      grabY: (pointerY - originalTile.y) / originalTile.height,
-      width: originalTile.width,
-      height: originalTile.height,
-    } : undefined,
-  }
-  const tile = event.currentTarget as SVGRectElement
-  if (tile.setPointerCapture) tile.setPointerCapture(event.pointerId)
-  draggedPosition.value = null
-  dragPreviewView.value = clone(view)
-}
-function moveTreeDrag(event: PointerEvent) {
-  const drag = treeDrag.value
-  if (!drag || drag.pointerId !== event.pointerId) return
-  if (active.value.id !== drag.versionId) state.value.activeId = drag.versionId
-  if (!drag.moved && Math.hypot(event.clientX - drag.x, event.clientY - drag.y) > 5) {
-    drag.moved = true
-    draggedNode.value = drag.id
-    setSelectedNodes([drag.id])
-    if (draggedSubtreeIds.value.includes(hoveredNode.value?.nodeId ?? '')) hoveredNode.value = null
-    entryTooltip.value = null
-    const original = tileForNode(active.value.data, active.value.positions, drag.id)
-    draggedPosition.value = original ? { x: original.x / CARD_WIDTH, y: original.y / TREE_MAP_HEIGHT } : null
-  }
-  if (!drag.moved) return
-  const hit = document.elementFromPoint(event.clientX, event.clientY)
-  const map = hit?.closest<HTMLElement>('.mini-map')
-  const targetId = map ? treeNodeAt(event.clientX, event.clientY, map) : null
-  const targetVersion = map?.closest('.version-card')?.getAttribute('data-version')
-  const point = map && targetVersion === active.value.id
-    ? positionAt(active.value, event.clientX, event.clientY, map)
-    : null
-  if (point) draggedPosition.value = point
-  const parent = findParent(active.value.data, drag.id)
-  if (targetId && targetVersion === active.value.id && parent?.id !== targetId && canAttach(drag.id, targetId)) {
-    overNode.value = targetId
-    invalidNode.value = null
-    spatialPreview.value = null
-    const view = previewLayout.value?.view ?? mapViewFor(active.value)
-    if (dragPreviewView.value && view.zoom < dragPreviewView.value.zoom) dragPreviewView.value = clone(view)
-    return
-  }
-  overNode.value = null
-  const isDraggedDescendant = targetId ? draggedSubtreeIds.value.includes(targetId) : false
-  invalidNode.value = targetId && targetVersion === active.value.id
-    && parent?.id !== targetId && !isDraggedDescendant && !canAttach(drag.id, targetId)
-    ? targetId : null
-  if (map && targetVersion === active.value.id && point) {
-    spatialPreview.value = spatialDropLayout(active.value, drag.id, point, map)
-  } else {
-    spatialPreview.value = null
-  }
-  const view = previewLayout.value?.view ?? spatialPreview.value?.view
-  if (view && dragPreviewView.value && view.zoom < dragPreviewView.value.zoom) {
-    dragPreviewView.value = clone(view)
-  }
-}
-function finishTreeDrag(event: PointerEvent) {
-  const drag = treeDrag.value
-  if (!drag || drag.pointerId !== event.pointerId) return
-  if (active.value.id !== drag.versionId) state.value.activeId = drag.versionId
-  if (drag.moved) moveTreeDrag(event)
-  const sourceVersionId = active.value.id
-  const previewView = dragPreviewView.value
-  const target = document.elementFromPoint(event.clientX, event.clientY)
-  const map = target?.closest<HTMLElement>('.mini-map')
-  const targetVersion = target?.closest('.version-card')?.getAttribute('data-version')
-  let committed = false
-  if (drag.moved && map && targetVersion === active.value.id) {
-    if (overNode.value && canAttach(drag.id, overNode.value)) {
-      const layout = previewLayout.value
-      committed = !!attachEntry(drag.id, overNode.value, layout ?? undefined)
-    } else if (spatialPreview.value?.valid && spatialPreview.value.nodeId === drag.id) {
-      const preview = spatialPreview.value
-      if (preview.kind === 'move') {
-        committed = placeRoot(active.value, drag.id, preview)
-      } else if (preview.kind === 'detach') {
-        committed = !!detachEntry(drag.id, preview)
-      }
-    }
-  }
-  const sourceVersion = versions.value.find((version) => version.id === sourceVersionId)
-  if (sourceVersion && previewView && previewView.zoom < mapViewFor(sourceVersion).zoom
-    && (active.value.id === sourceVersionId || !committed)) {
-    sourceVersion.mapView = clone(previewView)
-  }
-  if (committed) setSelectedNodes([drag.id])
-  if (drag.moved) {
-    suppressVersionClick = true
-    suppressTileClick = true
-    window.setTimeout(() => {
-      suppressVersionClick = false
-      suppressTileClick = false
-    }, 0)
-  }
-  treeDrag.value = null
-  draggedNode.value = null
-  draggedPosition.value = null
-  dragPreviewView.value = null
-  overNode.value = null
-  invalidNode.value = null
-  spatialPreview.value = null
-}
-function cancelTreeDrag(event: PointerEvent) {
-  const drag = treeDrag.value
-  if (!drag || drag.pointerId !== event.pointerId) return
-  const version = versions.value.find((item) => item.id === drag.versionId)
-  if (version && dragPreviewView.value && dragPreviewView.value.zoom < mapViewFor(version).zoom) {
-    version.mapView = clone(dragPreviewView.value)
-  }
-  treeDrag.value = null
-  draggedNode.value = null
-  draggedPosition.value = null
-  dragPreviewView.value = null
-  overNode.value = null
-  invalidNode.value = null
-  spatialPreview.value = null
 }
 function onKeydown(event: KeyboardEvent) {
   if (mergeMode.value && compareIds.value.length === 2) {
@@ -3289,8 +919,7 @@ onMounted(() => {
 onUnmounted(() => {
   peerRoom.close()
   for (const versionId of mapViewTimers.keys()) commitMapView(versionId)
-  cancelPanAnimation()
-  if (versionArrivalFrame) cancelAnimationFrame(versionArrivalFrame)
+  stopGraphAnimations()
   window.clearTimeout(versionClickTimer)
   window.clearTimeout(tileClickTimer)
   window.clearTimeout(tileTooltipTimer)
@@ -3345,204 +974,83 @@ function resetWorkspace() {
     state.value = clone(seed)
   }
 }
+function onVersionMenu(version: Version, event: MouseEvent) {
+  menu.value = { x: event.clientX, y: event.clientY, kind: 'version', versionId: version.id }
+  selectedNode.value = null
+  state.value.activeId = version.id
+}
+
+const cardModel: VersionCardModel = reactive({
+  active,
+  compareIds,
+  compareMode,
+  zoom,
+  overNode,
+  invalidNode,
+  hoveredNode,
+  selectedNodes,
+  draggedSubtreeIds,
+  draggedOriginalTile,
+  windowDimensions,
+  isReadOnly,
+  versionTiles,
+  duplicateValueLinks,
+  displayCardPosition,
+  cardHeight,
+  versionAuthorColor,
+  activeUsersFor,
+  descendantsCount,
+  isPreviewing,
+  previewLabel,
+  versionAction,
+  cardData,
+  mapViewport,
+  mapTransform,
+  tileStrokeColor,
+  tileStrokeWidth,
+  dragOverlayTiles,
+  handleVersionClick,
+  handleVersionDoubleClick,
+  onVersionContext,
+  onVersionMenu,
+  startMapPan,
+  zoomMap,
+  startMapTileGesture,
+  enterTile,
+  moveTileTooltip,
+  leaveTile,
+  onTileClick,
+  onTileDoubleClick,
+  onTileContext,
+  clientId: CLIENT_ID,
+})
 </script>
 
 <template>
   <main class="app-shell" :class="{ dark: darkMode }" @click.capture="handleAppClickCapture" @wheel="onWheel">
     <div class="workspace" :inert="mergeMode && compareIds.length === 2">
-      <aside class="sidebar" :class="{ collapsed: sidebarCollapsed }">
-        <div class="sidebar-head">
-          <span class="brand-mark"><Layers3 :size="19" :stroke-width="2.2" /></span>
-          <span class="brand-name">DSC</span>
-          <button class="quiet-icon sidebar-toggle" :title="sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'"
-            :aria-label="sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'" :aria-expanded="!sidebarCollapsed"
-            @click="sidebarCollapsed = !sidebarCollapsed"><ChevronDown :size="16" /></button>
-        </div>
-        <section class="side-section settings-section">
-          <button type="button" class="theme-toggle" @click="darkMode = !darkMode">
-            <component :is="darkMode ? Sun : Moon" :size="15" />
-            <span>{{ darkMode ? 'Light mode' : 'Dark mode' }}</span>
-          </button>
-        </section>
-        <section class="side-section session-section">
-          <div class="section-label">CURRENT ROOM</div>
-          <div class="current-room-name" :title="currentRoomName">{{ currentRoomName }}</div>
-          <div class="session-status" :class="`status-${roomStatus.state}`" role="status" aria-live="polite">
-            {{ roomStatus.state === 'hosting' ? 'Hosting' : roomStatus.state === 'connected' ? 'Connected' : roomStatus.message }}
-          </div>
-          <div class="session-actions">
-            <button type="button" class="session-button" @click="roomDialogOpen = true">Change Room</button>
-            <button type="button" class="session-button secondary" @click="copySessionInvite">Copy Invite</button>
-          </div>
-        </section>
-        <section class="side-section collaborators-section">
-          <div class="section-label">COLLABORATORS</div>
-          <div class="collaborator-list">
-            <button v-for="user in connectedUsers" :key="user.id" type="button" class="collaborator"
-              :disabled="!user.activeVersionId || !versions.some((version) => version.id === user.activeVersionId)"
-              :title="`${user.name} · ${user.activeVersionId ? displayVersionId(user.activeVersionId) : 'No active version'}`"
-              @click="focusCollaborator(user.id)">
-              <span class="collaborator-avatar" :style="{ '--collaborator-color': userColor(user.id) }" aria-hidden="true">
-                <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4" /><path d="M4.5 21a7.5 7.5 0 0 1 15 0" /></svg>
-              </span>
-              <span class="collaborator-info"><strong>{{ user.name }}<span v-if="user.id === CLIENT_ID"> (you)</span></strong>
-                <small>{{ user.activeVersionId && versions.some((version) => version.id === user.activeVersionId)
-                  ? displayVersionId(user.activeVersionId)
-                  : 'No active version' }}</small>
-              </span>
-            </button>
-          </div>
-        </section>
-        <div class="sidebar-fill"></div>
-        <section class="side-section interaction-section">
-          <div class="interaction-heading"><span class="section-label">INTERACTION LOG</span><small>LAST 10</small></div>
-          <ol v-if="recentInteractions.length" class="interaction-list">
-            <li v-for="entry in recentInteractions" :key="entry.id">
-              <span class="interaction-user" :style="{ color: userColor(entry.actorId) }">{{ entry.actorName }}</span>
-              <span class="interaction-action">{{ entry.action }}</span>
-              <button v-if="entry.ping" class="interaction-reference" type="button"
-                :title="`Focus ping by ${entry.actorName}`" @click="focusPingLocation(entry.ping)">Ping location</button>
-              <button v-if="entry.nodeId && entry.versionId
-                && versions.some((version) => version.id === entry.versionId && findNode(version.data, entry.nodeId!))"
-                class="interaction-reference" type="button" @click="navigateInteraction(entry, 'node')">
-                {{ entry.nodeLabel || 'Entry' }}
-              </button>
-              <button v-if="entry.versionId && versions.some((version) => version.id === entry.versionId)"
-                class="interaction-reference" type="button" @click="navigateInteraction(entry, 'version')">
-                {{ displayVersionId(entry.versionId) }}
-              </button>
-              <span class="interaction-time">{{ new Date(entry.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</span>
-            </li>
-          </ol>
-          <span v-else class="interaction-empty">Room actions appear here.</span>
-        </section>
-        <section class="side-section overview-section">
-          <div class="section-label">ROOM OVERVIEW</div>
-          <div class="metric-row"><span>Branches</span><strong>{{ branchCount }}</strong></div>
-          <div class="metric-row"><span>Versions</span><strong>{{ versions.length }}</strong></div>
-        </section>
-        <section class="side-section active-section">
-          <div class="section-label">YOUR ACTIVE VERSION</div>
-          <button type="button" class="active-version-card" title="Focus active version · F" @click="focusActive">
-            <div class="active-version-top"><span class="version-pip" :style="{ background: versionColor(active) }"></span><span> Branch {{ active.branch }} | {{ displayVersionId(active.id) }} | Step {{ active.step }}</span></div>
-            <strong>{{ active.change }}</strong>
-            <div class="active-meta"><span>Entries</span><strong>{{ activeNodes }}</strong></div>
-            <div class="active-meta"><span>Current step</span><strong>{{ String(active.step).padStart(2, '0') }}</strong></div>
-            <div class="active-meta"><span>Paths from here</span><strong>{{ activeChildren }}</strong></div>
-          </button>
-        </section>
-      </aside>
+      <WorkspaceSidebar :sidebar-collapsed="sidebarCollapsed" :dark-mode="darkMode" :current-room-name="currentRoomName"
+        :room-status="roomStatus" :connected-users="connectedUsers" :client-id="CLIENT_ID" :versions="versions"
+        :recent-interactions="recentInteractions" :branch-count="branchCount" :active="active"
+        :active-nodes="activeNodes" :active-children="activeChildren"
+        @toggle-sidebar="sidebarCollapsed = !sidebarCollapsed" @toggle-theme="darkMode = !darkMode"
+        @change-room="roomDialogOpen = true" @copy-invite="copySessionInvite" @focus-collaborator="focusCollaborator"
+        @focus-ping="focusPingLocation" @navigate="navigateInteraction" @focus-active="focusActive" />
 
       <section class="canvas-region">
         <div ref="graphCanvas" class="graph-canvas" :class="{ 'ping-mode': pingMode }" @contextmenu="onCanvasContext" @pointerdown.capture="handlePingPointer" @pointermove.capture="trackPingPointerMove" @pointerup.capture="clearPingPointer" @pointercancel.capture="clearPingPointer" @click.capture="handlePingClick" @click="onCanvasClick" @pointerdown="startCanvasPan" @pointermove="moveCanvasPan" @pointerup="endCanvasPan" @pointercancel="endCanvasPan">
           <div class="canvas-grid"></div>
           <div class="graph-world" :style="{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }">
-            <svg class="connection-layer" :width="graphBounds.width + 260" :height="graphBounds.height">
-              <defs>
-                <marker id="arrow" viewBox="0 0 10 10" refX="0" refY="5" :markerWidth="TERMINAL_ARROW_SIZE" :markerHeight="TERMINAL_ARROW_SIZE" markerUnits="strokeWidth" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke" stroke="#f5f7f4" stroke-width="0.8" stroke-linejoin="round" /></marker>
-              </defs>
-              <template v-for="version in visibleConnectionVersions.filter((item) => item.parentId && !isBranchCurve(item))" :key="`edge-${version.id}`">
-                <path :d="connectionPath(version)" class="connection-outline" fill="none" stroke="#f5f7f4" :stroke-width="connectionWidth(version) + 10" stroke-linecap="round" stroke-linejoin="round" />
-                <path :id="`version-connector-${version.id}`" :d="connectionPath(version)" fill="none" :stroke="versionColor(version)" :stroke-width="connectionWidth(version)" stroke-linecap="round" stroke-linejoin="round" :opacity="version.id === active.id || version.parentId === active.id ? 0.96 : 0.76" />
-              </template>
-              <template v-for="version in visibleConnectionVersions.filter((item) => item.parentId && isBranchCurve(item))" :key="`branch-edge-${version.id}`">
-                <path :d="connectionPath(version)" class="connection-outline" fill="none" stroke="#f5f7f4" :stroke-width="connectionWidth(version) + 10" stroke-linecap="round" stroke-linejoin="round" />
-                <path :id="`version-connector-${version.id}`" :d="connectionPath(version)" fill="none" :stroke="versionColor(version)" :stroke-width="connectionWidth(version)" stroke-linecap="round" stroke-linejoin="round" :opacity="version.id === active.id || version.parentId === active.id ? 0.96 : 0.76" />
-              </template>
-              <template v-for="version in visibleMergeConnectionVersions" :key="`merge-edge-${version.id}`">
-                <path :d="mergeConnectionPath(version)" class="connection-outline" fill="none" stroke="#f5f7f4"
-                  :stroke-width="connectionWidth(version) + 10" stroke-linecap="round" stroke-linejoin="round" />
-                <path :id="`merge-connector-${version.id}`" :d="mergeConnectionPath(version)" fill="none" :stroke="mergeConnectionColor(version)"
-                  :stroke-width="connectionWidth(version)" stroke-linecap="round" stroke-linejoin="round"
-                  :opacity="version.id === active.id || version.mergeSourceId === active.id ? 0.96 : 0.76" />
-              </template>
-              <template v-for="version in visibleVersions.filter((item) => !versions.some((child) => child.parentId === item.id))" :key="`tail-${version.id}`">
-                <path :d="`M ${cardPosition(version).x + windowDimensions.width} ${cardPosition(version).y + cardHeight(version) / 2} H ${cardPosition(version).x + windowDimensions.width + terminalTailEnd(version)}`" class="connection-outline" fill="none" stroke="#f5f7f4" :stroke-width="connectionWidth(version) + 10" stroke-linecap="butt" />
-                <path :d="`M ${cardPosition(version).x + windowDimensions.width} ${cardPosition(version).y + cardHeight(version) / 2} H ${cardPosition(version).x + windowDimensions.width + terminalTailEnd(version)}`" fill="none" :stroke="versionColor(version)" :stroke-width="connectionWidth(version)" stroke-linecap="butt" marker-end="url(#arrow)" />
-              </template>
-              <text v-for="version in visibleConnectionVersions.filter((item) => item.parentId)" :key="`connector-symbol-${version.id}`"
-                class="connector-symbol" aria-hidden="true" text-anchor="middle" dominant-baseline="central"
-                :x="connectorLabelPosition(versions.find((item) => item.id === version.parentId)!, version).x"
-                :y="connectorLabelPosition(versions.find((item) => item.id === version.parentId)!, version).y">
-                {{ versionAction(version).symbol }}
-              </text>
-              <text v-for="version in visibleMergeConnectionVersions" :key="`merge-symbol-${version.id}`"
-                class="connector-symbol" aria-hidden="true" text-anchor="middle" dominant-baseline="central"
-                :x="mergeConnectorLabelPosition(version).x" :y="mergeConnectorLabelPosition(version).y">⋈</text>
-            </svg>
+            <VersionConnections :graph-bounds="graphBounds" :window-dimensions="windowDimensions" :versions="versions"
+              :visible-versions="visibleVersions" :visible-connection-versions="visibleConnectionVersions"
+              :visible-merge-connection-versions="visibleMergeConnectionVersions" :active-id="active.id"
+              :connection-path="connectionPath" :connection-width="connectionWidth" :is-branch-curve="isBranchCurve"
+              :merge-connection-path="mergeConnectionPath" :merge-connection-color="mergeConnectionColor"
+              :card-position="cardPosition" :card-height="cardHeight" :terminal-tail-end="terminalTailEnd"
+              :connector-label-position="connectorLabelPosition" :merge-connector-label-position="mergeConnectorLabelPosition"
+              :version-action="versionAction" />
 
-            <article v-for="version in visibleVersions" :key="version.id" class="version-card" :class="{ active: version.id === active.id, compared: compareIds.includes(version.id), 'compare-pick': compareMode, compact: zoom < 0.66, previewing: isPreviewing(version), 'root-version': version.id === 'v0' }"
-              :data-version="version.id" :style="{ left: `${displayCardPosition(version).x}px`, top: `${displayCardPosition(version).y}px`, width: `${windowDimensions.width}px`, height: `${cardHeight(version)}px`, '--branch-color': versionColor(version), '--user-color': userColor(CLIENT_ID), '--author-color': versionAuthorColor(version) }"
-              @click="handleVersionClick(version)" @dblclick.stop="handleVersionDoubleClick(version, $event)" @contextmenu="onVersionContext(version, $event)" :data-over="overNode === version.id">
-              <span v-for="(user, index) in activeUsersFor(version.id)" :key="`active-${user.id}`"
-                class="version-user-outline" :style="{ borderColor: user.color, inset: `${-2 - index * 3}px` }"></span>
-              <div v-if="version.id !== 'v0'" class="version-card-head">
-                <span class="branch-mark" :style="{ background: versionColor(version) }"></span>
-                <span class="version-header-id">{{ version.branch }} | {{ displayVersionId(version.id).replace(/^v/, 'V') }} | S{{ version.step }} |</span>
-                <strong class="version-action">{{ version.change }}</strong>
-                <span class="version-count">({{ descendantsCount(version.data) }} Entries)</span>
-                <button class="card-menu quiet-icon" title="Version actions" @click.stop="menu = { x: $event.clientX, y: $event.clientY, kind: 'version', versionId: version.id }; selectedNode = null; state.activeId = version.id"><MoreHorizontal :size="17" /></button>
-              </div>
-              <div v-if="isPreviewing(version)" class="preview-badge">{{ previewLabel() }}</div>
-              <div v-if="isReadOnly" class="overview-map">
-                <div class="overview-action">
-                  <span class="overview-action-symbol">{{ versionAction(version).symbol }}</span>
-                  <strong>{{ versionAction(version).label }}</strong>
-                </div>
-                <div v-if="version.change" class="overview-action-detail">{{ version.change }}</div>
-                <div class="overview-stats">
-                  <span><b>{{ descendantsCount(version.data) }}</b> entries</span>
-                  <span><b>{{ version.data.length }}</b> treemaps</span>
-                </div>
-              </div>
-              <div v-else class="mini-map" :class="{ empty: !cardData(version).length, 'root-map': version.id === 'v0' }"
-                @pointerdown="startMapPan($event, version)" @wheel.stop="zoomMap($event, version)">
-                <template v-if="cardData(version).length">
-                  <svg :viewBox="`0 0 ${mapViewport(version).width} ${mapViewport(version).height}`" preserveAspectRatio="none" class="treemap-svg">
-                    <g :transform="mapTransform(version)">
-                      <rect v-for="tile in versionTiles.get(version.id) ?? []" :key="tile.id"
-                        :x="tile.x" :y="tile.y" :width="tile.width" :height="tile.height"
-                        :class="['tree-tile', `depth-${tile.depth}`, { 'is-selected': selectedNodes.includes(tile.id) && version.id === active.id, 'is-source': draggedSubtreeIds.includes(tile.id) && version.id === active.id, 'is-over': overNode === tile.id && version.id === active.id, 'is-invalid': invalidNode === tile.id && version.id === active.id, 'is-hovered': hoveredNode?.versionId === version.id && hoveredNode.nodeId === tile.id && !draggedSubtreeIds.includes(tile.id) }]"
-                        :data-node="tile.id" :fill="tile.depth === 0 ? '#deebe4' : tile.depth % 2 ? '#c1d9cc' : '#a9cab9'"
-                        :style="{ '--tile-stroke': tileStrokeColor(version.id, tile.id), '--tile-stroke-width': `${tileStrokeWidth(version.id, tile.id)}px` }"
-                        @pointerdown.stop="startMapTileGesture($event, version, tile.id)"
-                        @pointerenter="enterTile($event, version, tile.id)"
-                        @pointermove="moveTileTooltip($event, version.id, tile.id)"
-                        @pointerleave="leaveTile(version.id, tile.id)"
-                        @click.stop="onTileClick(version, tile.id, $event)"
-                        @dblclick.stop="onTileDoubleClick(version, tile.id)"
-                        @contextmenu="version.id === active.id && !isReadOnly && onTileContext($event, tile.id)">
-                      </rect>
-                      <path v-for="link in duplicateValueLinks.get(version.id) ?? []" :key="link.id"
-                        :d="link.path" fill="none" stroke="#748a7d" stroke-width="1.5"
-                        stroke-dasharray="4 3" opacity=".72" pointer-events="none" />
-                      <g v-for="tile in dragOverlayTiles(version)" :key="`drag-overlay-${tile.id}`" pointer-events="none">
-                        <rect :x="tile.x" :y="tile.y" :width="tile.width" :height="tile.height"
-                          :class="['dragged-overlay', `depth-${tile.depth}`]"
-                          :fill="tile.depth === 0 ? '#deebe4' : tile.depth % 2 ? '#c1d9cc' : '#a9cab9'" />
-                        <text v-if="labelFontSize(tile) >= 7" :x="tile.x + 5"
-                          :y="tile.y + labelFontSize(tile) + 4" :font-size="labelFontSize(tile)" class="tile-label">
-                          {{ tile.label }}
-                        </text>
-                      </g>
-                      <text v-for="tile in (versionTiles.get(version.id) ?? []).filter((item) =>
-                        labelFontSize(item) >= 7 && !dragOverlayTiles(version).some((overlay) => overlay.id === item.id))" :key="`label-${tile.id}`"
-                        :x="tile.x + 5" :y="tile.y + labelFontSize(tile) + 4" :font-size="labelFontSize(tile)" class="tile-label">{{ tile.label }}</text>
-                      <rect v-if="version.id === active.id && draggedOriginalTile" class="drag-source-ghost"
-                        :x="draggedOriginalTile.x" :y="draggedOriginalTile.y"
-                        :width="draggedOriginalTile.width" :height="draggedOriginalTile.height"
-                        :rx="3" fill="transparent" :stroke="tileStrokeColor(version.id, draggedOriginalTile.id)"
-                        stroke-dasharray="4 3" :stroke-width="tileStrokeWidth(version.id, draggedOriginalTile.id)"
-                        pointer-events="none"></rect>
-                    </g>
-                  </svg>
-                </template>
-                <div v-else class="empty-map" :class="{ 'root-empty': version.id === 'v0' }">
-                  <span v-if="version.id === 'v0'" class="empty-set" aria-label="Empty set">∅</span>
-                  <template v-else><span class="empty-cross">+</span><span>Empty structure</span></template>
-                </div>
-              </div>
-            </article>
+            <VersionCard v-for="version in visibleVersions" :key="version.id" :version="version" :model="cardModel" />
             <svg class="copy-connection-layer" :width="graphBounds.width + 260" :height="graphBounds.height">
               <g v-for="(link, index) in visibleCopyLinks" :key="`copy-${index}`" class="copy-link-group">
                 <path :d="copyLinkPath(link)" class="copy-link" fill="none" stroke="#cf7b32"
@@ -3586,160 +1094,7 @@ function resetWorkspace() {
       </section>
     </div>
 
-    <div v-if="compareMode || mergeMode || showOverview"
-      :role="mergeMode && compareIds.length === 2 ? 'dialog' : undefined"
-      :aria-modal="mergeMode && compareIds.length === 2 ? 'true' : undefined"
-      :aria-label="mergeMode ? 'Branch merge' : 'Version comparison'"
-      :class="{ 'comparison-overlay': compareIds.length === 2, 'merge-overlay': mergeMode && compareIds.length === 2 }"
-      @pointerdown.stop @pointerup.stop @pointermove.stop @pointercancel.stop @click.stop
-      @dblclick.stop @contextmenu.stop @wheel.stop @touchmove.stop>
-      <div class="compare-drawer" :class="{ open: compareIds.length === 2, 'merge-view': mergeMode }">
-      <div class="drawer-head">
-        <div>
-          <span class="section-label">{{ mergeMode ? 'BRANCH MERGE' : 'VERSION COMPARISON' }}</span>
-          <strong>{{ compareIds.length === 2
-            ? `${displayVersionId(compareIds[0]!)} ${mergeMode ? '→' : '↔'} ${displayVersionId(compareIds[1]!)}`
-            : mergeMode ? 'Choose source, then target' : 'Choose two versions' }}</strong>
-          </div>
-        <button class="quiet-icon" title="Close comparison" aria-label="Abort and close" @click="closeVersionSelection"><X :size="17" /></button>
-      </div>
-      <div v-if="compareIds.length === 2" class="comparison-content">
-        <template v-if="mergeMode">
-          <div class="merge-layout">
-            <div class="merge-left-column">
-              <section class="merge-preview">
-                <header><strong>Resulting treemap</strong><button class="small-button merge-reset" type="button" @click="resetMerge"><RotateCcw :size="13" /> Reset</button></header>
-                <div class="merge-preview-body">
-                  <svg v-if="mergePreviewTiles.length" class="merge-preview-canvas" :viewBox="mergePreviewViewBox"
-                    preserveAspectRatio="xMidYMid meet" role="img" aria-label="Interactive resulting hierarchy preview"
-                    @pointermove="moveMergeDrag" @pointerup="finishMergeDrag" @pointercancel="cancelMergeDrag">
-                    <g v-for="tile in mergePreviewTiles" :key="tile.id">
-                      <rect :x="tile.x" :y="tile.y" :width="tile.width" :height="tile.height"
-                        :class="['merge-preview-tile', `depth-${tile.depth}`, { 'drop-target': mergeDropTarget === tile.id }]"
-                        :data-node="tile.id" :fill="tile.depth === 0 ? '#deebe4' : tile.depth % 2 ? '#c1d9cc' : '#a9cab9'"
-                        @pointerdown.stop="startMergeDrag($event, tile.id)" @click.stop="onMergeTileClick(tile.id)" />
-                      <text v-if="labelFontSize(tile) >= 7" :x="tile.x + 5"
-                        :y="tile.y + labelFontSize(tile) + 4" :font-size="labelFontSize(tile)" class="merge-preview-label">{{ tile.label }}</text>
-                    </g>
-                  </svg>
-                  <div v-else class="merge-preview-empty">Pick entries from the list to build the resulting hierarchy.</div>
-                </div>
-              </section>
-              <section class="merge-entry-list">
-                <header><strong>Entry selection</strong><span>Pick entries and choose their result parent</span></header>
-                <div class="merge-list-head">
-                  <strong>{{ mergeResult?.source.branch }} source</strong>
-                  <strong>Result</strong>
-                  <strong>{{ mergeResult?.target.branch }} target</strong>
-                </div>
-                <div class="merge-list-body">
-                  <div v-for="row in mergeRows" :key="row.id" class="merge-view-row"
-                    :class="{ shared: row.shared, omitted: !row.resultEntry }">
-                    <div class="merge-entry-cell">
-                      <template v-if="row.sourceEntry">
-                        <small>{{ row.sourceEntry.path.split('/').slice(0, -1).join(' / ') }}</small>
-                        <strong>{{ row.sourceEntry.node.value }}</strong>
-                      </template>
-                      <span v-else class="merge-empty">—</span>
-                    </div>
-                    <div class="merge-result-cell">
-                      <button type="button" :class="{ selected: !!row.resultEntry }"
-                        @click="setMergePicked(row.id, true)">Pick</button>
-                      <button type="button" :class="{ selected: !row.resultEntry }"
-                        @click="setMergePicked(row.id, false)">Omit</button>
-                      <select v-if="row.resultEntry" :value="row.resultEntry.parentId ?? ''"
-                        :aria-label="`Parent for ${row.resultEntry.node.value} in merged result`"
-                        @change="onMergeParentChange(row.id, $event)">
-                        <option value="">Root</option>
-                        <option v-for="[parentId, parent] in mergeParentOptions(row.id)" :key="parentId" :value="parentId">
-                          {{ parent.path }}
-                        </option>
-                      </select>
-                      <strong>{{ row.resultEntry?.node.value ?? row.label }}</strong>
-                    </div>
-                    <div class="merge-entry-cell">
-                      <template v-if="row.targetEntry">
-                        <small>{{ row.targetEntry.path.split('/').slice(0, -1).join(' / ') }}</small>
-                        <strong>{{ row.targetEntry.node.value }}</strong>
-                      </template>
-                      <span v-else class="merge-empty">—</span>
-                    </div>
-                  </div>
-                </div>
-              </section>
-            </div>
-            <aside class="merge-changes">
-              <header><span class="section-label">SOURCE CHANGES</span>
-              <strong>{{ differentEntryCount }} different {{ differentEntryCount === 1 ? 'entry' : 'entries' }}</strong>
-              </header>
-              <div v-if="comparison.length" class="diff-list">
-                <div v-for="change in comparison" :key="change.id" class="diff-item" :class="change.kind.toLowerCase()">
-                  <span>{{ change.kind }}</span><strong>{{ change.label }}</strong>
-                </div>
-              </div>
-              <div v-else class="no-diff"><Check :size="17" /> These versions are structurally identical.</div>
-            </aside>
-          </div>
-        </template>
-        <template v-else>
-          <div class="compare-layout">
-            <div class="compare-summary">
-              <span class="compare-count">{{ differentEntryCount }}</span>
-              <span>{{ differentEntryCount === 1 ? 'entry differs' : 'entries differ' }}</span>
-              <button type="button" class="small-button difference-toggle" :aria-pressed="showDifferenceColors"
-                @click="showDifferenceColors = !showDifferenceColors">
-                {{ showDifferenceColors ? 'Hide' : 'Show' }} difference highlights
-              </button>
-            </div>
-            <div class="comparison-panels">
-              <section v-for="(panel, panelIndex) in comparisonPanels" :key="panel.id" class="comparison-panel">
-                <header><span>{{ panel.label }}</span><strong>{{ panel.version.branch }} · S{{ panel.version.step }}</strong></header>
-                <svg :viewBox="comparisonViewBox" role="img" :aria-label="`${panel.label} treemap comparison`">
-                  <rect v-for="ghost in comparisonGhosts(panelIndex)" :key="`ghost-${ghost.id}`"
-                    :x="ghost.x" :y="ghost.y" :width="ghost.width" :height="ghost.height"
-                    :data-node="ghost.id" role="button" tabindex="0"
-                    :class="['comparison-ghost', panelIndex === 0 ? 'added' : 'removed', { linked: comparisonSelectedNode === ghost.id }]"
-                    :aria-label="`${ghost.label} is absent from ${panel.label}`"
-                    @click="selectComparedNode(ghost.id)"
-                    @keydown.enter.prevent="selectComparedNode(ghost.id)" @keydown.space.prevent="selectComparedNode(ghost.id)" />
-                  <rect v-for="tile in panel.tiles" :key="tile.id"
-                    :x="tile.x" :y="tile.y" :width="tile.width" :height="tile.height"
-                    :data-node="tile.id" role="button" tabindex="0"
-                    :class="['comparison-tile', ...comparisonKinds(tile.id), { linked: comparisonSelectedNode === tile.id }]"
-                    :aria-label="`${tile.label}, ${comparisonKinds(tile.id).join(' and ')}`"
-                    @click="selectComparedNode(tile.id)"
-                    @keydown.enter.prevent="selectComparedNode(tile.id)" @keydown.space.prevent="selectComparedNode(tile.id)" />
-                  <text v-for="tile in panel.tiles.filter((item) => item.width > 35 && item.height > 18)" :key="`label-${tile.id}`"
-                    :x="tile.x + 5" :y="tile.y + 16" :class="['comparison-label', { linked: comparisonSelectedNode === tile.id }]">{{ tile.label }}</text>
-                </svg>
-              </section>
-            </div>
-            <div class="comparison-legend" aria-label="Difference legend">
-              <span class="unchanged">Unchanged</span><span class="added">Added</span><span class="removed">Removed</span>
-              <span class="modified">Modified</span><span class="relocated">Relocated / hierarchy changed</span>
-            </div>
-            <div v-if="comparison.length" class="diff-list">
-              <div v-for="change in comparison" :key="change.id" class="diff-item" :class="change.kind.toLowerCase()"
-                @click="selectComparedNode(change.id)">
-                <span>{{ change.kind }}</span><strong>{{ change.label }}</strong>
-              </div>
-            </div>
-            <div v-else class="no-diff"><Check :size="17" /> These versions are structurally identical.</div>
-          </div>
-        </template>
-        <div v-if="mergeMode" class="merge-confirm-row">
-          <div class="merge-actions">
-            <button class="cancel-button" @click="closeVersionSelection">Abort merge</button>
-            <button class="primary-button" :disabled="!mergeResult" @click="confirmMerge">
-              <Check :size="15" /> Confirm merge
-            </button>
-          </div>
-        </div>
-        <div v-else class="no-diff"><Check :size="17" /> These versions are structurally identical.</div>
-      </div>
-      <div v-else class="drawer-empty"><Search :size="18" /><span>Select the first version, then the second.</span></div>
-    </div>
-    </div>
+    <VersionComparison :model="comparisonModel" @confirm="confirmMerge" />
 
     <div v-if="menu" ref="contextMenuElement" class="context-menu" :style="{ left: `${contextMenuPosition.x}px`, top: `${contextMenuPosition.y}px` }" @click.stop>
       <template v-if="menu.kind === 'version'">

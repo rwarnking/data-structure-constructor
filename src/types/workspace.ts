@@ -1,6 +1,17 @@
 export type TreeNode = { id: string; value: string; description?: string; children: TreeNode[] }
 export type MapView = { zoom: number; panX: number; panY: number; manual: boolean }
 export type Tile = { id: string; label: string; x: number; y: number; width: number; height: number; depth: number }
+export type SpatialPreview = {
+  x: number
+  y: number
+  versionId: string
+  nodeId: string
+  kind: 'move' | 'detach' | 'noop' | 'invalid'
+  valid: boolean
+  data: TreeNode[]
+  positions: Record<string, { x: number; y: number }>
+  view: MapView
+}
 export type CopyLink = { sourceVersionId: string; sourceNodeId: string; targetVersionId: string; targetNodeId: string }
 export type Version = {
   id: string

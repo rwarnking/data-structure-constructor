@@ -1,6 +1,10 @@
 import type { MapView, Tile, TreeNode } from '../types/workspace'
 import { nodeParentIds } from './tree'
 
+export function labelFontSize(tile: Tile): number {
+  return Math.max(0, Math.min(24, tile.height - 6, (tile.width - 10) / (tile.label.length * 0.58)))
+}
+
 export const CARD_WIDTH = 260
 export const CARD_HEIGHT = 260
 export const TREE_MAP_HEIGHT = CARD_HEIGHT - 40

@@ -8,6 +8,7 @@
     "dev:api": "node server.mjs",
     "dev:web": "vite --host 127.0.0.1",
     "build": "vue-tsc -b && vite build",
+    "test": "node --test tests/workspace.test.mjs",
     "preview": "vite preview",
     "start": "node server.mjs --static"
   },

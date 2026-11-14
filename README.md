@@ -25,11 +25,14 @@ npm install
 npm run dev
 ```
 
-The application entry point is `src/App.vue`; the workspace lives in `src/views/`.
-Dialogs are in `src/components/`, shared workspace types in `src/types/`, and
-tree, layout, and data-validation helpers in `src/utils/`. Peer connectivity is
-implemented in `src/collaboration.ts`. Workspace and interaction state remain
-local to the workspace view.
+The application entry point is `src/App.vue`, with workspace composition in
+`src/views/` and UI in `src/components/`. The `src/composables/` directory
+contains the workspace's history, hierarchy editing, graph, comparison, and
+collaboration controllers. Room persistence is in `src/services/`, shared types
+are in `src/types/`, and tree, layout, and validation helpers are in `src/utils/`.
+Peer connectivity is implemented in `src/collaboration.ts`.
+
+Run the focused workspace regression tests with `npm test`.
 
 The Vite UI runs at `http://127.0.0.1:5173`. Room state is persisted in browser storage in both development and deployed builds; the local workspace API is not used for room data.
 
