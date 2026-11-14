@@ -15,13 +15,15 @@ export function useGraphCamera(options: {
   pan: Ref<{ x: number; y: number }>
   canvasSize: Ref<{ width: number; height: number }>
   windowDimensions: ComputedRef<{ width: number; height: number }>
+  suppressClicks: () => void
 }) {
-  const { versions, active, state, compareIds, draggedVersionId, zoom, pan, canvasSize, windowDimensions } = options
+  const { versions, active, state, compareIds, draggedVersionId, zoom, pan, canvasSize, windowDimensions, suppressClicks } = options
+  const focusedVersionId = ref<string | null>(null)
   const versionArrival = ref<{ versionId: string; from: { x: number; y: number }; progress: number } | null>(null)
   let versionArrivalFrame = 0
   let panAnimationFrame: number | null = null
   const draggingCanvas = ref(false)
-  const dragOrigin = ref({ x: 0, y: 0, panX: 0, panY: 0 })
+  const dragOrigin = ref({ x: 0, y: 0, panX: 0, panY: 0, moved: false })
   const maxStep = computed(() => Math.max(...versions.value.map((version) => version.step)))
   const maxLane = computed(() => Math.max(...versions.value.map((version) => version.lane)))
 
@@ -76,6 +78,8 @@ export function useGraphCamera(options: {
     if (zoom.value < fitZoom.value) fitGraph()
   })
   function zoomAt(nextZoom: number, x = canvasSize.value.width / 2, y = canvasSize.value.height / 2) {
+    focusedVersionId.value = null
+    suppressClicks()
     cancelPanAnimation()
     if (nextZoom <= fitZoom.value) {
       fitGraph()
@@ -89,6 +93,7 @@ export function useGraphCamera(options: {
   function zoomIn() { zoomAt(zoom.value * 1.25) }
   function zoomOut() { zoomAt(zoom.value / 1.25) }
   function fitGraph() {
+    focusedVersionId.value = null
     const targetZoom = fitZoom.value
     animateCamera(targetZoom, {
       x: (canvasSize.value.width - graphBounds.value.width * targetZoom) / 2,
@@ -96,23 +101,32 @@ export function useGraphCamera(options: {
     })
   }
   function startCanvasPan(event: PointerEvent) {
-    if (event.button !== 0
-      || (event.target as HTMLElement).closest('button, .version-card, .tree-tile, .copy-link-hit')) return
+    const target = event.target as HTMLElement
+    const card = target.closest<HTMLElement>('.version-card')
+    if (event.button !== 0 || target.closest('button, .tree-tile, .copy-link-hit')
+      || (card && (card.dataset.version !== focusedVersionId.value || !target.closest('.mini-map')))) return
     cancelPanAnimation()
     draggingCanvas.value = true
-    dragOrigin.value = { x: event.clientX, y: event.clientY, panX: pan.value.x, panY: pan.value.y }
+    dragOrigin.value = { x: event.clientX, y: event.clientY, panX: pan.value.x, panY: pan.value.y, moved: false }
     ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
   }
   function moveCanvasPan(event: PointerEvent) {
     if (!draggingCanvas.value) return
+    if (!dragOrigin.value.moved && Math.hypot(event.clientX - dragOrigin.value.x, event.clientY - dragOrigin.value.y) <= 3) return
+    dragOrigin.value.moved = true
+    focusedVersionId.value = null
     pan.value = { x: dragOrigin.value.panX + event.clientX - dragOrigin.value.x, y: dragOrigin.value.panY + event.clientY - dragOrigin.value.y }
   }
-  function endCanvasPan() { draggingCanvas.value = false }
+  function endCanvasPan() {
+    if (draggingCanvas.value && dragOrigin.value.moved) suppressClicks()
+    draggingCanvas.value = false
+  }
   function onWheel(event: WheelEvent) {
     event.preventDefault()
     zoomAt(zoom.value * Math.exp(-event.deltaY * 0.0012))
   }
   function focusVersion(version: Version) {
+    focusedVersionId.value = version.id
     const position = cardPosition(version)
     const availableWidth = Math.max(1, canvasSize.value.width - 100)
     const availableHeight = Math.max(1, canvasSize.value.height - 100)
@@ -179,6 +193,7 @@ export function useGraphCamera(options: {
       && Math.abs(centerY - canvasSize.value.height / 2) < 2
   }
   function panToVersion(version: Version, centerImmediately: boolean) {
+    focusedVersionId.value = centerImmediately ? version.id : null
     cancelPanAnimation()
     const position = cardPosition(version)
     const width = windowDimensions.value.width * zoom.value
@@ -224,7 +239,7 @@ export function useGraphCamera(options: {
     if (versionArrivalFrame) cancelAnimationFrame(versionArrivalFrame)
   }
 
-  return { cardPosition, cardHeight, displayCardPosition, startVersionArrival, graphBounds,
+  return { focusedVersionId, cardPosition, cardHeight, displayCardPosition, startVersionArrival, graphBounds,
     visibleVersions, visibleConnectionVersions, visibleMergeConnectionVersions, zoomAt, zoomIn, zoomOut, fitGraph,
     startCanvasPan, moveCanvasPan, endCanvasPan, onWheel, focusVersion, focusActive, animateCamera,
     isVersionCentered, panToVersion, stopGraphAnimations }

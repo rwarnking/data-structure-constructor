@@ -1,6 +1,6 @@
 export type TreeNode = { id: string; value: string; description?: string; children: TreeNode[] }
 export type MapView = { zoom: number; panX: number; panY: number; manual: boolean }
-export type Tile = { id: string; label: string; x: number; y: number; width: number; height: number; depth: number }
+export type Tile = { id: string; label: string; x: number; y: number; width: number; height: number; depth: number; hasChildren: boolean }
 export type SpatialPreview = {
   x: number
   y: number

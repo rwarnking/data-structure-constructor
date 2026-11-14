@@ -19,9 +19,10 @@ export function useCollaboration(options: {
   roomDataKey: (room: string) => string
   reflowLayout: () => void
   fitGraph: () => void
+  followVersion: (version: Version) => void
   notify: (message: string) => void
 }) {
-  const { clientId: CLIENT_ID, state, active, selectedNodes, currentRoomName, graphCanvas, pan, zoom, normalizeState, roomDataKey, reflowLayout, fitGraph, notify } = options
+  const { clientId: CLIENT_ID, state, active, selectedNodes, currentRoomName, graphCanvas, pan, zoom, normalizeState, roomDataKey, reflowLayout, fitGraph, followVersion, notify } = options
   const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
   const animalNames = [
     'Badger', 'Bison', 'Capybara', 'Dolphin', 'Falcon', 'Fox', 'Gecko', 'Hare',
@@ -260,6 +261,7 @@ export function useCollaboration(options: {
       return
     }
     const versionsById = new Map(state.value.versions.map((version) => [version.id, version]))
+    const newVersions: Version[] = []
     let changed = false
     for (const change of message.versions) {
       if (change && isRevision(change.revision)) collaborationMetadata.clock = Math.max(collaborationMetadata.clock, change.revision.clock)
@@ -297,6 +299,7 @@ export function useCollaboration(options: {
       const currentRevision = collaborationMetadata.versions[change.version.id]
       const removedRevision = collaborationMetadata.removed[change.version.id]
       if (!revisionIsNewer(change.revision, currentRevision) || revisionIsNewer(removedRevision, change.revision)) continue
+      if (!versionsById.has(change.version.id) && change.revision.actor !== CLIENT_ID) newVersions.push(change.version)
       collaborationMetadata.versions[change.version.id] = change.revision
       delete collaborationMetadata.removed[change.version.id]
       versionsById.set(change.version.id, change.version)
@@ -355,6 +358,14 @@ export function useCollaboration(options: {
     state.value.versions = [...versionsById.values()].sort((left, right) =>
       left.step - right.step || left.id.localeCompare(right.id))
     reflowLayout()
+    let followId = state.value.activeId
+    while (true) {
+      const next = newVersions.filter((version) => version.parentId === followId && versionsById.has(version.id))
+        .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))[0]
+      if (!next) break
+      followId = next.id
+    }
+    if (followId !== state.value.activeId) followVersion(versionsById.get(followId)!)
     lastObservedState = JSON.stringify(state.value)
     applyingRemoteState = true
     persistCollaborationMetadata()
@@ -367,26 +378,42 @@ export function useCollaboration(options: {
     const packet = message as { type?: string }
     if (packet.type === 'sync-request') {
       sendSyncSnapshot(reply)
+      reply(presenceMessage(CLIENT_ID, userName.value, active.value.id, selectedNodes.value))
+      for (const [id, user] of Object.entries(remoteUsers.value)) {
+        reply(presenceMessage(id, user.name, user.activeVersionId, user.selectedNodeIds))
+      }
     } else if (packet.type === 'sync-snapshot') {
       applySyncSnapshot(packet as SyncSnapshot)
     } else if (packet.type === 'sync-delta') {
       applySyncDelta(packet as SyncDelta)
     } else if (packet.type === 'presence') {
       const presence = message as { userId?: unknown; name?: unknown; activeVersionId?: unknown; selectedNodeIds?: unknown }
-      if (typeof presence.userId !== 'string' || !presence.userId || presence.userId === CLIENT_ID
+      if (typeof presence.userId !== 'string' || !presence.userId
         || !(typeof presence.activeVersionId === 'string' || presence.activeVersionId === null)
         || !Array.isArray(presence.selectedNodeIds)
         || !presence.selectedNodeIds.every((id) => typeof id === 'string')) return
+      const requestedName = typeof presence.name === 'string' && presence.name.trim()
+        ? presence.name.trim().slice(0, 32)
+        : animalForUser(presence.userId)
+      if (presence.userId === CLIENT_ID) {
+        if (!peerRoom.isHosting()) userName.value = requestedName
+        return peerRoom.isHosting() ? false : undefined
+      }
+      const name = peerRoom.isHosting()
+        ? remoteUsers.value[presence.userId]?.name ?? availableName(requestedName)
+        : requestedName
       remoteUsers.value = {
         ...remoteUsers.value,
         [presence.userId]: {
-          name: typeof presence.name === 'string' && presence.name.trim()
-            ? presence.name.trim().slice(0, 32)
-            : animalForUser(presence.userId),
+          name,
           activeVersionId: presence.activeVersionId,
           selectedNodeIds: presence.selectedNodeIds,
           lastSeen: Date.now(),
         },
+      }
+      if (peerRoom.isHosting()) {
+        peerRoom.send(presenceMessage(presence.userId, name, presence.activeVersionId, presence.selectedNodeIds))
+        return false
       }
     } else if (packet.type === 'presence-leave') {
       const userId = (message as { userId?: unknown }).userId
@@ -406,15 +433,24 @@ export function useCollaboration(options: {
     }
   }
 
+  function availableName(requested: string) {
+    const used = new Set([userName.value, ...Object.values(remoteUsers.value).map((user) => user.name)]
+      .map((name) => name.toLocaleLowerCase()))
+    if (!used.has(requested.toLocaleLowerCase())) return requested
+    for (let index = 2; ; index++) {
+      const suffix = ` ${index}`
+      const candidate = `${requested.slice(0, 32 - suffix.length)}${suffix}`
+      if (!used.has(candidate.toLocaleLowerCase())) return candidate
+    }
+  }
+
+  function presenceMessage(userId: string, name: string, activeVersionId: string | null, selectedNodeIds: string[]) {
+    return { type: 'presence', userId, name, activeVersionId, selectedNodeIds }
+  }
+
   function publishPresence() {
     if (!collaborationRoom) return
-    peerRoom.send({
-      type: 'presence',
-      userId: CLIENT_ID,
-      name: userName.value.trim() || animalForUser(CLIENT_ID),
-      activeVersionId: active.value.id,
-      selectedNodeIds: selectedNodes.value,
-    })
+    peerRoom.send(presenceMessage(CLIENT_ID, userName.value.trim() || animalForUser(CLIENT_ID), active.value.id, selectedNodes.value))
   }
   function showPing(ping: Ping) {
     pings.value = [...pings.value.filter((item) => item.id !== ping.id), ping]

@@ -2,7 +2,7 @@
 import { toRefs, type UnwrapNestedRefs } from 'vue'
 import { Check, RotateCcw, Search, X } from '@lucide/vue'
 import type { useVersionComparison } from '../composables/useVersionComparison'
-import { labelFontSize } from '../utils/treemap'
+import TileLabel from './TileLabel.vue'
 import { displayVersionId } from '../utils/versions'
 
 const props = defineProps<{ model: UnwrapNestedRefs<ReturnType<typeof useVersionComparison>> }>()
@@ -43,8 +43,7 @@ const { compareMode, mergeMode, showOverview, compareIds, closeVersionSelection,
                       :class="['merge-preview-tile', `depth-${tile.depth}`, { 'drop-target': mergeDropTarget === tile.id }]"
                       :data-node="tile.id" :fill="tile.depth === 0 ? '#deebe4' : tile.depth % 2 ? '#c1d9cc' : '#a9cab9'"
                       @pointerdown.stop="startMergeDrag($event, tile.id)" @click.stop="onMergeTileClick(tile.id)" />
-                    <text v-if="labelFontSize(tile) >= 7" :x="tile.x + 5"
-                      :y="tile.y + labelFontSize(tile) + 4" :font-size="labelFontSize(tile)" class="merge-preview-label">{{ tile.label }}</text>
+                    <TileLabel :tile="tile" class="merge-preview-label" />
                   </g>
                 </svg>
                 <div v-else class="merge-preview-empty">Pick entries from the list to build the resulting hierarchy.</div>
@@ -134,8 +133,8 @@ const { compareMode, mergeMode, showOverview, compareIds, closeVersionSelection,
                   :aria-label="`${tile.label}, ${comparisonKinds(tile.id).join(' and ')}`"
                   @click="selectComparedNode(tile.id)"
                   @keydown.enter.prevent="selectComparedNode(tile.id)" @keydown.space.prevent="selectComparedNode(tile.id)" />
-                <text v-for="tile in panel.tiles.filter((item) => item.width > 35 && item.height > 18)" :key="`label-${tile.id}`"
-                  :x="tile.x + 5" :y="tile.y + 16" :class="['comparison-label', { linked: comparisonSelectedNode === tile.id }]">{{ tile.label }}</text>
+                <TileLabel v-for="tile in panel.tiles" :key="`label-${tile.id}`" :tile="tile"
+                  :class="['comparison-label', { linked: comparisonSelectedNode === tile.id }]" />
               </svg>
             </section>
           </div>

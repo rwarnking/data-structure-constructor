@@ -6,7 +6,7 @@ export type RoomStatus = {
   message: string
 }
 
-export type RoomMessageHandler = (message: unknown, reply: (message: unknown) => void) => void
+export type RoomMessageHandler = (message: unknown, reply: (message: unknown) => void) => void | false
 
 function roomPeerId(room: string) {
   let hash = 14695981039346656037n
@@ -98,6 +98,8 @@ export class PeerRoom {
     }
   }
 
+  isHosting() { return this.host }
+
   close() {
     this.peer?.destroy()
     this.peer = null
@@ -120,9 +122,10 @@ export class PeerRoom {
       this.sendPeerCount()
     })
     connection.on('data', (message) => {
-      this.handleDataMessage(message, (response) => {
+      const relay = this.handleDataMessage(message, (response) => {
         if (connection.open) connection.send(response)
       })
+      if (relay === false) return
       for (const other of this.hostConnections) {
         if (other !== connection && other.open) other.send(message)
       }
@@ -151,7 +154,7 @@ export class PeerRoom {
       }
       return
     }
-    this.onMessage(message, reply)
+    return this.onMessage(message, reply)
   }
 
   private waitForOpen(peer: Peer) {

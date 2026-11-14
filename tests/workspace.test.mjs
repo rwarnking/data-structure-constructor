@@ -16,6 +16,7 @@ after(() => vite.close())
 const { useHierarchyEditor } = await vite.ssrLoadModule('/src/composables/useHierarchyEditor.ts')
 const { useVersionComparison } = await vite.ssrLoadModule('/src/composables/useVersionComparison.ts')
 const { reflowVersionLayout } = await vite.ssrLoadModule('/src/utils/versions.ts')
+const { layoutTileLabel } = await vite.ssrLoadModule('/src/utils/treemap.ts')
 
 function node(id, children = []) {
   return { id, value: id, children }
@@ -93,6 +94,37 @@ test('version layout keeps the main chain together and separates branches', () =
   assert.equal(main.lane, leaf.lane)
   assert.notEqual(side.lane, main.lane)
   assert.deepEqual(state.versions.map((item) => item.id), ['v0', 'v1', 'v2', 'v3', 'v4'])
+})
+
+test('merge reflow compacts unused lanes and remains stable on subsequent reflows', () => {
+  const root = version('v0', [])
+  const a = version('v1', [], 'v0', 1)
+  const parent = version('v2', [], 'v1', 2)
+  const main = version('v3', [], 'v2', 3)
+  const leaf = version('v4', [], 'v3', 4)
+  const merge = { ...version('v5', [], 'v2', 3), branch: parent.branch, mergeSourceId: a.id }
+  const side = version('v6', [], 'v1', 2)
+  const state = { versions: [root, a, parent, main, leaf, merge, side], activeId: 'v5', nextNode: 1, nextVersion: 7, nextLane: 42, copyLinks: [] }
+  reflowVersionLayout(state)
+  const lanes = [...new Set(state.versions.map((item) => item.lane))].sort((a, b) => a - b)
+  assert.deepEqual(lanes, lanes.map((_, index) => index))
+  assert.equal(merge.lane, parent.lane)
+  assert.equal(state.nextLane, lanes.length)
+  const firstLayout = state.versions.map(({ id, lane }) => [id, lane])
+  reflowVersionLayout(state)
+  assert.deepEqual(state.versions.map(({ id, lane }) => [id, lane]), firstLayout)
+})
+
+test('entry labels wrap within the available size, including long unbroken words', () => {
+  const tile = { id: 'a', label: 'Long labels should use the available entry area', x: 0, y: 0, width: 100, height: 70, depth: 0, hasChildren: false }
+  const wrapped = layoutTileLabel(tile)
+  assert.ok(wrapped.lines.length > 1)
+  assert.equal(wrapped.lines.join(' '), tile.label)
+  assert.ok(wrapped.lines.length * wrapped.fontSize * 1.15 <= tile.height - 6)
+  assert.ok(wrapped.lines.every((line) => line.length * wrapped.fontSize * 0.67 <= tile.width - 10))
+  const unbroken = layoutTileLabel({ ...tile, label: 'abcdefghijklmnopqrstuvwxyz' })
+  assert.equal(unbroken.lines.join(''), 'abcdefghijklmnopqrstuvwxyz')
+  assert.ok(unbroken.lines.length > 1)
 })
 
 test('attachment rejects cycles and moves a subtree without losing descendants', () => {

@@ -85,8 +85,11 @@ export function reflowVersionLayout(state: StoredState) {
     nextLane += 1
   }
 
+  const lanes = [...new Set(graph.map((version) => version.lane))].sort((left, right) => left - right)
+  const compactLanes = new Map(lanes.map((lane, index) => [lane, index]))
+  for (const version of graph) version.lane = compactLanes.get(version.lane)!
   graph.sort((left, right) => left.step - right.step || left.id.localeCompare(right.id))
-  state.nextLane = nextLane
+  state.nextLane = lanes.length
 }
 
 

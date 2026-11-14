@@ -133,6 +133,8 @@ test('branching, comparison and merge result controls update the graph', async (
   await addEntries(page, ['Second branch'])
   const second = (await state(page, room)).activeId
   const saved = await state(page, room)
+  const lanes = [...new Set(saved.versions.map((version) => version.lane))].sort((a, b) => a - b)
+  expect(lanes).toEqual(lanes.map((_, index) => index))
   expect(saved.versions.find((version) => version.id === first).parentId).toBe(base)
   expect(saved.versions.find((version) => version.id === second).parentId).toBe(base)
   expect(saved.versions.find((version) => version.id === first).lane).not.toBe(saved.versions.find((version) => version.id === second).lane)
@@ -161,9 +163,9 @@ test('branching, comparison and merge result controls update the graph', async (
   await dialog.getByRole('button', { name: 'Reset' }).click()
   await expect(dialog.locator('.merge-preview-tile.depth-1')).toHaveCount(0)
   await row.getByRole('button', { name: 'Omit' }).click()
-  await expect(dialog.locator('.merge-preview')).not.toContainText('First branch')
+  await expect(dialog.locator('.merge-preview-label[aria-label="First branch"]')).toHaveCount(0)
   await row.getByRole('button', { name: 'Pick' }).click()
-  await expect(dialog.locator('.merge-preview')).toContainText('First branch')
+  await expect(dialog.locator('.merge-preview-label[aria-label="First branch"]')).toBeVisible()
   await row.getByLabel('Parent for First branch in merged result').selectOption({ label: 'Base' })
   await dialog.getByRole('button', { name: 'Confirm merge' }).click()
   await expect(dialog).toHaveCount(0)
@@ -173,6 +175,8 @@ test('branching, comparison and merge result controls update the graph', async (
   }).toBe(true)
   expect(findNode(await activeData(page, room), 'Base').children.map((node) => node.value)).toContain('First branch')
   const mergedState = await state(page, room)
+  const mergedLanes = [...new Set(mergedState.versions.map((version) => version.lane))].sort((a, b) => a - b)
+  expect(mergedLanes).toEqual(mergedLanes.map((_, index) => index))
   const merge = mergedState.versions.find((version) => version.id === mergedState.activeId)
   expect(new Set([merge.parentId, merge.mergeSourceId])).toEqual(new Set([first, second]))
   await expect(page.locator(`#merge-connector-${merge.id}`)).toHaveAttribute('d', /M /)
@@ -218,6 +222,10 @@ test('fit, focus, zoom, panning and keyboard navigation change the viewport and 
   const lastId = (await state(page, room)).activeId
   await page.keyboard.press('Shift+a')
   await expect(page.locator('.version-card.active .overview-map')).toBeVisible()
+  await page.locator('.version-card.active .overview-map').dblclick()
+  await expect(page.locator('.version-card.active .mini-map')).toBeVisible()
+  await page.keyboard.press('Shift+a')
+  await expect(page.locator('.version-card.active .overview-map')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Add child, Ctrl or Command+Enter' })).toBeDisabled()
   await expect(page.getByRole('button', { name: 'New free entry, N' })).toBeEnabled()
   await page.keyboard.press('n')
@@ -252,7 +260,7 @@ test('fit, focus, zoom, panning and keyboard navigation change the viewport and 
   await expect.poll(async () => (await state(page, room)).activeId).not.toBe(lastId)
 })
 
-test('wheel zooms the graph over a treemap while Shift-wheel and Shift-drag change only its map view', async ({ page }) => {
+test('focused and modifier wheel gestures zoom the map while unfocused wheel zooms the graph', async ({ page }) => {
   const room = await openRoom(page)
   await addEntries(page, ['Map entry'])
   await focusActive(page)
@@ -262,16 +270,20 @@ test('wheel zooms the graph over a treemap while Shift-wheel and Shift-drag chan
   await map.hover()
   const graphBefore = await world.getAttribute('style')
   const mapBefore = await content.getAttribute('transform')
+  await (await activeTile(page, room, 'Map entry')).click({ position: { x: 8, y: 8 } })
   await page.mouse.wheel(0, -180)
-  await expect.poll(() => world.getAttribute('style')).not.toBe(graphBefore)
-  expect(await content.getAttribute('transform')).toBe(mapBefore)
+  await expect.poll(() => content.getAttribute('transform')).not.toBe(mapBefore)
+  expect(await world.getAttribute('style')).toBe(graphBefore)
+  await page.waitForTimeout(300)
+  await expect(page.locator('.version-card.active .tree-tile.is-selected')).toHaveCount(0)
 
   await map.hover()
   const graphAfter = await world.getAttribute('style')
+  const firstZoom = await content.getAttribute('transform')
   await page.keyboard.down('Shift')
   await page.mouse.wheel(0, -180)
   await page.keyboard.up('Shift')
-  await expect.poll(() => content.getAttribute('transform')).not.toBe(mapBefore)
+  await expect.poll(() => content.getAttribute('transform')).not.toBe(firstZoom)
   expect(await world.getAttribute('style')).toBe(graphAfter)
   await expect.poll(async () => {
     const saved = await state(page, room)
@@ -288,6 +300,76 @@ test('wheel zooms the graph over a treemap while Shift-wheel and Shift-drag chan
   await page.keyboard.up('Shift')
   await expect.poll(() => content.getAttribute('transform')).not.toBe(zoomed)
   expect(await world.getAttribute('style')).toBe(graphAfter)
+  await page.getByRole('button', { name: 'Zoom out, minus' }).click()
+  await map.hover()
+  const unfocusedGraph = await world.getAttribute('style')
+  const unfocusedMap = await content.getAttribute('transform')
+  await page.mouse.wheel(0, -120)
+  await expect.poll(() => world.getAttribute('style')).not.toBe(unfocusedGraph)
+  expect(await content.getAttribute('transform')).toBe(unfocusedMap)
+})
+
+test('double-click focuses versions and focused blank-space dragging pans without changing selection', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['Selectable'])
+  const versionId = (await state(page, room)).activeId
+  await page.keyboard.press('Shift+a')
+  const world = page.locator('.graph-world')
+  const fitted = await world.getAttribute('style')
+  await page.locator(`.version-card[data-version="${versionId}"] .version-card-head`).dblclick()
+  await expect.poll(() => world.getAttribute('style')).not.toBe(fitted)
+  const tile = await activeTile(page, room, 'Selectable')
+  await tile.click({ position: { x: 8, y: 8 } })
+  await expect(tile).toHaveClass(/is-selected/)
+  const map = page.locator('.version-card.active .mini-map')
+  const point = await map.evaluate((element) => {
+    const bounds = element.getBoundingClientRect()
+    for (let y = bounds.top + 6; y < bounds.bottom - 20; y += 12) {
+      for (let x = bounds.left + 6; x < bounds.right - 20; x += 12) {
+        const hit = document.elementFromPoint(x, y)
+        if (hit && element.contains(hit) && !hit.closest('.tree-tile')) return { x, y }
+      }
+    }
+    return null
+  })
+  expect(point).toBeTruthy()
+  const before = await world.getAttribute('style')
+  await page.mouse.move(point.x, point.y)
+  await page.mouse.down()
+  await page.mouse.move(point.x + 30, point.y + 20, { steps: 5 })
+  await page.mouse.up()
+  await expect.poll(() => world.getAttribute('style')).not.toBe(before)
+  await expect(tile).toHaveClass(/is-selected/)
+  expect((await state(page, room)).activeId).toBe(versionId)
+  await tile.dblclick({ position: { x: 8, y: 8 } })
+  await expect(page.getByLabel('New value')).toHaveValue('Selectable')
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click()
+})
+
+test('creator indicator tracks the card header and long entry labels wrap within the tile', async ({ page }) => {
+  const room = await openRoom(page)
+  const label = 'A long entry label that should wrap inside its available area'
+  await addEntries(page, [label])
+  await focusActive(page)
+  const card = page.locator('.version-card.active')
+  const title = card.locator('.tile-label')
+  await expect(title.locator('tspan').nth(1)).toBeVisible()
+  const geometry = await title.evaluate((text) => {
+    const box = text.getBBox()
+    const rect = text.parentElement.querySelector('.tree-tile').getBBox()
+    return { text: { x: box.x, y: box.y, width: box.width, height: box.height }, tile: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } }
+  })
+  expect(geometry.text.x + geometry.text.width).toBeLessThanOrEqual(geometry.tile.x + geometry.tile.width)
+  expect(geometry.text.y + geometry.text.height).toBeLessThanOrEqual(geometry.tile.y + geometry.tile.height)
+  for (const viewport of [{ width: 1440, height: 900 }, { width: 1050, height: 720 }]) {
+    await page.setViewportSize(viewport)
+    const alignment = await card.evaluate((element) => ({
+      top: parseFloat(getComputedStyle(element, '::before').top),
+      header: element.querySelector('.version-card-head').getBoundingClientRect().height / element.getBoundingClientRect().height * element.offsetHeight,
+    }))
+    expect(alignment.top).toBeCloseTo(alignment.header, 0)
+  }
+  expect(findNode(await activeData(page, room), label)).toBeTruthy()
 })
 
 test('room switching, persistence and deletion keep room data independent', async ({ page }) => {
@@ -311,7 +393,7 @@ test('room switching, persistence and deletion keep room data independent', asyn
   expect(await state(page, 'Second room')).toBeNull()
 })
 
-test('two peers exchange edits, presence and interaction logs while keeping independent active versions', async ({ browser }) => {
+test('peers follow new children only when viewing their parent', async ({ browser }) => {
   const hostContext = await browser.newContext()
   const guestContext = await browser.newContext()
   const host = await hostContext.newPage()
@@ -323,14 +405,51 @@ test('two peers exchange edits, presence and interaction logs while keeping inde
     await expect(host.locator('.collaborator-list button')).toHaveCount(2)
     await addEntries(host, ['Host edit'])
     await expect(guest.locator('.interaction-section')).toContainText('Host edit')
-    expect((await state(guest, room)).activeId).toBe('v0')
+    await expect.poll(async () => (await state(guest, room)).activeId).toBe((await state(host, room)).activeId)
+    await expect(guest.locator('.version-card.active')).toBeInViewport()
     await addEntries(guest, ['Guest edit'])
     await expect(host.locator('.interaction-section')).toContainText('Guest edit')
     await expect.poll(async () => (await state(host, room)).versions.some((version) => !!findNode(version.data, 'Guest edit'))).toBe(true)
     await expect.poll(async () => (await state(guest, room)).versions.some((version) => !!findNode(version.data, 'Host edit'))).toBe(true)
-    expect((await state(host, room)).activeId).not.toBe((await state(guest, room)).activeId)
+    await expect.poll(async () => (await state(host, room)).activeId).toBe((await state(guest, room)).activeId)
+    await guest.keyboard.press('ArrowLeft')
+    await expect.poll(async () => (await state(guest, room)).activeId).not.toBe((await state(host, room)).activeId)
+    const guestVersion = (await state(guest, room)).activeId
+    await addEntries(host, ['Host later edit'])
+    await expect(guest.locator('.interaction-section')).toContainText('Host later edit')
+    expect((await state(guest, room)).activeId).toBe(guestVersion)
   } finally {
     await hostContext.close()
     await guestContext.close()
+  }
+})
+
+test('simultaneous joiners receive unique stable names from the room host', async ({ browser }) => {
+  const contexts = await Promise.all(Array.from({ length: 5 }, () => browser.newContext()))
+  const pages = await Promise.all(contexts.map(async (context) => {
+    await context.addInitScript(() => localStorage.setItem('canopy-user-name', 'Otter'))
+    return context.newPage()
+  }))
+  try {
+    const room = await openRoom(pages[0])
+    await Promise.all(pages.slice(1, 4).map((page) => page.goto(`/?room=${room}`)))
+    for (const page of pages.slice(0, 4)) {
+      await expect(page.locator('.collaborator-list button')).toHaveCount(4, { timeout: 20000 })
+      await expect.poll(async () => page.locator('.collaborator-list button').evaluateAll((buttons) =>
+        buttons.map((button) => button.title.split(' · ')[0]).sort()), { timeout: 20000 })
+        .toEqual(['Otter', 'Otter 2', 'Otter 3', 'Otter 4'])
+    }
+    await openRoom(pages[4])
+    await expect(pages[4].locator('.collaborator-info strong')).toHaveText('Otter (you)')
+    const leavingName = (await pages[1].locator('.collaborator-info strong').filter({ hasText: '(you)' }).innerText()).replace(' (you)', '')
+    await pages[1].getByRole('button', { name: 'Change Room' }).click()
+    await pages[1].getByLabel('Create a new empty room').fill(`other-${randomUUID()}`)
+    await pages[1].getByRole('button', { name: 'Create room' }).click()
+    await expect(pages[0].locator('.collaborator-list button')).toHaveCount(3)
+    await expect.poll(async () => pages[0].locator('.collaborator-list button').evaluateAll((buttons) =>
+      buttons.map((button) => button.title.split(' · ')[0]).sort()))
+      .toEqual(['Otter', 'Otter 2', 'Otter 3', 'Otter 4'].filter((name) => name !== leavingName))
+  } finally {
+    await Promise.all(contexts.map((context) => context.close()))
   }
 })

@@ -8,10 +8,11 @@ export function useTreemapViews(options: {
   windowDimensions: ComputedRef<{ width: number; height: number }>
   zoom: Ref<number>
   cardHeight: (version: Version) => number
+  focusedVersionId: Ref<string | null>
   notify: (message: string) => void
   suppressClicks: () => void
 }) {
-  const { state, versions, windowDimensions, zoom, cardHeight, notify, suppressClicks } = options
+  const { state, versions, windowDimensions, zoom, cardHeight, focusedVersionId, notify, suppressClicks } = options
   const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
   const mapPanDrag = ref<{
     versionId: string
@@ -204,9 +205,10 @@ export function useTreemapViews(options: {
     void nextTick(initializeMapViews)
   }, { flush: 'post' })
   function zoomMap(event: WheelEvent, version: Version) {
-    if (!event.shiftKey) return
+    if (!event.shiftKey && focusedVersionId.value !== version.id) return
     event.preventDefault()
     event.stopPropagation()
+    suppressClicks()
     const map = event.currentTarget as HTMLElement
     const rect = map.getBoundingClientRect()
     const viewport = mapViewport(version)

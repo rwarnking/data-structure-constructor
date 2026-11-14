@@ -1,8 +1,42 @@
 import type { MapView, Tile, TreeNode } from '../types/workspace'
 import { nodeParentIds } from './tree'
 
-export function labelFontSize(tile: Tile): number {
-  return Math.max(0, Math.min(24, tile.height - 6, (tile.width - 10) / (tile.label.length * 0.58)))
+export function layoutTileLabel(tile: Tile) {
+  const width = Math.max(0, tile.width - 10)
+  const height = Math.max(0, Math.min(tile.height, tile.hasChildren ? TREE_HEADER_HEIGHT : tile.height) - 6)
+  const wrap = (capacity: number) => {
+    const lines: string[] = []
+    let line = ''
+    for (const word of tile.label.trim().split(/\s+/)) {
+      let remaining = Array.from(word)
+      if (line && line.length + 1 + remaining.length <= capacity) {
+        line += ` ${word}`
+        continue
+      }
+      if (line) lines.push(line)
+      line = ''
+      while (remaining.length > capacity) {
+        lines.push(remaining.slice(0, capacity).join(''))
+        remaining = remaining.slice(capacity)
+      }
+      line = remaining.join('')
+    }
+    if (line) lines.push(line)
+    return lines
+  }
+  for (let fontSize = Math.min(24, Math.floor(height)); fontSize >= 7; fontSize--) {
+    const capacity = Math.floor(width / (fontSize * 0.67))
+    if (capacity < 1) continue
+    const lines = wrap(capacity)
+    const maxLines = Math.floor(height / (fontSize * 1.15))
+    if (lines.length <= maxLines) return { fontSize, lines }
+    if (fontSize === 7 && maxLines > 0) {
+      const visible = lines.slice(0, maxLines)
+      visible[maxLines - 1] = `${Array.from(visible[maxLines - 1]!).slice(0, Math.max(0, capacity - 1)).join('')}…`
+      return { fontSize, lines: visible }
+    }
+  }
+  return { fontSize: 0, lines: [] as string[] }
 }
 
 export const CARD_WIDTH = 260
@@ -268,7 +302,7 @@ export function tilesFor(
   const place = (node: TreeNode, x: number, y: number, width: number, height: number, depth: number) => {
     tiles.push({
       id: node.id, label: node.value,
-      x, y, width, height, depth,
+      x, y, width, height, depth, hasChildren: node.children.length > 0,
     })
     if (!node.children.length) return
     for (const childLayout of childLayouts(node)) {

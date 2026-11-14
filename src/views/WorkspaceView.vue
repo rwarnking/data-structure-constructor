@@ -64,6 +64,7 @@ const browserViewport = ref({ width: window.innerWidth, height: window.innerHeig
 let canvasObserver: ResizeObserver | null = null
 let suppressVersionClick = false
 let suppressTileClick = false
+let suppressCanvasClick = false
 let versionClickTimer = 0
 let tileClickTimer = 0
 let suppressPingClick = false
@@ -106,14 +107,15 @@ let tileTooltipTimer = 0
 let tilePointer = { x: 0, y: 0 }
 
 const graphCamera = useGraphCamera({ versions, active, state, compareIds, draggedVersionId: () => treeDrag.value?.versionId,
-  zoom, pan, canvasSize, windowDimensions })
+  zoom, pan, canvasSize, windowDimensions, suppressClicks: suppressGraphClicks })
 const { cardPosition, cardHeight, displayCardPosition, graphBounds,
   visibleVersions, visibleConnectionVersions, visibleMergeConnectionVersions, zoomIn, zoomOut, fitGraph,
   startCanvasPan, moveCanvasPan, endCanvasPan, onWheel, focusVersion, focusActive, animateCamera,
   stopGraphAnimations,
 } = graphCamera
 
-const treemapViews = useTreemapViews({ state, versions, windowDimensions, zoom, cardHeight, notify, suppressClicks: suppressGraphClicks })
+const treemapViews = useTreemapViews({ state, versions, windowDimensions, zoom, cardHeight,
+  focusedVersionId: graphCamera.focusedVersionId, notify, suppressClicks: suppressGraphClicks })
 const { mapViewTimers, cardData, cardPositions, mapViewport, mapViewFor,
   centerVersionTreemaps, compactVersionTreemaps, commitMapView, clearTransientMapViews, initializeMapViews,
   zoomMap, startMapPan, moveMapPan, endMapPan,
@@ -126,6 +128,12 @@ const {
 } = useCollaboration({
   clientId: CLIENT_ID, state, active, selectedNodes, currentRoomName, graphCanvas, pan, zoom,
   normalizeState, roomDataKey, reflowLayout, fitGraph, notify,
+  followVersion: (version) => {
+    const wasCentered = graphCamera.isVersionCentered(active.value)
+    state.value.activeId = version.id
+    setSelectedNodes([])
+    graphCamera.panToVersion(version, wasCentered)
+  },
 })
 
 const { createVersion, confirmMerge, pruneVersion } = useVersionHistory({
@@ -143,7 +151,10 @@ const { editor, setEntryValueInput, entryOperation, bulkDeleteMode, bulkDeleteDi
 function suppressGraphClicks() {
   suppressVersionClick = true
   suppressTileClick = true
-  window.setTimeout(() => { suppressVersionClick = false; suppressTileClick = false }, 0)
+  suppressCanvasClick = true
+  window.clearTimeout(versionClickTimer)
+  window.clearTimeout(tileClickTimer)
+  window.setTimeout(() => { suppressVersionClick = false; suppressTileClick = false; suppressCanvasClick = false }, 0)
 }
 
 const { draggedNode, draggedPosition, dragPreviewView, overNode, invalidNode, treeDrag, spatialPreview,
@@ -397,7 +408,7 @@ function handleVersionClick(version: Version) {
 
 function handleVersionDoubleClick(version: Version, event: MouseEvent) {
   window.clearTimeout(versionClickTimer)
-  if ((event.target as HTMLElement).closest('.mini-map, .overview-map')) return
+  if ((event.target as HTMLElement).closest('.mini-map')) return
   if (!compareMode.value && !mergeMode.value) focusVersion(version)
 }
 
@@ -441,6 +452,7 @@ function onTileDoubleClick(version: Version, nodeId: string) {
 }
 
 function onCanvasClick(event: MouseEvent) {
+  if (suppressCanvasClick) return
   if ((event.target as HTMLElement).closest('.version-card, button')) return
   setSelectedNodes([])
   menu.value = null

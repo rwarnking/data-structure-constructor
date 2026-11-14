@@ -4,7 +4,7 @@ import { MoreHorizontal } from '@lucide/vue'
 import type { Version } from '../types/workspace'
 import type { VersionCardModel } from '../types/graph'
 import { userColor, versionColor } from '../utils/colors'
-import { labelFontSize } from '../utils/treemap'
+import TileLabel from './TileLabel.vue'
 import { displayVersionId } from '../utils/versions'
 
 const props = defineProps<{ version: Version; model: VersionCardModel }>()
@@ -61,14 +61,11 @@ const { active, compareIds, compareMode, zoom, overNode, invalidNode, hoveredNod
               <rect :x="tile.x" :y="tile.y" :width="tile.width" :height="tile.height"
                 :class="['dragged-overlay', `depth-${tile.depth}`]"
                 :fill="tile.depth === 0 ? '#deebe4' : tile.depth % 2 ? '#c1d9cc' : '#a9cab9'" />
-              <text v-if="labelFontSize(tile) >= 7" :x="tile.x + 5"
-                :y="tile.y + labelFontSize(tile) + 4" :font-size="labelFontSize(tile)" class="tile-label">
-                {{ tile.label }}
-              </text>
+              <TileLabel :tile="tile" class="tile-label" />
             </g>
-            <text v-for="tile in (versionTiles.get(version.id) ?? []).filter((item) =>
-              labelFontSize(item) >= 7 && !dragOverlayTiles(version).some((overlay) => overlay.id === item.id))" :key="`label-${tile.id}`"
-              :x="tile.x + 5" :y="tile.y + labelFontSize(tile) + 4" :font-size="labelFontSize(tile)" class="tile-label">{{ tile.label }}</text>
+            <TileLabel v-for="tile in (versionTiles.get(version.id) ?? []).filter((item) =>
+              !dragOverlayTiles(version).some((overlay) => overlay.id === item.id))" :key="`label-${tile.id}`"
+              :tile="tile" class="tile-label" />
             <rect v-if="version.id === active.id && draggedOriginalTile" class="drag-source-ghost"
               :x="draggedOriginalTile.x" :y="draggedOriginalTile.y"
               :width="draggedOriginalTile.width" :height="draggedOriginalTile.height"
