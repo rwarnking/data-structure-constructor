@@ -7,7 +7,7 @@ import type { Version } from '../types/workspace'
 import TileLabel from './TileLabel.vue'
 import { displayVersionId } from '../utils/versions'
 
-const props = defineProps<{ model: UnwrapNestedRefs<ReturnType<typeof useVersionComparison>>; versions: Version[]; sidebarCollapsed: boolean }>()
+const props = defineProps<{ model: UnwrapNestedRefs<ReturnType<typeof useVersionComparison>>; versions: Version[]; sidebarCollapsed: boolean; actionSidebarCollapsed: boolean }>()
 const emit = defineEmits<{ confirm: [] }>()
 const { compareMode, mergeMode, showOverview, compareIds, chooseCompare, closeVersionSelection, resetMerge, mergePreviewTiles, mergeDraggedTiles, mergePreviewViewBox, moveMergeDrag, finishMergeDrag, cancelMergeDrag, mergeDropTarget, startMergeDrag, onMergeTileClick, mergeResult, mergeRows, setMergePicked, onMergeParentChange, mergeParentOptions, differentEntryCount, comparison, showDifferenceColors, comparisonPanels, comparisonViewBox, comparisonGhosts, comparisonSelectedNode, selectComparedNode, comparisonKinds } = toRefs(props.model)
 function versionLabel(id: string) {
@@ -22,6 +22,7 @@ function versionLabel(id: string) {
     :aria-modal="mergeMode && compareIds.length === 2 ? 'true' : undefined"
     :aria-label="mergeMode ? 'Branch merge' : 'Version comparison'"
     :class="{ 'comparison-overlay': compareIds.length === 2, 'merge-overlay': mergeMode && compareIds.length === 2, 'sidebar-collapsed': sidebarCollapsed }"
+    :style="compareIds.length === 2 ? { right: `${(actionSidebarCollapsed ? 48 : 270) + 12}px` } : undefined"
     @pointerdown.stop @pointerup.stop @pointermove.stop @pointercancel.stop @click.stop
     @dblclick.stop @contextmenu.stop @wheel.stop @touchmove.stop>
     <div class="compare-drawer" :class="{ open: compareIds.length === 2, 'merge-view': mergeMode }">
@@ -54,7 +55,7 @@ function versionLabel(id: string) {
                     <rect :x="tile.x" :y="tile.y" :width="tile.width" :height="tile.height"
                       :class="['merge-preview-tile', 'tree-tile', `depth-${tile.depth}`, { 'is-over': mergeDropTarget === tile.id }]"
                       :data-node="tile.id" :style="{ '--tile-base': tile.depth === 0 ? 'var(--theme-entry-root)' : tile.depth === 3 ? 'var(--theme-entry-deep)' : tile.depth % 2 ? 'var(--theme-entry-odd)' : 'var(--theme-entry-even)' }"
-                      @pointerdown.stop="startMergeDrag($event, tile.id)" @click.stop="onMergeTileClick(tile.id)" />
+                      @pointerdown.stop="startMergeDrag($event, tile.id)" @click.stop="onMergeTileClick(tile.id)"><title>{{ tile.label }}</title></rect>
                     <TileLabel :tile="tile" class="merge-preview-label" />
                   </g>
                   <g v-for="tile in mergeDraggedTiles" :key="`drag-${tile.id}`" pointer-events="none">

@@ -35,6 +35,22 @@ button { color: inherit; }
 .top-action:hover, .top-action.selected { color: var(--green); border-color: #9dc2b8; background: #f3faf6; }
 .avatar { width: 29px; height: 29px; border: 0; border-radius: 50%; background: #e6c6af; color: #573d31; font-size: 11px; font-weight: 800; cursor: pointer; }
 .workspace { min-height: 0; flex: 1; display: flex; position: relative; }
+.action-sidebar { flex: 0 0 270px; width: 270px; min-height: 0; display: flex; flex-direction: column; border-left: 1px solid var(--line); background: var(--theme-surface); z-index: 5; }
+.action-sidebar.collapsed { flex-basis: 48px; width: 48px; }
+.action-sidebar header { flex: 0 0 44px; display: flex; align-items: center; padding: 4px 8px; border-bottom: 1px solid var(--line); }
+.action-sidebar header strong { flex: 1; font-size: 12px; }
+.action-sidebar.collapsed header { justify-content: center; }
+.action-sidebar-list { min-height: 0; overflow-y: auto; overflow-x: hidden; }
+.action-sidebar-list section { padding: 6px 4px; border-bottom: 1px solid var(--line); }
+.action-sidebar-list h2 { margin: 4px 6px 6px; color: var(--theme-text-muted); font: 9px var(--mono); text-transform: uppercase; }
+.action-sidebar-item { width: 100%; min-height: 32px; display: flex; align-items: center; gap: 8px; padding: 5px 8px; border: 0; border-radius: 4px; color: var(--theme-text); background: transparent; text-align: left; font-size: 11px; }
+button.action-sidebar-item { cursor: pointer; }
+.action-sidebar-item svg { flex: 0 0 17px; color: var(--theme-text-muted); }
+.action-sidebar-item span { flex: 1; min-width: 0; }
+.action-sidebar-item kbd { flex: 0 0 auto; font-size: 9px; white-space: nowrap; }
+.action-sidebar-item:disabled { opacity: .4; cursor: default; }
+button.action-sidebar-item:hover:not(:disabled), .action-sidebar-item.selected { background: var(--theme-overview); color: var(--theme-accent); }
+.action-sidebar.collapsed .action-sidebar-item { justify-content: center; padding: 6px; }
 .sidebar { flex: 0 0 238px; width: 238px; min-height: 0; overflow-x: hidden; overflow-y: auto; padding: 13px 15px 11px; background: var(--theme-surface); border-right: 1px solid var(--line); display: flex; flex-direction: column; z-index: 5; transition: flex-basis .18s, width .18s, padding .18s; }
 .sidebar.collapsed { flex-basis: 54px; width: 54px; padding-right: 7px; padding-left: 7px; }
 .sidebar-head { min-height: 39px; display: flex; align-items: center; gap: 9px; padding: 0 5px 12px; border-bottom: 1px solid #edf0ed; }
@@ -165,13 +181,6 @@ h1 { margin: 7px 0 0; font-size: 21px; line-height: 1.25; font-weight: 700; lett
 .lane-navigation-right { right: 0; border-radius: 5px 0 0 5px; }
 .ping-mode-banner { align-self: center; padding: 6px 12px; border: 1px solid #d59b48; border-radius: 6px; background: #fff3d4; color: #73510f; box-shadow: 0 3px 11px #26392d20; font: 9px var(--mono); }
 .canvas-controls { position: absolute; z-index: 8; left: 50%; bottom: 5px; transform: translateX(-50%); display: flex; flex-direction: column; align-items: stretch; gap: 6px; width: max-content; max-width: calc(100% - 32px); cursor: default; }
-.canvas-hotbar { position: relative; display: flex; flex-wrap: nowrap; align-items: center; justify-content: safe center; gap: 4px; width: 100%; max-width: 100%; overflow-x: auto; padding: 7px; border: 1px solid #dfe6e1; border-radius: 8px; background: #fcfdfb; box-shadow: 0 5px 18px #26392d20; }
-.canvas-hotbar button { min-height: 36px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 0 8px; border: 0; border-radius: 5px; background: transparent; color: #617068; font-size: 10px; white-space: nowrap; cursor: pointer; }
-.canvas-hotbar button:hover:not(:disabled), .canvas-hotbar button.selected { background: #eff5f0; color: var(--green); }
-.canvas-hotbar button:disabled { opacity: .42; cursor: default; }
-.canvas-hotbar button > svg { flex: 0 0 auto; color: #87968e; }
-.canvas-hotbar button kbd { margin-left: 1px; }
-.canvas-hotbar button[title] { position: relative; }
 .copy-link-hit { cursor: pointer; }
 .copy-link-hit:focus { outline: none; }
 .copy-connection-layer { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
@@ -244,7 +253,7 @@ h1 { margin: 7px 0 0; font-size: 21px; line-height: 1.25; font-weight: 700; lett
 .drag-source-ghost { opacity: 1; }
 .dragged-overlay { opacity: .94; stroke: #f7faf7; stroke-width: 3; filter: drop-shadow(0 3px 4px #24352f55); }
 .dragged-overlay.depth-0 { stroke: #176b68; stroke-dasharray: 5 3; stroke-width: 3; }
-.tile-label { fill: var(--theme-entry-label); pointer-events: none; font-family: 'DM Mono', monospace; font-weight: 500; }
+.tile-label, .merge-preview-label { fill: var(--theme-entry-label); pointer-events: none; font-family: Arial, sans-serif; font-weight: 500; }
 .mini-map { overflow: hidden; overscroll-behavior: contain; touch-action: none; }
 .empty-map { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; gap: 8px; color: #9aa59f; font-size: 9px; }
 .empty-cross { display: grid; place-items: center; width: 18px; height: 18px; border: 1px dashed #bfcac2; border-radius: 50%; font-size: 13px; color: #82948a; }
@@ -327,7 +336,7 @@ h1 { margin: 7px 0 0; font-size: 21px; line-height: 1.25; font-weight: 700; lett
 .merge-preview-tile:hover { fill: color-mix(in srgb, var(--theme-entry-hover) var(--theme-entry-hover-strength), var(--tile-base)); }
 .merge-preview-tile:active { cursor: grabbing; }
 .merge-preview-tile.drop-target { stroke: #176b68; stroke-width: 6; }
-.merge-preview-label { fill: #35534a; pointer-events: none; font-family: var(--mono); font-weight: 600; }
+.merge-preview-label { fill: #35534a; pointer-events: none; font-family: Arial, sans-serif; font-weight: 500; }
 .merge-preview-empty { position: absolute; inset: 0; display: grid; place-items: center; color: #849188; font-size: 10px; }
 .merge-reset { width: auto; min-width: 0; display: inline-flex; gap: 4px; padding: 0 8px; }
 .merge-list-head, .merge-view-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(350px, 1.35fr) minmax(0, 1fr); }
@@ -409,14 +418,14 @@ h1 { margin: 7px 0 0; font-size: 21px; line-height: 1.25; font-weight: 700; lett
 .toast > span { width: 6px; height: 6px; border-radius: 50%; background: #4d9a70; }
 @keyframes toast-in { from { opacity: 0; transform: translate(-50%, 6px); } to { opacity: 1; transform: translate(-50%, 0); } }
 @keyframes ping-echo { 0% { opacity: .9; transform: translate(-50%, -50%) scale(.35); } 75% { opacity: .65; } 100% { opacity: 0; transform: translate(-50%, -50%) scale(16.5); } }
-.entry-tooltip { position: fixed; z-index: 50; max-width: 280px; padding: 8px 10px; border: 1px solid #d5dfd8; border-radius: 5px; background: #fcfdfb; box-shadow: 0 5px 16px #26392d24; color: #43534a; font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; pointer-events: none; }
+.entry-tooltip { position: fixed; z-index: 50; max-width: 280px; padding: 8px 10px; border: 1px solid #d5dfd8; border-radius: 5px; background: #fcfdfb; box-shadow: 0 5px 16px #26392d24; color: #43534a; font-size: 10px; line-height: 1.45; white-space: pre-line; overflow-wrap: anywhere; pointer-events: none; }
 
 .app-shell.dark {
   color-scheme: dark;
   background: var(--theme-background);
   color: var(--theme-text);
 }
-.dark .topbar, .dark .sidebar, .dark .canvas-hotbar,
+.dark .topbar, .dark .sidebar,
 .dark .canvas-toolbar, .dark .context-menu, .dark .entry-editor, .dark .toast,
 .dark .compare-drawer {
   background: var(--theme-surface);
@@ -439,7 +448,7 @@ h1 { margin: 7px 0 0; font-size: 21px; line-height: 1.25; font-weight: 700; lett
 .dark .select-wrap select, .dark .theme-toggle, .dark .session-button,
 .dark .user-name-input, .dark .top-action, .dark .small-button,
 .dark .local-room-select, .dark .local-room-delete,
-.dark .cancel-button, .dark .canvas-hotbar, .dark .canvas-toolbar {
+.dark .cancel-button, .dark .canvas-toolbar {
   background: #202c26;
   border-color: #3a4b41;
   color: #d5e0d9;
@@ -466,7 +475,7 @@ h1 { margin: 7px 0 0; font-size: 21px; line-height: 1.25; font-weight: 700; lett
 .dark .connection-outline { stroke: var(--theme-connector-outline); }
 .dark .theme-toggle:hover, .dark .session-button:hover:not(:disabled),
 .dark .local-room-select:hover:not(:disabled), .dark .local-room-delete:hover,
-.dark .canvas-hotbar button:hover:not(:disabled), .dark .context-menu button:hover:not(:disabled) {
+.dark .context-menu button:hover:not(:disabled) {
   background: #293a31;
 }
 .dark .ping-mode-banner { border-color: #705c31; background: #3a3020; color: #f0d48b; }

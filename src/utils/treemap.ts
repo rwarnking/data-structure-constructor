@@ -1,42 +1,54 @@
 import type { MapView, Tile, TreeNode } from '../types/workspace'
 import { nodeParentIds } from './tree'
+import { hierarchy, treemap, treemapSquarify } from 'd3-hierarchy'
 
+let labelContext: CanvasRenderingContext2D | null | undefined
 export function layoutTileLabel(tile: Tile) {
   const width = Math.max(0, tile.width - 10)
   const height = Math.max(0, Math.min(tile.height, tile.hasChildren ? TREE_HEADER_HEIGHT : tile.height) - 6)
-  const wrap = (capacity: number) => {
-    const lines: string[] = []
-    let line = ''
-    for (const word of tile.label.trim().split(/\s+/)) {
-      let remaining = Array.from(word)
-      if (line && line.length + 1 + remaining.length <= capacity) {
-        line += ` ${word}`
+  const fontSize = Math.min(14, Math.floor(height / 1.15))
+  const maxLines = Math.floor(height / (fontSize * 1.15))
+  if (fontSize < 9 || !maxLines) return { fontSize: 0, lines: [] as string[] }
+  if (labelContext === undefined && typeof document !== 'undefined') {
+    labelContext = document.createElement('canvas').getContext('2d')
+  }
+  if (labelContext) labelContext.font = `500 ${fontSize}px Arial, sans-serif`
+  const measure = (text: string) => labelContext
+    ? labelContext.measureText(text).width : text.length * fontSize * 0.65
+  if (measure('...') > width) return { fontSize: 0, lines: [] as string[] }
+  const words = tile.label.trim().split(/\s+/).filter(Boolean)
+  const lines: string[] = []
+  let line = ''
+  let truncated = false
+  for (const word of words) {
+    const pieces = word.match(/[^-]+-?|-/g) ?? [word]
+    for (let index = 0; index < pieces.length; index++) {
+      const piece = pieces[index]!
+      const separator = index === 0 && line ? ' ' : ''
+      if (measure(line + separator + piece) <= width) {
+        line += separator + piece
         continue
       }
-      if (line) lines.push(line)
-      line = ''
-      while (remaining.length > capacity) {
-        lines.push(remaining.slice(0, capacity).join(''))
-        remaining = remaining.slice(capacity)
+      if (line) { lines.push(line); line = '' }
+      if (lines.length >= maxLines) { truncated = true; break }
+      if (measure(piece) > width) {
+        let shortened = piece
+        while (shortened && measure(`${shortened}...`) > width) shortened = Array.from(shortened).slice(0, -1).join('')
+        line = `${shortened}...`
+        truncated = true
+        break
       }
-      line = remaining.join('')
+      line = piece
     }
-    if (line) lines.push(line)
-    return lines
+    if (truncated) break
   }
-  for (let fontSize = Math.min(24, Math.floor(height)); fontSize >= 7; fontSize--) {
-    const capacity = Math.floor(width / (fontSize * 0.67))
-    if (capacity < 1) continue
-    const lines = wrap(capacity)
-    const maxLines = Math.floor(height / (fontSize * 1.15))
-    if (lines.length <= maxLines) return { fontSize, lines }
-    if (fontSize === 7 && maxLines > 0) {
-      const visible = lines.slice(0, maxLines)
-      visible[maxLines - 1] = `${Array.from(visible[maxLines - 1]!).slice(0, Math.max(0, capacity - 1)).join('')}…`
-      return { fontSize, lines: visible }
-    }
+  if (line && lines.length < maxLines) lines.push(line)
+  if (truncated && lines.length && !lines.at(-1)!.endsWith('...')) {
+    let last = lines.at(-1)!
+    while (last && measure(`${last}...`) > width) last = Array.from(last).slice(0, -1).join('')
+    lines[lines.length - 1] = `${last.trimEnd()}...`
   }
-  return { fontSize: 0, lines: [] as string[] }
+  return { fontSize, lines }
 }
 
 export const CARD_WIDTH = 260
@@ -57,11 +69,8 @@ export function fitMapViewToLayout(
   positions: Record<string, { x: number; y: number }> | undefined,
   view: MapView,
   padding = MAP_PADDING,
+  viewport = { width: CARD_WIDTH - 14, height: CARD_HEIGHT - 47 },
 ): MapView {
-  const viewport = {
-    width: CARD_WIDTH - 14,
-    height: CARD_HEIGHT - 47,
-  }
   const geometry = mapGeometry(data, positions, viewport.width, viewport.height)
   const fit = Math.max(MAP_ZOOM_MIN, Math.min(
     1,
@@ -392,26 +401,21 @@ function tilesForWithCache(
   const size = outerDimensions(root, undefined, cache)
   const offsetX = position.x * CARD_WIDTH
   const offsetY = position.y * TREE_MAP_HEIGHT
-  const tiles: Tile[] = []
-  const place = (node: TreeNode, x: number, y: number, width: number, height: number, depth: number) => {
-    tiles.push({
-      id: node.id, label: node.value,
-      x, y, width, height, depth, hasChildren: node.children.length > 0,
-    })
-    if (!node.children.length) return
-    for (const childLayout of childLayouts(node, undefined, cache)) {
-      place(
-        childLayout.node,
-        x + childLayout.x,
-        y + childLayout.y,
-        childLayout.width,
-        childLayout.height,
-        depth + 1,
-      )
-    }
-  }
-  place(root, offsetX, offsetY, size.width, size.height, 0)
-  return tiles
+  const tree = hierarchy(root).sum((node) => node.children.length ? 0 : 1)
+  const layout = treemap<TreeNode>()
+    .size([size.width, size.height])
+    .tile(treemapSquarify)
+    .paddingTop(TREE_HEADER_HEIGHT + TREE_PADDING)
+    .paddingLeft(TREE_PADDING)
+    .paddingRight(TREE_PADDING)
+    .paddingBottom(TREE_PADDING)
+    .paddingInner(TREE_PADDING)
+  return layout(tree).descendants().map((node) => ({
+    id: node.data.id, label: node.data.value,
+    x: offsetX + node.x0, y: offsetY + node.y0,
+    width: node.x1 - node.x0, height: node.y1 - node.y0,
+    depth: node.depth, hasChildren: !!node.children?.length,
+  }))
 }
 export function tilesForForest(data: TreeNode[], positions?: Record<string, { x: number; y: number }>) {
   const cache: LayoutCache = new Map()

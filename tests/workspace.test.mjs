@@ -46,6 +46,29 @@ test('action configuration resolves editable shortcut mappings and icons', () =>
   assert.equal(actionSymbols.merge, '⋈')
 })
 
+test('requested shortcuts resolve without collisions or obsolete alternatives', () => {
+  const cases = [
+    ['n', false, false, 'newEntry'], ['Delete', false, false, 'deleteNode'],
+    ['a', false, false, 'addChild'], ['g', false, false, 'group'], ['e', false, false, 'edit'],
+    ['d', false, false, 'detach'], ['t', false, false, 'tag'], ['m', false, false, 'mergeEntries'],
+    ['s', false, false, 'split'], ['c', true, false, 'copy'], ['x', true, false, 'cut'],
+    ['v', true, false, 'paste'], ['c', false, true, 'compare'], ['m', false, true, 'merge'],
+    ['l', false, true, 'compact'], ['a', false, true, 'center'], ['1', false, false, 'focus'],
+    ['2', false, false, 'neighborhood'], ['3', false, false, 'fitHeight'], ['4', false, false, 'fitAll'],
+    ['ArrowLeft', false, false, 'previous'], ['ArrowRight', false, false, 'next'],
+    ['ArrowUp', false, false, 'up'], ['ArrowDown', false, false, 'down'],
+    ['PageUp', false, false, 'firstLane'], ['PageDown', false, false, 'lastLane'],
+    ['Home', false, false, 'firstVersion'], ['End', false, false, 'lastVersion'],
+  ]
+  for (const [key, ctrlKey, shiftKey, expected] of cases) {
+    assert.equal(shortcutAction({ key, ctrlKey, shiftKey, metaKey: false, altKey: false, repeat: false }), expected)
+  }
+  for (const [key, ctrlKey, shiftKey] of [['c', false, false], ['n', true, false], ['o', true, false],
+    ['f', false, false], ['p', false, false], ['+', false, true], ['-', false, false]]) {
+    assert.equal(shortcutAction({ key, ctrlKey, shiftKey, metaKey: false, altKey: false, repeat: false }), undefined)
+  }
+})
+
 test('collaborator palette stays distinct and visible on light and dark surfaces', () => {
   const luminance = (hex) => {
     const [r, g, b] = hex.slice(1).match(/../g).map((part) => parseInt(part, 16) / 255)
@@ -240,7 +263,7 @@ test('merges continue the latest target, otherwise the latest source, otherwise 
       mergeDecisions: ref({}), mergeParentOverrides: ref({}), mergePositionOverrides: ref({}),
     }
     const history = useVersionHistory({
-      clientId: 'test', state, versions, active: computed(() => target), selectedNode: ref(null),
+      clientId: 'test', state, currentRoomName: ref('test'), versions, active: computed(() => target), selectedNode: ref(null),
       windowDimensions: computed(() => ({ width: 200, height: 150 })), comparison,
       camera: { isVersionCentered: () => false, cardPosition: () => ({ x: 0, y: 0 }),
         cardHeight: () => 150, startVersionArrival: () => {}, panToVersion: () => {} },
@@ -283,7 +306,7 @@ test('merge continuation ignores unrelated histories sharing a legacy branch nam
     mergeDecisions: ref({}), mergeParentOverrides: ref({}), mergePositionOverrides: ref({}),
   }
   const history = useVersionHistory({
-    clientId: 'test', state, versions: computed(() => state.value.versions),
+    clientId: 'test', state, currentRoomName: ref('test'), versions: computed(() => state.value.versions),
     active: computed(() => state.value.versions.find((item) => item.id === state.value.activeId)),
     selectedNode: ref(null), windowDimensions: computed(() => ({ width: 200, height: 150 })), comparison,
     camera: { isVersionCentered: () => false, cardPosition: () => ({ x: 0, y: 0 }),
@@ -460,16 +483,19 @@ test('legacy numbering migrates session changes without treating them as forks',
   assert.deepEqual(graph, migrated)
 })
 
-test('entry labels wrap within the available size, including long unbroken words', () => {
-  const tile = { id: 'a', label: 'Long labels should use the available entry area', x: 0, y: 0, width: 100, height: 70, depth: 0, hasChildren: false }
+test('entry labels wrap at word boundaries and truncate without breaking words across lines', () => {
+  const tile = { id: 'a', label: 'Long labels wrap at spaces', x: 0, y: 0, width: 100, height: 90, depth: 0, hasChildren: false }
   const wrapped = layoutTileLabel(tile)
   assert.ok(wrapped.lines.length > 1)
   assert.equal(wrapped.lines.join(' '), tile.label)
   assert.ok(wrapped.lines.length * wrapped.fontSize * 1.15 <= tile.height - 6)
-  assert.ok(wrapped.lines.every((line) => line.length * wrapped.fontSize * 0.67 <= tile.width - 10))
-  const unbroken = layoutTileLabel({ ...tile, label: 'abcdefghijklmnopqrstuvwxyz' })
-  assert.equal(unbroken.lines.join(''), 'abcdefghijklmnopqrstuvwxyz')
-  assert.ok(unbroken.lines.length > 1)
+  const unbroken = layoutTileLabel({ ...tile, label: 'abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz' })
+  assert.equal(unbroken.lines.length, 1)
+  assert.match(unbroken.lines[0], /^[a-z]+\.\.\.$/)
+  const hyphenated = layoutTileLabel({ ...tile, label: 'alpha-beta' })
+  assert.equal(hyphenated.lines.join(''), 'alpha-beta')
+  assert.ok(hyphenated.lines.length === 1 || hyphenated.lines[0].endsWith('-'))
+  assert.match(layoutTileLabel({ ...tile, height: 30, label: 'An entry with a much longer label that cannot fit' }).lines[0], /\.\.\.$/)
 })
 
 test('treemap layout reuses subtree geometry and reflects later edits', () => {
@@ -486,24 +512,26 @@ test('treemap layout reuses subtree geometry and reflects later edits', () => {
   assert.deepEqual(updated, forest.flatMap((root, index) => tilesFor(root, forest, index)))
 })
 
-test('treemap layout preserves the placement of uneven sibling subtrees', () => {
+test('squarified sibling subtrees fill their parent without overlapping', () => {
   const forest = [node('root', [
     node('a'), node('b', [node('b1'), node('b2')]), node('c'),
     node('d', [node('d1'), node('d2'), node('d3')]), node('e'),
   ])]
-  assert.deepEqual(tilesForForest(forest).map(({ id, x, y, width, height }) => ({ id, x, y, width, height })), [
-    { id: 'root', x: 12, y: 12, width: 680, height: 588.780487804878 },
-    { id: 'a', x: 20, y: 48, width: 152, height: 106 },
-    { id: 'b', x: 356, y: 48, width: 168, height: 264 },
-    { id: 'b1', x: 364, y: 84, width: 152, height: 106 },
-    { id: 'b2', x: 364, y: 198, width: 152, height: 106 },
-    { id: 'c', x: 532, y: 48, width: 152, height: 106 },
-    { id: 'd', x: 20, y: 320, width: 328, height: 264 },
-    { id: 'd1', x: 28, y: 356, width: 152, height: 106 },
-    { id: 'd2', x: 188, y: 356, width: 152, height: 106 },
-    { id: 'd3', x: 28, y: 470, width: 152, height: 106 },
-    { id: 'e', x: 356, y: 320, width: 152, height: 106 },
-  ])
+  const tiles = tilesForForest(forest)
+  const root = tiles.find((tile) => tile.id === 'root')
+  const children = tiles.filter((tile) => tile.depth === 1)
+  assert.equal(children.length, 5)
+  for (const [index, child] of children.entries()) {
+    assert.ok(child.x >= root.x && child.y >= root.y)
+    assert.ok(child.x + child.width <= root.x + root.width + 0.001)
+    assert.ok(child.y + child.height <= root.y + root.height + 0.001)
+    for (const other of children.slice(index + 1)) {
+      assert.ok(child.x + child.width <= other.x + 0.001 || other.x + other.width <= child.x + 0.001
+        || child.y + child.height <= other.y + 0.001 || other.y + other.height <= child.y + 0.001)
+    }
+  }
+  const area = children.reduce((sum, tile) => sum + tile.width * tile.height, 0)
+  assert.ok(area / ((root.width - 16) * (root.height - 44)) > 0.95)
 })
 
 test('duplicate connectors retain the original choices across ties and nested duplicate groups', () => {

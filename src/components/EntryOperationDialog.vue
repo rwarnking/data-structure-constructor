@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { actionIcons } from '../config/icons'
-const { hierarchy: GitBranch, layers: Layers3, add: Plus, close: X } = actionIcons
+const { split: SplitIcon, mergeEntries: MergeEntriesIcon, add: Plus, close: X } = actionIcons
 import type { EntryOperation, TreeNode } from '../types/workspace'
 import { findNode } from '../utils/tree'
 
@@ -21,7 +21,7 @@ const emit = defineEmits<{ close: []; commit: []; 'add-split': []; 'remove-split
         <input id="merge-entry-value" v-model="entryOperation.value" maxlength="120" />
         <label class="editor-label" for="merge-entry-description">Description <span>optional</span></label>
         <textarea id="merge-entry-description" v-model="entryOperation.description" maxlength="400" rows="3"></textarea>
-        <div class="editor-actions"><button type="button" class="cancel-button" @click="emit('close')">Cancel</button><button type="submit" class="primary-button" :disabled="!entryOperation.value.trim()"><Layers3 :size="15" /> Merge entries</button></div>
+        <div class="editor-actions"><button type="button" class="cancel-button" @click="emit('close')">Cancel</button><button type="submit" class="primary-button" :disabled="!entryOperation.value.trim()"><MergeEntriesIcon :size="15" /> Merge entries</button></div>
       </template>
       <template v-else>
         <p class="operation-note">Each original child must be assigned to exactly one resulting entry.</p>
@@ -47,7 +47,7 @@ const emit = defineEmits<{ close: []; commit: []; 'add-split': []; 'remove-split
             </select>
           </label>
         </div>
-        <div class="editor-actions"><button type="button" class="cancel-button" @click="emit('close')">Cancel</button><button type="submit" class="primary-button" :disabled="entryOperation.entries.some((entry) => !entry.value.trim())"><GitBranch :size="15" /> Split entry</button></div>
+        <div class="editor-actions"><button type="button" class="cancel-button" @click="emit('close')">Cancel</button><button type="submit" class="primary-button" :disabled="entryOperation.entries.some((entry) => !entry.value.trim())"><SplitIcon :size="15" /> Split entry</button></div>
       </template>
     </form>
   </div>

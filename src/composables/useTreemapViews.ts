@@ -50,7 +50,8 @@ export function useTreemapViews(options: {
     }
     return {
       width: CARD_WIDTH - 14,
-      height: CARD_HEIGHT - 47,
+      height: (CARD_WIDTH - 14) * Math.max(1, windowDimensions.value.height - 47)
+        / Math.max(1, windowDimensions.value.width - 14),
     }
   }
   function mapViewFor(version: Version): MapView {
@@ -180,7 +181,10 @@ export function useTreemapViews(options: {
     event.stopPropagation()
     state.value.activeId = version.id
     const view = mapViewFor(version)
-    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
+    const target = event.currentTarget as Element
+    const map = target.closest<HTMLElement>('.mini-map, .overview-map')
+    if (!map) return
+    const rect = map.getBoundingClientRect()
     const viewport = mapViewport(version)
     const timer = mapViewTimers.get(version.id)
     if (timer !== undefined) window.clearTimeout(timer)

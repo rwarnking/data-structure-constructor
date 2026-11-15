@@ -7,7 +7,7 @@ type StoryStep = {
   list?: { ordered: boolean; items: string[] }; highlight?: string; instruction?: string
   completion?: { event: string; selector: string }; action?: { label: string; selector: string }
 }
-const props = defineProps<{ story: { title: string; steps: StoryStep[] } }>()
+const props = defineProps<{ story: { title: string; steps: StoryStep[] }; rightInset?: number }>()
 const emit = defineEmits<{ close: [] }>()
 const { close: Close } = actionIcons
 const baseUrl = import.meta.env.BASE_URL
@@ -51,7 +51,8 @@ onUnmounted(() => {
 
 <template>
   <div v-if="bounds" class="story-highlight" :style="{ top: `${bounds.top}px`, left: `${bounds.left}px`, width: `${bounds.width}px`, height: `${bounds.height}px` }"></div>
-  <section class="story-guide entry-editor" role="dialog" :aria-label="story.title" @keydown.esc.stop="emit('close')">
+  <section class="story-guide entry-editor" role="dialog" :aria-label="story.title"
+    :style="rightInset ? { right: `${rightInset}px` } : undefined" @keydown.esc.stop="emit('close')">
     <div class="editor-heading"><span class="section-label">{{ story.title }} · {{ index + 1 }} / {{ story.steps.length }}</span>
       <button type="button" class="quiet-icon" aria-label="Exit tutorial" @click="emit('close')"><Close :size="17" /></button></div>
     <h2>{{ step.title }}</h2>

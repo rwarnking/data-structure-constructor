@@ -1,15 +1,16 @@
-import type { ComputedRef, Ref } from 'vue'
-import type { StoredState, TreeNode, Version } from '../types/workspace'
+import { computed, ref, watch, type ComputedRef, type Ref } from 'vue'
+import type { CopyLink, StoredState, TreeNode, Version } from '../types/workspace'
 import type { useVersionComparison } from './useVersionComparison'
 import type { useGraphCamera } from './useGraphCamera'
 import type { useTreemapViews } from './useTreemapViews'
 import { findNode, flattenPaths } from '../utils/tree'
-import { allocateVersionNumber, assignVersionSuffixes, displayVersionId, isLatestOnBranch, retireVersionNumbers, structureSignature } from '../utils/versions'
+import { allocateVersionNumber, assignVersionSuffixes, compareCopyLinks, displayVersionId, isLatestOnBranch, retireVersionNumbers, structureSignature } from '../utils/versions'
 import { fitMapViewToLayout, positionsForData } from '../utils/treemap'
 
 export function useVersionHistory(options: {
   clientId: string
   state: Ref<StoredState>
+  currentRoomName: Ref<string>
   versions: ComputedRef<Version[]>
   active: ComputedRef<Version>
   selectedNode: Ref<string | null>
@@ -25,10 +26,81 @@ export function useVersionHistory(options: {
   const { clientId: CLIENT_ID, state, versions, active, selectedNode, windowDimensions, reflowLayout, setSelectedNodes, notify, logInteraction } = options
   const { compareMode, compareIds, mergeMode, mergeResult, showOverview, mergeDecisions, mergeParentOverrides, mergePositionOverrides } = options.comparison
   const { isVersionCentered, cardPosition, cardHeight, startVersionArrival, panToVersion } = options.camera
-  const { mapViewport, mapViewFor, centerVersionTreemaps, compactVersionTreemaps, mapViewTimers, transientMapViews } = options.treemaps
+  const { mapViewport, mapViewFor, centerVersionTreemaps, compactVersionTreemaps, commitMapView, mapViewTimers, transientMapViews } = options.treemaps
   const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
   const numberingWriter = crypto.randomUUID()
   const continuedParents = new Set<string>()
+  const undone = ref<{ version: Version; copyLinks: CopyLink[] } | null>(null)
+  const latestVersion = computed(() => [...versions.value].filter((version) => version.id !== 'v0')
+    .sort((a, b) => b.createdAt - a.createdAt || b.step - a.step || b.id.localeCompare(a.id))[0])
+  const canUndo = computed(() => {
+    const version = latestVersion.value
+    return !!version && !undone.value && !versions.value.some((other) =>
+      other.parentId === version.id || other.mergeSourceId === version.id)
+  })
+  const canRedo = computed(() => {
+    const version = undone.value?.version
+    return !!version && !versions.value.some((item) => item.id === version.id)
+      && versions.value.some((item) => item.id === version.parentId)
+      && (!version.mergeSourceId || versions.value.some((item) => item.id === version.mergeSourceId))
+  })
+  watch(() => versions.value.map((version) => version.id), (ids, previous) => {
+    const oldIds = new Set(previous)
+    if (ids.some((id) => !oldIds.has(id))) undone.value = null
+  }, { flush: 'sync' })
+  watch(options.currentRoomName, () => { undone.value = null }, { flush: 'sync' })
+
+  function undoVersion() {
+    const version = latestVersion.value
+    if (!version || !canUndo.value) return
+    const parent = versions.value.find((item) => item.id === version.parentId)
+    if (!parent) { notify('Cannot undo: the parent version is missing'); return }
+    const wasCentered = isVersionCentered(active.value)
+    commitMapView(version.id)
+    undone.value = { version: clone(version), copyLinks: clone(state.value.copyLinks.filter((link) =>
+      link.sourceVersionId === version.id || link.targetVersionId === version.id)) }
+    const timer = mapViewTimers.get(version.id)
+    if (timer !== undefined) window.clearTimeout(timer)
+    mapViewTimers.delete(version.id)
+    delete transientMapViews.value[version.id]
+    state.value.copyLinks = state.value.copyLinks.filter((link) =>
+      link.sourceVersionId !== version.id && link.targetVersionId !== version.id)
+    retireVersionNumbers(state.value, [version])
+    state.value.versions = versions.value.filter((item) => item.id !== version.id)
+    assignVersionSuffixes(state.value.versions, state.value.retiredVersionNumbers)
+    state.value.activeId = parent.id
+    setSelectedNodes([])
+    options.comparison.closeVersionSelection()
+    reflowLayout()
+    panToVersion(parent, wasCentered)
+    logInteraction(`Undid ${displayVersionId(version)}`)
+    notify(`Undid ${displayVersionId(version)}`)
+  }
+
+  function redoVersion() {
+    const saved = undone.value
+    if (!saved || !canRedo.value) return
+    const wasCentered = isVersionCentered(active.value)
+    undone.value = null
+    state.value.versions.push(clone(saved.version))
+    const byId = new Map(versions.value.map((version) => [version.id, version]))
+    const links = saved.copyLinks.filter((link) => {
+      const source = byId.get(link.sourceVersionId)
+      const target = byId.get(link.targetVersionId)
+      return source && target && findNode(source.data, link.sourceNodeId) && findNode(target.data, link.targetNodeId)
+    })
+    const uniqueLinks = new Map([...state.value.copyLinks, ...links].map((link) => [JSON.stringify(link), link]))
+    state.value.copyLinks = [...uniqueLinks.values()].sort(compareCopyLinks)
+    assignVersionSuffixes(state.value.versions, state.value.retiredVersionNumbers)
+    reflowLayout()
+    const version = versions.value.find((item) => item.id === saved.version.id)!
+    state.value.activeId = version.id
+    setSelectedNodes([])
+    options.comparison.closeVersionSelection()
+    panToVersion(version, wasCentered)
+    logInteraction(`Redid ${displayVersionId(version)}`, { versionId: version.id })
+    notify(`Redid ${displayVersionId(version)}`)
+  }
   function numberVersion(version: Version, parent: Version, newBranch: boolean) {
     version.number = allocateVersionNumber(versions.value, parent, version.id, numberingWriter, newBranch)
     if (!newBranch && parent.id !== 'v0') {
@@ -76,7 +148,7 @@ export function useVersionHistory(options: {
     const viewport = mapViewport(parent)
     const currentMapView = mapViewFor(parent)
     const positions = positionsForData(parent.data, data, parent.positions, currentMapView, viewport)
-    const fittedMapView = fitMapViewToLayout(data, positions, currentMapView)
+    const fittedMapView = fitMapViewToLayout(data, positions, currentMapView, undefined, viewport)
     const version: Version = {
       id: `v${state.value.nextVersion++}-${CLIENT_ID}-${crypto.randomUUID().replace(/-/g, '')}`, parentId: parent.id, step: parent.step + 1,
       lane, branch, change, data, createdBy: CLIENT_ID, positions,
@@ -206,5 +278,5 @@ export function useVersionHistory(options: {
     notify('Branch pruned')
   }
 
-  return { createVersion, confirmMerge, pruneVersion }
+  return { createVersion, confirmMerge, pruneVersion, canUndo, canRedo, undoVersion, redoVersion }
 }

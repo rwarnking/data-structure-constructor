@@ -88,7 +88,7 @@ const renderedTiles = computed(() => {
     <div v-else class="mini-map" :class="{ empty: !cardData(version).length }"
       @pointerdown="startMapPan($event, version)" @wheel="zoomMap($event, version)">
       <template v-if="cardData(version).length">
-        <svg :viewBox="`0 0 ${mapViewport(version).width} ${mapViewport(version).height}`" preserveAspectRatio="none" class="treemap-svg">
+        <svg :viewBox="`0 0 ${mapViewport(version).width} ${mapViewport(version).height}`" preserveAspectRatio="xMidYMid meet" class="treemap-svg">
           <g :transform="mapTransform(version)">
             <rect v-for="tile in renderedTiles" :key="tile.id"
               :x="tile.x" :y="tile.y" :width="tile.width" :height="tile.height"
@@ -102,6 +102,7 @@ const renderedTiles = computed(() => {
               @click.stop="onTileClick(version, tile.id, $event)"
               @dblclick.stop="onTileDoubleClick(version, tile.id)"
               @contextmenu="version.id === active.id && !isReadOnly && onTileContext($event, tile.id)">
+              <title>{{ tile.label }}</title>
             </rect>
             <path v-for="link in duplicateValueLinks.get(version.id) ?? []" :key="link.id"
               :d="link.path" fill="none" stroke="var(--theme-duplicate-connector)" stroke-width="3"
