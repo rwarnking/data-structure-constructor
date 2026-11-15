@@ -192,6 +192,16 @@ test('version tags synchronize between collaborators and stay in their room', as
     await host.getByRole('button', { name: 'Save tag' }).click()
     await expect.poll(async () => (await state(guest, room)).versions.find((item) => item.id === id)?.tag)
       .toEqual({ title: 'Shared', description: 'Peer tag' })
+    const previousView = (await state(host, room)).versions.find((item) => item.id === id).mapView
+    await host.locator('.version-card.active .mini-map').hover()
+    await host.keyboard.down('Shift')
+    await host.mouse.wheel(0, -180)
+    await host.keyboard.up('Shift')
+    await expect.poll(async () => (await state(host, room)).versions.find((item) => item.id === id).mapView.zoom)
+      .not.toBe(previousView.zoom)
+    const updatedView = (await state(host, room)).versions.find((item) => item.id === id).mapView
+    await expect.poll(async () => (await state(guest, room)).versions.find((item) => item.id === id)?.mapView)
+      .toEqual(updatedView)
     const separateRoom = `other-${randomUUID()}`
     await guest.goto(`/?room=${separateRoom}`)
     await expect(guest.getByRole('status').first()).toHaveText('Hosting')
@@ -829,21 +839,82 @@ test('a saved legacy merge continues its available parent lane after reload with
   expect((await check()).suffix).toBe(1)
 })
 
+test('large treemaps cull offscreen tiles while keeping selection and duplicate connectors working', async ({ page }) => {
+  const room = `test-${randomUUID()}`
+  const children = Array.from({ length: 400 }, (_, index) => ({
+    id: `child-${index}`, value: index === 0 || index === 399 ? 'Duplicate' : `Entry ${index}`, children: [],
+  }))
+  const versions = [
+    { id: 'v0', parentId: null, step: 0, lane: 0, branch: 'ROOT', change: 'Empty structure', data: [], createdAt: 0 },
+    { id: 'v1', parentId: 'v0', step: 1, lane: 0, branch: 'Branch 1', change: 'Edit', createdAt: 1,
+      data: [{ id: 'parent', value: 'Parent', children }],
+      positions: { parent: { x: 12 / 260, y: 12 / 220 } }, mapView: { zoom: 1, panX: 0, panY: 0, manual: true } },
+  ]
+  await page.addInitScript(({ room, versions }) => {
+    localStorage.setItem(`canopy-room-data-v1-${encodeURIComponent(room)}`, JSON.stringify({
+      versions, activeId: 'v1', nextNode: 402, nextVersion: 2, nextLane: 1, copyLinks: [],
+    }))
+  }, { room, versions })
+  await openRoom(page, room)
+  await focusActive(page)
+  const card = page.locator('.version-card.active')
+  const tiles = card.locator('.tree-tile')
+  await expect.poll(() => tiles.count()).toBeLessThan(20)
+  await expect(card.locator('[data-node="child-0"]')).toBeVisible()
+  await expect(card.locator('[data-node="child-399"]')).toHaveCount(0)
+  await expect(card.locator('path[stroke="var(--theme-duplicate-connector)"]')).toHaveCount(1)
+  await card.locator('[data-node="child-0"]').click()
+  await expect(card.locator('[data-node="child-0"]')).toHaveClass(/is-selected/)
+  const map = card.locator('.mini-map')
+  const bounds = await map.boundingBox()
+  await page.keyboard.down('Shift')
+  await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(bounds.x + bounds.width / 2 - 550, bounds.y + bounds.height / 2, { steps: 5 })
+  await page.mouse.up()
+  await page.keyboard.up('Shift')
+  await expect(card.locator('[data-node="child-0"]')).toHaveCount(0)
+  await expect(card.locator('[data-node="child-2"]')).toBeVisible()
+  await card.locator('[data-node="child-2"]').click()
+  await expect(card.locator('[data-node="child-2"]')).toHaveClass(/is-selected/)
+  const visibleCenter = (tile) => tile.evaluate((element) => {
+    const tile = element.getBoundingClientRect()
+    const map = element.closest('.mini-map').getBoundingClientRect()
+    return { x: (Math.max(tile.left, map.left) + Math.min(tile.right, map.right)) / 2,
+      y: (Math.max(tile.top, map.top) + Math.min(tile.bottom, map.bottom)) / 2 }
+  })
+  const source = await visibleCenter(card.locator('[data-node="child-2"]'))
+  const target = await visibleCenter(card.locator('[data-node="child-1"]'))
+  await page.mouse.move(source.x, source.y)
+  await page.mouse.down()
+  await page.mouse.move(target.x, target.y, { steps: 8 })
+  const dropTarget = card.locator('.tree-tile.is-over')
+  await expect(dropTarget).toHaveCount(1)
+  const targetId = await dropTarget.getAttribute('data-node')
+  await page.mouse.up()
+  await expect.poll(async () => (await activeData(page, room))[0].children.find((node) => node.id === targetId)
+    ?.children.some((node) => node.id === 'child-2')).toBe(true)
+})
+
 test('long version and copy connectors stay visible across offscreen endpoints and straight lanes are batched', async ({ page }) => {
   const room = `test-${randomUUID()}`
   const entry = { id: 'n1', value: 'Shared', children: [] }
+  const secondEntry = { id: 'n2', value: 'Second', children: [] }
   const versions = [{ id: 'v0', parentId: null, step: 0, lane: 0, branch: 'ROOT', change: 'Empty structure', data: [], createdAt: 0 }]
   for (let step = 1; step <= 30; step++) {
     versions.push({
       id: `v${step}`, parentId: step === 20 ? 'v1' : `v${step - 1}`,
       ...(step === 20 ? { mergeSourceId: 'v19' } : step === 21 ? { mergeSourceId: 'v1' } : {}),
-      step, lane: 0, branch: 'Branch 1', change: 'Edit', data: [entry], createdAt: step,
+      step, lane: 0, branch: 'Branch 1', change: 'Edit', data: [entry, secondEntry], createdAt: step,
     })
   }
   await page.addInitScript(({ room, versions }) => {
     localStorage.setItem(`canopy-room-data-v1-${encodeURIComponent(room)}`, JSON.stringify({
-      versions, activeId: 'v10', nextNode: 2, nextVersion: 31, nextLane: 1,
-      copyLinks: [{ sourceVersionId: 'v1', sourceNodeId: 'n1', targetVersionId: 'v20', targetNodeId: 'n1' }],
+      versions, activeId: 'v10', nextNode: 3, nextVersion: 31, nextLane: 1,
+      copyLinks: [
+        { sourceVersionId: 'v1', sourceNodeId: 'n1', targetVersionId: 'v20', targetNodeId: 'n1' },
+        { sourceVersionId: 'v1', sourceNodeId: 'n2', targetVersionId: 'v20', targetNodeId: 'n2' },
+      ],
     }))
   }, { room, versions })
   await openRoom(page, room)
@@ -853,11 +924,18 @@ test('long version and copy connectors stay visible across offscreen endpoints a
   await expect(page.locator('.version-card[data-version="v21"]')).toHaveCount(0)
   await expect(page.locator('[data-version-connectors~="v20"]')).toHaveAttribute('d', /M .* H /)
   await expect(page.locator('#merge-connector-v21')).toHaveAttribute('d', /M .* H /)
-  await expect(page.locator('.copy-link-hit')).toHaveCount(1)
-  await expect(page.locator('.copy-link')).toHaveAttribute('d', /M .* Q /)
-  await page.locator('.copy-link-hit').focus()
+  await expect(page.locator('.copy-link-hit')).toHaveCount(2)
+  await expect(page.locator('.copy-link').first()).toHaveAttribute('d', /M .* Q /)
+  await page.locator('.copy-link-hit').first().focus()
   await page.keyboard.press('Enter')
   await expect.poll(async () => (await state(page, room)).activeId).toBe('v1')
+  const pathBeforeZoom = await page.locator('.copy-link').first().getAttribute('d')
+  const sourceMap = page.locator('.version-card.active .mini-map')
+  await sourceMap.hover()
+  await page.keyboard.down('Shift')
+  await page.mouse.wheel(0, -180)
+  await page.keyboard.up('Shift')
+  await expect.poll(() => page.locator('.copy-link').first().getAttribute('d')).not.toBe(pathBeforeZoom)
   await page.keyboard.press('Shift+a')
   await expect.poll(async () => page.locator('[data-version-connectors]').evaluateAll((paths) =>
     Math.max(...paths.map((path) => path.getAttribute('data-version-connectors').split(' ').length)))).toBeGreaterThan(1)
@@ -1676,6 +1754,54 @@ test('simultaneous peer edits keep distinct stable version numbers', async ({ br
     const displayed = await labelsByVersion(host)
     const pair = childLabels.map((id) => displayed[id]).sort()
     expect(pair[1]).toBe(`${pair[0]}.1`)
+  } finally {
+    await Promise.all(contexts.map((context) => context.close()))
+  }
+})
+
+test('simultaneous edits to one version converge and persist', async ({ browser }) => {
+  const contexts = await Promise.all([browser.newContext(), browser.newContext()])
+  for (const context of contexts) {
+    await context.addInitScript(() => {
+      const send = RTCDataChannel.prototype.send
+      const pending = []
+      RTCDataChannel.prototype.send = function (data) {
+        if (window.holdPeerMessages) pending.push([this, data])
+        else send.call(this, data)
+      }
+      window.releasePeerMessages = () => {
+        window.holdPeerMessages = false
+        for (const [channel, data] of pending.splice(0)) send.call(channel, data)
+      }
+    })
+  }
+  const [host, guest] = await Promise.all(contexts.map((context) => context.newPage()))
+  try {
+    const room = await openRoom(host)
+    await guest.goto(`/?room=${room}`)
+    await expect(guest.getByRole('status').first()).toHaveText('Connected', { timeout: 20000 })
+    await addEntries(host, ['Base'])
+    const id = (await state(host, room)).activeId
+    await expect.poll(async () => (await state(guest, room)).activeId).toBe(id)
+    for (const [page, title] of [[host, 'Host tag'], [guest, 'Guest tag']]) {
+      await focusActive(page)
+      await page.locator('.version-card.active .card-menu').click()
+      await page.getByRole('button', { name: 'Add tag', exact: true }).click()
+      await page.getByLabel('Title', { exact: true }).fill(title)
+      await page.evaluate(() => { window.holdPeerMessages = true })
+    }
+    await Promise.all([host, guest].map((page) => page.getByRole('button', { name: 'Save tag' }).click()))
+    const tag = async (page) => (await state(page, room)).versions.find((version) => version.id === id)?.tag
+    await expect.poll(async () => (await tag(host))?.title).toBe('Host tag')
+    await expect.poll(async () => (await tag(guest))?.title).toBe('Guest tag')
+    for (const page of [host, guest]) await page.evaluate(() => window.releasePeerMessages())
+    await expect.poll(async () => JSON.stringify(await tag(guest)) === JSON.stringify(await tag(host)), { timeout: 20000 })
+      .toBe(true)
+    expect(['Host tag', 'Guest tag']).toContain((await tag(host)).title)
+    const winner = await tag(host)
+    await guest.reload()
+    await expect(guest.getByRole('status').first()).toHaveText('Connected', { timeout: 20000 })
+    await expect.poll(() => tag(guest)).toEqual(winner)
   } finally {
     await Promise.all(contexts.map((context) => context.close()))
   }

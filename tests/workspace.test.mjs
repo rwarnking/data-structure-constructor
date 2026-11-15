@@ -19,6 +19,8 @@ const { useVersionHistory } = await vite.ssrLoadModule('/src/composables/useVers
 const { changedEntryIds } = await vite.ssrLoadModule('/src/utils/versionDifferences.ts')
 const { reflowVersionLayout, allocateVersionNumber, assignMissingVersionNumbers, assignVersionSuffixes, displayVersionId, isLatestOnBranch, retireVersionNumbers } = await vite.ssrLoadModule('/src/utils/versions.ts')
 const { layoutTileLabel, tilesForForest, tilesFor } = await vite.ssrLoadModule('/src/utils/treemap.ts')
+const { duplicateLinks } = await vite.ssrLoadModule('/src/utils/duplicateLinks.ts')
+const { nodeParentIds } = await vite.ssrLoadModule('/src/utils/tree.ts')
 const { useGraphCamera } = await vite.ssrLoadModule('/src/composables/useGraphCamera.ts')
 const { parseDataset } = await vite.ssrLoadModule('/src/services/dataset.ts')
 const { isStoredState, isVersion } = await vite.ssrLoadModule('/src/utils/validation.ts')
@@ -463,6 +465,90 @@ test('treemap layout reuses subtree geometry and reflects later edits', () => {
   assert.equal(updated.length, 27)
   assert.ok(updated.some((tile) => tile.id === 'new-child'))
   assert.deepEqual(updated, forest.flatMap((root, index) => tilesFor(root, forest, index)))
+})
+
+test('treemap layout preserves the placement of uneven sibling subtrees', () => {
+  const forest = [node('root', [
+    node('a'), node('b', [node('b1'), node('b2')]), node('c'),
+    node('d', [node('d1'), node('d2'), node('d3')]), node('e'),
+  ])]
+  assert.deepEqual(tilesForForest(forest).map(({ id, x, y, width, height }) => ({ id, x, y, width, height })), [
+    { id: 'root', x: 12, y: 12, width: 680, height: 588.780487804878 },
+    { id: 'a', x: 20, y: 48, width: 152, height: 106 },
+    { id: 'b', x: 356, y: 48, width: 168, height: 264 },
+    { id: 'b1', x: 364, y: 84, width: 152, height: 106 },
+    { id: 'b2', x: 364, y: 198, width: 152, height: 106 },
+    { id: 'c', x: 532, y: 48, width: 152, height: 106 },
+    { id: 'd', x: 20, y: 320, width: 328, height: 264 },
+    { id: 'd1', x: 28, y: 356, width: 152, height: 106 },
+    { id: 'd2', x: 188, y: 356, width: 152, height: 106 },
+    { id: 'd3', x: 28, y: 470, width: 152, height: 106 },
+    { id: 'e', x: 356, y: 320, width: 152, height: 106 },
+  ])
+})
+
+test('duplicate connectors retain the original choices across ties and nested duplicate groups', () => {
+  function originalChoices(data, tiles) {
+    const parents = nodeParentIds(data)
+    const groups = new Map()
+    for (const tile of tiles) {
+      if (!groups.has(tile.label)) groups.set(tile.label, [])
+      groups.get(tile.label).push(tile)
+    }
+    const connected = new Map(tiles.map((tile) => [tile.id, tile.id]))
+    function rootOf(id) {
+      const parent = connected.get(id)
+      if (parent === id) return id
+      const root = rootOf(parent)
+      connected.set(id, root)
+      return root
+    }
+    const choices = []
+    const ordered = [...groups].sort((a, b) => Math.min(...a[1].map((tile) => tile.depth))
+      - Math.min(...b[1].map((tile) => tile.depth)) || a[0].localeCompare(b[0]))
+    for (const [label, group] of ordered) {
+      const edges = group.flatMap((first, index) => group.slice(index + 1).map((second) => ({
+        first, second, parentChild: parents.get(first.id) === second.id || parents.get(second.id) === first.id,
+        distance: (first.x + first.width / 2 - second.x - second.width / 2) ** 2
+          + (first.y + first.height / 2 - second.y - second.height / 2) ** 2,
+      }))).sort((a, b) => Number(b.parentChild) - Number(a.parentChild) || a.distance - b.distance
+        || a.first.id.localeCompare(b.first.id) || a.second.id.localeCompare(b.second.id))
+      for (const { first, second } of edges) {
+        const firstRoot = rootOf(first.id)
+        const secondRoot = rootOf(second.id)
+        if (firstRoot === secondRoot) continue
+        const firstParent = parents.get(first.id)
+        const secondParent = parents.get(second.id)
+        const suppressed = firstParent && secondParent && firstParent !== secondParent && rootOf(firstParent) === rootOf(secondParent)
+        connected.set(firstRoot, secondRoot)
+        if (!suppressed) choices.push(`${first.id}:${second.id}:${label}`)
+      }
+    }
+    return choices
+  }
+  let seed = 543298
+  const random = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 2 ** 32 }
+  for (let run = 0; run < 200; run++) {
+    let id = 0
+    function make(depth) {
+      return { id: String(id++), value: ['same', 'also', 'other'][Math.floor(random() * 3)],
+        children: depth ? Array.from({ length: Math.floor(random() * 4) }, () => make(depth - 1)) : [] }
+    }
+    const forest = Array.from({ length: 1 + Math.floor(random() * 5) }, () => make(3))
+    let tiles = tilesForForest(forest)
+    if (run % 2 === 0) tiles = tiles.map((tile) => ({ ...tile, x: Math.round(tile.x / 500) * 500, y: Math.round(tile.y / 500) * 500 }))
+    if (run % 3 === 0) tiles.reverse()
+    assert.deepEqual(duplicateLinks(forest, tiles).map((link) => link.id), originalChoices(forest, tiles), `forest ${run}`)
+  }
+  const nested = [
+    { id: 'p1', value: 'parent', children: [{ id: 'c1', value: 'child', children: [] }] },
+    { id: 'p2', value: 'parent', children: [{ id: 'c2', value: 'child', children: [] }] },
+  ]
+  assert.deepEqual(duplicateLinks(nested, tilesForForest(nested)).map((link) => link.id), ['p1:p2:parent'])
+  const ids = ['é', 'e\u0301', 'x']
+  const tied = ids.map((id) => ({ id, value: 'same', children: [] }))
+  const tiedTiles = ids.map((id) => ({ id, label: 'same', x: 0, y: 0, width: 10, height: 10, depth: 0, hasChildren: false }))
+  assert.deepEqual(duplicateLinks(tied, tiedTiles).map((link) => link.id), originalChoices(tied, tiedTiles))
 })
 
 test('connections crossing the viewport remain visible without either endpoint card', () => {

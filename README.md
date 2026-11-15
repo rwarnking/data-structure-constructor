@@ -52,6 +52,9 @@ collaboration controllers. Room persistence is in `src/services/`, shared types
 are in `src/types/`, and tree, layout, and validation helpers are in `src/utils/`.
 Peer connectivity is implemented in `src/collaboration.ts`.
 
+Treemap cards render only tiles near their visible canvas; layout, selection, dragging,
+and duplicate and copy connectors still use the complete version data.
+
 The Vite UI runs at `http://127.0.0.1:5173`. Room state is persisted in browser storage in both development and deployed builds; the local workspace API is not used for room data.
 
 For a production build, run `npm run build` followed by `npm start`. The production server serves the built UI and the same workspace API on port `4173`.

@@ -5,4 +5,4 @@
 3. Profile graph panning with many versions and copy links; consider a spatial index to avoid scanning every connection on each camera update.
 4. Profile persistence and collaboration with large histories; investigate incremental serialization or updates without weakening conflict resolution.
 5. Can the rendering be speed up by culling.
-6. Look at the outline and dropshadow of connectors and check whether this can be optimized.
+6. Look at the outline of connectors and check whether this can be optimized.

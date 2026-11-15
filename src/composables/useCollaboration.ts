@@ -1,4 +1,4 @@
-import { computed, nextTick, ref, watch, type ComputedRef, type Ref } from 'vue'
+import { computed, nextTick, ref, toRaw, watch, type ComputedRef, type Ref } from 'vue'
 import { PeerRoom, type RoomStatus } from '../collaboration'
 import type { CollaborationMetadata, Revision, StoredState, Version } from '../types/workspace'
 import type { InteractionEntry, Ping, RemoteUser, SyncDelta, SyncSnapshot, VersionChange, VersionRemoval } from '../types/collaboration'
@@ -55,7 +55,7 @@ export function useCollaboration(options: {
   let interactionSequence = 0
   let collaborationRoom = ''
   let collaborationMetadata: CollaborationMetadata | null = null
-  let lastObservedState = JSON.stringify(state.value)
+  let lastObservedState = JSON.stringify(toRaw(state.value))
   let applyingRemoteState = false
 
   watch([selectedNodes, () => active.value.id, userName], publishPresence, { deep: true })
@@ -66,7 +66,7 @@ export function useCollaboration(options: {
     if (collaborationRoom) localStorage.setItem(interactionStorageKey(collaborationRoom), JSON.stringify(entries))
   }, { deep: true })
   watch(state, (value) => {
-    const snapshot = JSON.stringify(value)
+    const snapshot = JSON.stringify(toRaw(value))
     localStorage.setItem(roomDataKey(currentRoomName.value), snapshot)
     if (!applyingRemoteState && snapshot !== lastObservedState) publishLocalChanges(value)
     lastObservedState = snapshot
@@ -173,7 +173,7 @@ export function useCollaboration(options: {
     for (const version of value.versions) {
       const previousVersion = previousVersions.get(version.id)
       if (previousVersion && JSON.stringify({ ...previousVersion, numberSuffix: undefined })
-        === JSON.stringify({ ...version, numberSuffix: undefined })) continue
+        === JSON.stringify({ ...toRaw(version), numberSuffix: undefined })) continue
       collaborationMetadata.versions[version.id] = revision
       delete collaborationMetadata.removed[version.id]
       changed.push({ version, revision })
@@ -239,7 +239,7 @@ export function useCollaboration(options: {
       ? localActiveId
       : state.value.versions.find((version) => version.id === 'v0')!.id
     reflowLayout()
-    lastObservedState = JSON.stringify(state.value)
+    lastObservedState = JSON.stringify(toRaw(state.value))
     applyingRemoteState = true
     persistCollaborationMetadata()
     localStorage.setItem(roomDataKey(currentRoomName.value), lastObservedState)
@@ -406,7 +406,7 @@ export function useCollaboration(options: {
       followId = next.id
     }
     if (followId !== state.value.activeId) followVersion(versionsById.get(followId)!)
-    lastObservedState = JSON.stringify(state.value)
+    lastObservedState = JSON.stringify(toRaw(state.value))
     applyingRemoteState = true
     persistCollaborationMetadata()
     localStorage.setItem(roomDataKey(currentRoomName.value), lastObservedState)
@@ -578,7 +578,7 @@ export function useCollaboration(options: {
   }
 
   function resetRoomTracking() { collaborationRoom = ''; collaborationMetadata = null }
-  function setObservedState(value: StoredState) { lastObservedState = JSON.stringify(value) }
+  function setObservedState(value: StoredState) { lastObservedState = JSON.stringify(toRaw(value)) }
   function finishRoomSwitch() { applyingRemoteState = false }
 
   return { remoteUsers, interactions, pings, roomStatus, peerRoom, connectedUsers, recentInteractions,

@@ -86,20 +86,33 @@ function childLayouts(node: TreeNode, positions: Record<string, { x: number; y: 
   if (!children.length) return []
 
   let best: { score: number; layouts: Array<typeof children[number] & { x: number; y: number }> } | null = null
+  const childArea = children.reduce((sum, child) => sum + child.width * child.height, 0)
   for (let columns = 1; columns <= children.length; columns += 1) {
     const rows = Math.ceil(children.length / columns)
-    const columnWidths = Array.from({ length: columns }, (_, column) =>
-      Math.max(...children.filter((_, index) => index % columns === column).map((child) => child.width)))
-    const rowHeights = Array.from({ length: rows }, (_, row) =>
-      Math.max(...children.slice(row * columns, (row + 1) * columns).map((child) => child.height)))
-    const columnOffsets = columnWidths.map((_, column) =>
-      columnWidths.slice(0, column).reduce((sum, width) => sum + width + TREE_PADDING, 0))
-    const rowOffsets = rowHeights.map((_, row) =>
-      rowHeights.slice(0, row).reduce((sum, height) => sum + height + TREE_PADDING, 0))
+    const columnWidths = Array<number>(columns).fill(0)
+    const rowHeights = Array<number>(rows).fill(0)
+    for (let index = 0; index < children.length; index += 1) {
+      const child = children[index]!
+      const column = index % columns
+      const row = Math.floor(index / columns)
+      columnWidths[column] = Math.max(columnWidths[column]!, child.width)
+      rowHeights[row] = Math.max(rowHeights[row]!, child.height)
+    }
+    const columnOffsets: number[] = []
+    const rowOffsets: number[] = []
+    let offset = 0
+    for (const width of columnWidths) {
+      columnOffsets.push(offset)
+      offset += width + TREE_PADDING
+    }
+    offset = 0
+    for (const height of rowHeights) {
+      rowOffsets.push(offset)
+      offset += height + TREE_PADDING
+    }
     const width = columnWidths.reduce((sum, item) => sum + item, 0) + TREE_PADDING * (columns - 1) + TREE_PADDING * 2
     const height = rowHeights.reduce((sum, item) => sum + item, 0)
       + TREE_PADDING * (rows - 1) + TREE_PADDING * 2 + TREE_HEADER_HEIGHT
-    const childArea = children.reduce((sum, child) => sum + child.width * child.height, 0)
     const waste = Math.max(0, (width * height - childArea) / Math.max(1, childArea))
     const score = Math.abs(Math.log((width / height) / VERSION_TREEMAP_ASPECT)) + waste * 0.025
     if (best && score >= best.score) continue

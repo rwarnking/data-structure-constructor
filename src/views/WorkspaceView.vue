@@ -25,7 +25,8 @@ import VersionTags from '../components/VersionTags.vue'
 import StoryGuide from '../components/StoryGuide.vue'
 import tutorial from '../content/tutorial.json'
 import type { CopyLink, StoredState, Tile, TreeNode, Version, VersionTag } from '../types/workspace'
-import { countNodes, findNode, findParent, flattenNodes, nodeParentIds, removeNode } from '../utils/tree'
+import { countNodes, findNode, findParent, flattenNodes, removeNode } from '../utils/tree'
+import { duplicateLinks } from '../utils/duplicateLinks'
 import { compareCopyLinks, displayVersionId, reflowVersionLayout } from '../utils/versions'
 import { changedEntryIds } from '../utils/versionDifferences'
 import { RootNotEmptyError } from '../utils/validation'
@@ -759,9 +760,12 @@ function versionAction(version: Version) {
   }
   return { label: 'modify', symbol: actionSymbols.modify }
 }
-function mapTransform(version: Version) {
+function cardMapView(version: Version) {
   const layout = version.id === active.value.id ? previewLayout.value : null
-  const view = layout?.view ?? mapViewFor(version)
+  return layout?.view ?? mapViewFor(version)
+}
+function mapTransform(version: Version) {
+  const view = cardMapView(version)
   return `translate(${view.panX} ${view.panY}) scale(${view.zoom})`
 }
 const versionTiles = computed(() => {
@@ -781,66 +785,7 @@ const versionTiles = computed(() => {
 const duplicateValueLinks = computed(() => {
   const result = new Map<string, Array<{ id: string; path: string }>>()
   for (const version of visibleVersions.value) {
-    const parents = nodeParentIds(cardData(version))
-    const groups = new Map<string, Tile[]>()
-    for (const tile of versionTiles.value.get(version.id) ?? []) {
-      const group = groups.get(tile.label) ?? []
-      group.push(tile)
-      groups.set(tile.label, group)
-    }
-    const links: Array<{ id: string; path: string }> = []
-    const connected = new Map((versionTiles.value.get(version.id) ?? []).map((tile) => [tile.id, tile.id]))
-    const rootOf = (id: string): string => {
-      const parent = connected.get(id)!
-      if (parent === id) return id
-      const root = rootOf(parent)
-      connected.set(id, root)
-      return root
-    }
-    const orderedGroups = [...groups].sort((left, right) =>
-      Math.min(...left[1].map((tile) => tile.depth)) - Math.min(...right[1].map((tile) => tile.depth))
-      || left[0].localeCompare(right[0]))
-    for (const [label, tiles] of orderedGroups) {
-      if (tiles.length < 2) continue
-      const candidates = tiles.flatMap((first, index) => tiles.slice(index + 1).map((second) => ({
-        first,
-        second,
-        isParentChild: parents.get(first.id) === second.id || parents.get(second.id) === first.id,
-        distance: (first.x + first.width / 2 - second.x - second.width / 2) ** 2
-          + (first.y + first.height / 2 - second.y - second.height / 2) ** 2,
-      }))).sort((left, right) => Number(right.isParentChild) - Number(left.isParentChild)
-        || left.distance - right.distance
-        || left.first.id.localeCompare(right.first.id)
-        || left.second.id.localeCompare(right.second.id))
-      for (const { first, second } of candidates) {
-        const firstRoot = rootOf(first.id)
-        const secondRoot = rootOf(second.id)
-        if (firstRoot === secondRoot) continue
-        const firstParent = parents.get(first.id)
-        const secondParent = parents.get(second.id)
-        if (firstParent && secondParent && firstParent !== secondParent
-          && rootOf(firstParent) === rootOf(secondParent)) {
-          connected.set(firstRoot, secondRoot)
-          continue
-        }
-        connected.set(firstRoot, secondRoot)
-        const start = { x: first.x + first.width / 2, y: first.y + first.height / 2 }
-        const end = { x: second.x + second.width / 2, y: second.y + second.height / 2 }
-        const dx = end.x - start.x
-        const dy = end.y - start.y
-        const distance = Math.max(1, Math.hypot(dx, dy))
-        const bend = Math.min(24, Math.max(8, distance * 0.12))
-        const control = {
-          x: (start.x + end.x) / 2 - (dy / distance) * bend,
-          y: (start.y + end.y) / 2 + (dx / distance) * bend,
-        }
-        links.push({
-          id: `${first.id}:${second.id}:${label}`,
-          path: `M ${start.x} ${start.y} Q ${control.x} ${control.y} ${end.x} ${end.y}`,
-        })
-      }
-    }
-    result.set(version.id, links)
+    result.set(version.id, duplicateLinks(cardData(version), versionTiles.value.get(version.id) ?? []))
   }
   return result
 })
@@ -865,7 +810,7 @@ function previewLabel() {
   if (previewLayout.value?.kind === 'detach') return 'DETACH PREVIEW'
   return 'LAYOUT PREVIEW'
 }
-function nodeGraphBounds(versionId: string, nodeId: string) {
+function nodeGraphBounds(versionId: string, nodeId: string, tileIndex?: Map<string, Tile>) {
   const version = versionsById.value.get(versionId)
   if (!version) return null
   const view = mapViewFor(version)
@@ -874,7 +819,7 @@ function nodeGraphBounds(versionId: string, nodeId: string) {
   const mapHeight = version.id === 'v0' ? cardHeight(version) - 2 : cardHeight(version) - 47
   const scaleX = mapWidth / viewport.width
   const scaleY = mapHeight / viewport.height
-  const tile = tileForNode(version.data, version.positions, nodeId)
+  const tile = tileIndex ? tileIndex.get(nodeId) : tileForNode(version.data, version.positions, nodeId)
   if (tile) {
     const position = displayCardPosition(version)
     const mapLeft = version.id === 'v0' ? 1 : 6
@@ -888,11 +833,28 @@ function nodeGraphBounds(versionId: string, nodeId: string) {
   }
   return null
 }
-const copyLinksWithBounds = computed(() => state.value.copyLinks.flatMap((link) => {
-  const source = nodeGraphBounds(link.sourceVersionId, link.sourceNodeId)
-  const target = nodeGraphBounds(link.targetVersionId, link.targetNodeId)
-  return source && target ? [{ link, source, target, path: copyLinkPath(source, target) }] : []
-}))
+const copyLinksWithBounds = computed(() => {
+  const counts = new Map<string, number>()
+  for (const link of state.value.copyLinks) {
+    for (const id of [link.sourceVersionId, link.targetVersionId]) counts.set(id, (counts.get(id) ?? 0) + 1)
+  }
+  const indexes = new Map<string, Map<string, Tile>>()
+  function endpoint(versionId: string, nodeId: string) {
+    const version = versionsById.value.get(versionId)
+    if (!version) return null
+    let index = indexes.get(versionId)
+    if (!index && counts.get(versionId)! > 1) {
+      index = new Map(tilesForForest(version.data, version.positions).map((tile) => [tile.id, tile]))
+      indexes.set(versionId, index)
+    }
+    return nodeGraphBounds(versionId, nodeId, index)
+  }
+  return state.value.copyLinks.flatMap((link) => {
+    const source = endpoint(link.sourceVersionId, link.sourceNodeId)
+    const target = endpoint(link.targetVersionId, link.targetNodeId)
+    return source && target ? [{ link, source, target, path: copyLinkPath(source, target) }] : []
+  })
+})
 const visibleCopyLinks = computed(() => copyLinksWithBounds.value.filter(({ source, target }) =>
   graphCamera.intersectsViewport({
     left: Math.min(source.left, target.left),
@@ -1209,6 +1171,7 @@ const cardModel: VersionCardModel = reactive({
   versionAction,
   cardData,
   mapViewport,
+  cardMapView,
   mapTransform,
   changedEntries,
   tileSelectionColor,

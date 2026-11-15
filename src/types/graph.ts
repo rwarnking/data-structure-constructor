@@ -1,4 +1,4 @@
-import type { Tile, TreeNode, Version } from './workspace'
+import type { MapView, Tile, TreeNode, Version } from './workspace'
 
 export type VersionCardModel = {
   active: Version
@@ -29,6 +29,7 @@ export type VersionCardModel = {
   versionAction: (version: Version) => { label: string; symbol: string }
   cardData: (version: Version) => TreeNode[]
   mapViewport: (version: Version) => { width: number; height: number }
+  cardMapView: (version: Version) => MapView
   mapTransform: (version: Version) => string
   changedEntries: Map<string, Set<string>>
   tileSelectionColor: (versionId: string, nodeId: string) => string | undefined

@@ -9,9 +9,22 @@ import { displayVersionChange, displayVersionId } from '../utils/versions'
 
 const props = defineProps<{ version: Version; model: VersionCardModel }>()
 const { menu: MoreHorizontal, tag: TagIcon } = actionIcons
-const { active, compareIds, compareMode, zoom, overNode, invalidNode, hoveredNode, selectedNodes, draggedSubtreeIds, draggedOriginalTile, selectionBox, windowDimensions, clientId, isReadOnly, versionTiles, duplicateValueLinks, displayCardPosition, cardHeight, rootLabelOffset, rootLabelX, versionAuthorColor, activeUsersFor, descendantsCount, isPreviewing, previewLabel, versionAction, cardData, mapViewport, mapTransform, changedEntries, tileSelectionColor, dragOverlayTiles, handleVersionClick, handleVersionDoubleClick, onVersionContext, onVersionMenu, startMapPan, zoomMap, startMapTileGesture, enterTile, moveTileTooltip, leaveTile, onTileClick, onTileDoubleClick, onTileContext } = toRefs(props.model)
+const { active, compareIds, compareMode, zoom, overNode, invalidNode, hoveredNode, selectedNodes, draggedSubtreeIds, draggedOriginalTile, selectionBox, windowDimensions, clientId, isReadOnly, versionTiles, duplicateValueLinks, displayCardPosition, cardHeight, rootLabelOffset, rootLabelX, versionAuthorColor, activeUsersFor, descendantsCount, isPreviewing, previewLabel, versionAction, cardData, mapViewport, cardMapView, mapTransform, changedEntries, tileSelectionColor, dragOverlayTiles, handleVersionClick, handleVersionDoubleClick, onVersionContext, onVersionMenu, startMapPan, zoomMap, startMapTileGesture, enterTile, moveTileTooltip, leaveTile, onTileClick, onTileDoubleClick, onTileContext } = toRefs(props.model)
 const overlayTiles = computed(() => dragOverlayTiles.value(props.version))
 const overlayIds = computed(() => new Set(overlayTiles.value.map((tile) => tile.id)))
+const renderedTiles = computed(() => {
+  const view = cardMapView.value(props.version)
+  const viewport = mapViewport.value(props.version)
+  const margin = 16 + 4 / view.zoom
+  const left = -view.panX / view.zoom - margin
+  const top = -view.panY / view.zoom - margin
+  const right = (viewport.width - view.panX) / view.zoom + margin
+  const bottom = (viewport.height - view.panY) / view.zoom + margin
+  const retained = new Set(props.version.id === active.value.id ? draggedSubtreeIds.value : [])
+  return (versionTiles.value.get(props.version.id) ?? []).filter((tile) =>
+    retained.has(tile.id) || (tile.x <= right && tile.x + tile.width >= left
+      && tile.y <= bottom && tile.y + tile.height >= top))
+})
 </script>
 
 <template>
@@ -54,7 +67,7 @@ const overlayIds = computed(() => new Set(overlayTiles.value.map((tile) => tile.
       <template v-if="cardData(version).length">
         <svg :viewBox="`0 0 ${mapViewport(version).width} ${mapViewport(version).height}`" preserveAspectRatio="none" class="treemap-svg">
           <g :transform="mapTransform(version)">
-            <rect v-for="tile in versionTiles.get(version.id) ?? []" :key="tile.id"
+            <rect v-for="tile in renderedTiles" :key="tile.id"
               :x="tile.x" :y="tile.y" :width="tile.width" :height="tile.height"
               :class="['tree-tile', `depth-${tile.depth}`, { 'is-selected': selectedNodes.includes(tile.id) && version.id === active.id, 'is-peer-selected': !!tileSelectionColor(version.id, tile.id), 'is-different': changedEntries.get(version.id)?.has(tile.id), 'is-source': draggedSubtreeIds.includes(tile.id) && version.id === active.id, 'is-over': overNode === tile.id && version.id === active.id, 'is-invalid': invalidNode === tile.id && version.id === active.id, 'is-hovered': hoveredNode?.versionId === version.id && hoveredNode.nodeId === tile.id && !draggedSubtreeIds.includes(tile.id) }]"
               :data-node="tile.id" :style="{ '--tile-selection': tileSelectionColor(version.id, tile.id),
@@ -76,7 +89,7 @@ const overlayIds = computed(() => new Set(overlayTiles.value.map((tile) => tile.
                 :fill="tile.depth === 0 ? 'var(--theme-entry-root)' : tile.depth === 3 ? 'var(--theme-entry-deep)' : tile.depth % 2 ? 'var(--theme-entry-odd)' : 'var(--theme-entry-even)'" />
               <TileLabel :tile="tile" class="tile-label" />
             </g>
-            <TileLabel v-for="tile in (versionTiles.get(version.id) ?? []).filter((item) =>
+            <TileLabel v-for="tile in renderedTiles.filter((item) =>
               !overlayIds.has(item.id))" :key="`label-${tile.id}`"
               :tile="tile" class="tile-label" />
             <rect v-if="version.id === active.id && draggedOriginalTile" class="drag-source-ghost"
