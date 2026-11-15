@@ -175,7 +175,7 @@ h1 { margin: 7px 0 0; font-size: 21px; line-height: 1.25; font-weight: 700; lett
 .graph-canvas:active { cursor: grabbing; }
 .selection-box { position: absolute; z-index: 4; border: 1px dashed var(--theme-accent); background: color-mix(in srgb, var(--theme-accent) 13%, transparent); pointer-events: none; }
 .lane-navigation { position: absolute; z-index: 7; width: 28px; min-height: 0; padding: 0; display: grid; place-items: center; overflow: hidden; border: 0; background: var(--lane-color); color: #fff; cursor: pointer; }
-.lane-navigation.active-lane { box-shadow: inset 0 0 0 1px #fff, inset 0 0 0 3px var(--user-color); }
+.lane-navigation.active-lane { width: 42px; }
 .lane-navigation:hover { filter: brightness(1.15); }
 .lane-navigation-left { left: 0; border-radius: 0 5px 5px 0; }
 .lane-navigation-right { right: 0; border-radius: 5px 0 0 5px; }
@@ -247,6 +247,7 @@ h1 { margin: 7px 0 0; font-size: 21px; line-height: 1.25; font-weight: 700; lett
 .tree-tile.is-different { stroke: var(--theme-difference-outline); stroke-width: 3px; }
 .tree-tile.is-hovered, .tree-tile.is-over { fill: color-mix(in srgb, var(--theme-entry-hover) var(--theme-entry-hover-strength), var(--tile-base)); }
 .tree-tile.is-peer-selected { fill: color-mix(in srgb, var(--tile-selection) var(--theme-entry-selection-strength), var(--tile-base)); }
+.tree-tile.is-over { fill: color-mix(in srgb, var(--theme-entry-hover) var(--theme-entry-hover-strength), var(--tile-base)); stroke: var(--theme-accent); }
 .tree-tile.is-source { opacity: .16; }
 .version-card.previewing .tree-tile.is-source { opacity: .2; }
 .tree-tile.is-invalid { fill: color-mix(in srgb, var(--tile-base) 55%, var(--theme-entry-invalid)); }
@@ -255,6 +256,14 @@ h1 { margin: 7px 0 0; font-size: 21px; line-height: 1.25; font-weight: 700; lett
 .dragged-overlay.depth-0 { stroke: #176b68; stroke-dasharray: 5 3; stroke-width: 3; }
 .tile-label, .merge-preview-label { fill: var(--theme-entry-label); pointer-events: none; font-family: Arial, sans-serif; font-weight: 500; }
 .mini-map { overflow: hidden; overscroll-behavior: contain; touch-action: none; }
+.map-direction-indicator { position: absolute; z-index: 3; width: 16px; height: 16px; color: #000; pointer-events: none; }
+.map-direction-indicator svg { display: block; width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.direction-up, .direction-down { left: 50%; transform: translateX(-50%); }
+.direction-left, .direction-right { top: 50%; transform: translateY(-50%); }
+.direction-up, .direction-up-left, .direction-up-right { top: 2px; }
+.direction-down, .direction-down-left, .direction-down-right { bottom: 2px; }
+.direction-left, .direction-up-left, .direction-down-left { left: 2px; }
+.direction-right, .direction-up-right, .direction-down-right { right: 2px; }
 .empty-map { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; gap: 8px; color: #9aa59f; font-size: 9px; }
 .empty-cross { display: grid; place-items: center; width: 18px; height: 18px; border: 1px dashed #bfcac2; border-radius: 50%; font-size: 13px; color: #82948a; }
 .version-card-foot { height: 20px; display: flex; align-items: end; justify-content: space-between; color: #8b9790; font: 8px var(--mono); }

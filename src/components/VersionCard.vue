@@ -6,6 +6,7 @@ import type { VersionCardModel } from '../types/graph'
 import { versionColor } from '../utils/colors'
 import TileLabel from './TileLabel.vue'
 import { displayVersionChange, displayVersionId } from '../utils/versions'
+import { outOfViewDirections, type MapDirection } from '../utils/treemap'
 
 const props = defineProps<{ version: Version; model: VersionCardModel }>()
 const { menu: MoreHorizontal, tag: TagIcon } = actionIcons
@@ -15,6 +16,11 @@ const overlayIds = computed(() => new Set(overlayTiles.value.map((tile) => tile.
 const overviewHover = ref(false)
 const previewPosition = ref({ left: 0, top: 0 })
 const previewTiles = computed(() => versionTiles.value.get(props.version.id) ?? [])
+const offscreenDirections = computed(() => outOfViewDirections(previewTiles.value, cardMapView.value(props.version), mapViewport.value(props.version)))
+const directionAngles: Record<MapDirection, number> = {
+  up: 0, 'up-right': 45, right: 90, 'down-right': 135,
+  down: 180, 'down-left': 225, left: 270, 'up-left': 315,
+}
 const previewViewBox = computed(() => {
   const tiles = previewTiles.value
   if (!tiles.length) return '0 0 260 220'
@@ -128,6 +134,13 @@ const renderedTiles = computed(() => {
       <div v-else class="empty-map">
         <span class="empty-cross">+</span><span>Empty structure</span>
       </div>
+      <span v-for="direction in offscreenDirections" :key="direction"
+        :class="['map-direction-indicator', `direction-${direction}`]"
+        :aria-label="`Entries outside view: ${direction}`" role="img">
+        <svg viewBox="0 0 12 12" :style="{ transform: `rotate(${directionAngles[direction]}deg)` }" aria-hidden="true">
+          <path d="M2 8 L6 4 L10 8" />
+        </svg>
+      </span>
       <div v-if="selectionBox?.versionId === version.id" class="selection-box"
         :style="{ left: `${selectionBox.left}%`, top: `${selectionBox.top}%`, width: `${selectionBox.width}%`, height: `${selectionBox.height}%` }"></div>
     </div>

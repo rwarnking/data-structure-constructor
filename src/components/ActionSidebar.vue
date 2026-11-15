@@ -15,6 +15,8 @@ const groups: { name: string; items: Item[] }[] = [
     { name: 'Ping', icon: icons.clickPing, action: 'ping', gesture: 'Alt + click' },
   ] },
   { name: 'Local version actions', items: [
+    { name: 'Select entry', icon: icons.selectEntry, gesture: 'Click entry', expandedOnly: true },
+    { name: 'Select multiple entries', icon: icons.selectEntries, gesture: 'Shift + click entry', expandedOnly: true },
     { name: 'New free entry', icon: icons.add, action: 'newEntry', testId: 'new-entry' },
     { name: 'Delete node', icon: icons.delete, action: 'deleteNode' },
     { name: 'Add child', icon: icons.addChild, action: 'addChild' },
@@ -29,6 +31,7 @@ const groups: { name: string; items: Item[] }[] = [
     { name: 'Paste entry', icon: icons.paste, action: 'paste', expandedOnly: true },
   ] },
   { name: 'Global version actions', items: [
+    { name: 'Activate version', icon: icons.activateVersion, gesture: 'Click version', expandedOnly: true },
     { name: 'Compare versions', icon: icons.compare, action: 'compare' },
     { name: 'Merge versions', icon: icons.mergeVersions, action: 'merge' },
     { name: 'Undo', icon: icons.undo, action: 'undo', expandedOnly: true },
@@ -45,6 +48,7 @@ const groups: { name: string; items: Item[] }[] = [
   { name: 'Global viewport actions', items: [
     { name: 'Zoom graph', icon: icons.globalZoom, gesture: 'Mouse wheel', expandedOnly: true },
     { name: 'Pan graph', icon: icons.globalPan, gesture: 'Mouse drag', expandedOnly: true },
+    { name: 'Focus version', icon: icons.clickFocusVersion, gesture: 'Double-click version', expandedOnly: true },
     { name: 'Focus active version', icon: icons.focusVersion, action: 'focus' },
     { name: 'Focus neighborhood', icon: icons.neighborhood, action: 'neighborhood' },
     { name: 'Fit height', icon: icons.fitHeight, action: 'fitHeight' },

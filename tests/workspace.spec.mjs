@@ -9,6 +9,23 @@ async function openRoom(page, room = `test-${randomUUID()}`) {
   return room
 }
 
+async function openTreemapRoom(page, data) {
+  const room = `test-${randomUUID()}`
+  await page.addInitScript(({ room, data }) => {
+    const versions = [
+      { id: 'v0', parentId: null, step: 0, lane: 0, branch: 'ROOT', change: 'Root', data: [], createdAt: 0 },
+      { id: 'v1', parentId: 'v0', step: 1, lane: 0, branch: 'B1', change: 'Edit', data, createdAt: 1 },
+    ]
+    localStorage.setItem(`canopy-room-data-v1-${encodeURIComponent(room)}`, JSON.stringify({
+      versions, activeId: 'v1', nextNode: 100, nextVersion: 2, nextLane: 1, copyLinks: [],
+    }))
+  }, { room, data })
+  await openRoom(page, room)
+  await focusActive(page)
+  await expectCentered(page, 'v1')
+  return room
+}
+
 async function state(page, room) {
   return page.evaluate((name) => JSON.parse(localStorage.getItem(`canopy-room-data-v1-${encodeURIComponent(name)}`)), room)
 }
@@ -1101,6 +1118,178 @@ test('dragging attaches a root, outside drops cancel, and shortcut detaches a ch
   expect(findNode(await activeData(page, room), 'Target').children).toHaveLength(0)
 })
 
+for (const steps of [1, 12]) {
+  test(`dragging onto the deepest child works with a selected parent at ${steps === 1 ? 'high' : 'low'} pointer speed`, async ({ page }) => {
+    const room = await openTreemapRoom(page, [
+      { id: 'source', value: 'Source', children: [] },
+      { id: 'parent', value: 'Parent', children: [
+        { id: 'child', value: 'Child', children: [{ id: 'grandchild', value: 'Grandchild', children: [] }] },
+      ] },
+    ])
+    const card = page.locator('.version-card.active')
+    const source = card.locator('[data-node="source"]')
+    const parent = card.locator('[data-node="parent"]')
+    const child = card.locator('[data-node="child"]')
+    const grandchild = card.locator('[data-node="grandchild"]')
+    await parent.click({ position: { x: 12, y: 12 } })
+    await expect(parent).toHaveClass(/is-selected/)
+    const from = await source.boundingBox()
+    const parentBox = await parent.boundingBox()
+    const childBox = await child.boundingBox()
+    const targetBox = await grandchild.boundingBox()
+    await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(parentBox.x + 12, parentBox.y + 12, { steps })
+    await expect(parent).toHaveClass(/is-over/)
+    await page.mouse.move(childBox.x + 12, childBox.y + 12, { steps })
+    await expect(child).toHaveClass(/is-over/)
+    await expect(parent).not.toHaveClass(/is-over/)
+    await page.mouse.move(targetBox.x + targetBox.width / 2, targetBox.y + targetBox.height / 2, { steps })
+    await expect(grandchild).toHaveClass(/is-over/)
+    await expect(child).not.toHaveClass(/is-over/)
+    await page.mouse.up()
+    await expect.poll(async () => findNode(await activeData(page, room), 'Grandchild')?.children.map((node) => node.value)).toEqual(['Source'])
+    expect(findNode(await activeData(page, room), 'Parent').children.map((node) => node.value)).toEqual(['Child'])
+    expect(findNode(await activeData(page, room), 'Child').children.map((node) => node.value)).toEqual(['Grandchild'])
+    const map = page.locator('.version-card.active .mini-map')
+    for (const id of ['source', 'parent', 'child', 'grandchild']) {
+      const bounds = await map.locator(`[data-node="${id}"]`).evaluate((element) => {
+        const tile = element.getBoundingClientRect()
+        const viewport = element.closest('.mini-map').getBoundingClientRect()
+        return { left: tile.left - viewport.left, top: tile.top - viewport.top,
+          right: viewport.right - tile.right, bottom: viewport.bottom - tile.bottom }
+      })
+      expect(Math.min(...Object.values(bounds))).toBeGreaterThan(-2)
+    }
+  })
+}
+
+test('detaching into nearby empty space finds a free position and an outside drop cancels', async ({ page }) => {
+  const room = await openTreemapRoom(page, [
+    { id: 'parent', value: 'Parent', children: [
+      { id: 'a', value: 'a', children: [] }, { id: 'b', value: 'b', children: [] },
+    ] },
+  ])
+  const card = page.locator('.version-card.active')
+  const map = card.locator('.mini-map')
+  const child = card.locator('[data-node="a"]')
+  const before = await state(page, room)
+  let from = await child.boundingBox()
+  await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(10, 10, { steps: 1 })
+  await page.mouse.up()
+  expect((await state(page, room)).versions.length).toBe(before.versions.length)
+  expect(findNode(await activeData(page, room), 'Parent').children.map((node) => node.value)).toEqual(['a', 'b'])
+  const mapBox = await map.boundingBox()
+  await page.keyboard.down('Shift')
+  await page.mouse.move(mapBox.x + mapBox.width / 2, mapBox.y + mapBox.height / 2)
+  await page.mouse.wheel(0, 500)
+  await page.keyboard.up('Shift')
+  await page.waitForTimeout(250)
+  from = await child.boundingBox()
+  const parent = await card.locator('[data-node="parent"]').boundingBox()
+  const drop = { x: parent.x + parent.width + 3, y: from.y + from.height / 2 }
+  expect(drop.x).toBeLessThan(mapBox.x + mapBox.width)
+  expect(await page.evaluate(({ x, y }) => !!document.elementFromPoint(x, y)?.closest('.tree-tile'), drop)).toBe(false)
+  const original = await state(page, room)
+  const oldParentPosition = original.versions.find((version) => version.id === original.activeId).positions.parent
+  await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(drop.x, drop.y, { steps: 1 })
+  await page.mouse.up()
+  await expect.poll(async () => (await activeData(page, room)).map((node) => node.value).sort()).toEqual(['Parent', 'a'])
+  const saved = await state(page, room)
+  const version = saved.versions.find((item) => item.id === saved.activeId)
+  expect(version.positions.parent).toEqual(oldParentPosition)
+  expect(findNode(version.data, 'Parent').children.map((node) => node.value)).toEqual(['b'])
+  const visible = page.locator('.version-card.active .mini-map')
+  for (const id of ['parent', 'a', 'b']) {
+    const outside = await visible.locator(`[data-node="${id}"]`).evaluate((element) => {
+      const tile = element.getBoundingClientRect()
+      const map = element.closest('.mini-map').getBoundingClientRect()
+      return Math.min(tile.left - map.left, tile.top - map.top, map.right - tile.right, map.bottom - tile.bottom)
+    })
+    expect(outside).toBeGreaterThan(-2)
+  }
+})
+
+test('version view combines directional indicators after panning and removes them when fitted', async ({ page }) => {
+  await openTreemapRoom(page, [
+    { id: 'one', value: 'One', children: [] },
+    { id: 'two', value: 'Two', children: [] },
+    { id: 'three', value: 'Three', children: [] },
+  ])
+  const map = page.locator('.version-card.active .mini-map')
+  await expect(map.locator('.map-direction-indicator')).toHaveCount(0)
+  const bounds = await map.boundingBox()
+  await page.keyboard.down('Shift')
+  await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(bounds.x + bounds.width / 2 - 800, bounds.y + bounds.height / 2 - 800, { steps: 4 })
+  await page.mouse.up()
+  await page.keyboard.up('Shift')
+  await expect(map.getByRole('img', { name: 'Entries outside view: up-left' })).toHaveCount(1)
+  const indicatorStyle = await map.locator('.map-direction-indicator').first().evaluate((element) => ({
+    color: getComputedStyle(element).color,
+    background: getComputedStyle(element).backgroundColor,
+    border: getComputedStyle(element).borderWidth,
+    arrows: element.querySelectorAll('svg path').length,
+  }))
+  expect(indicatorStyle).toEqual({ color: 'rgb(0, 0, 0)', background: 'rgba(0, 0, 0, 0)', border: '0px', arrows: 1 })
+  const directions = await map.locator('.map-direction-indicator').evaluateAll((elements) =>
+    elements.map((element) => element.getAttribute('aria-label')))
+  expect(new Set(directions).size).toBe(directions.length)
+  expect(directions.every((direction) => ['Entries outside view: up', 'Entries outside view: left', 'Entries outside view: up-left'].includes(direction))).toBe(true)
+  await page.keyboard.press('Shift+a')
+  await expect(map.locator('.map-direction-indicator')).toHaveCount(0)
+})
+
+test('partially visible entries do not produce out-of-view indicators', async ({ page }) => {
+  await openTreemapRoom(page, [{ id: 'entry', value: 'Entry', children: [] }])
+  const map = page.locator('.version-card.active .mini-map')
+  const tile = map.locator('[data-node="entry"]')
+  const bounds = await map.boundingBox()
+  const entry = await tile.boundingBox()
+  const start = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 }
+  const pan = async (delta) => {
+    await page.keyboard.down('Shift')
+    await page.mouse.move(start.x, start.y)
+    await page.mouse.down()
+    await page.mouse.move(start.x + delta, start.y, { steps: 4 })
+    await page.mouse.up()
+    await page.keyboard.up('Shift')
+  }
+  await pan(bounds.x - entry.x - entry.width / 2)
+  await expect.poll(async () => {
+    const box = await tile.boundingBox()
+    return box.x < bounds.x && box.x + box.width > bounds.x
+  }).toBe(true)
+  await expect(map.locator('.map-direction-indicator')).toHaveCount(0)
+  await pan(-entry.width)
+  await expect(map.getByRole('img', { name: 'Entries outside view: left' })).toHaveCount(1)
+  await expect(map.locator('.map-direction-indicator')).toHaveCount(1)
+})
+
+test('treemap labels use uniform font sizes and parent labels stay on one line', async ({ page }) => {
+  const parentName = 'A very long parent label that must be truncated because it is far longer than the available width of this treemap'
+  await openTreemapRoom(page, [
+    { id: 'parent', value: parentName, children: [
+      { id: 'nested', value: 'Nested parent', children: [{ id: 'leaf1', value: 'Leaf one', children: [] }] },
+      { id: 'leaf2', value: 'Leaf two', children: [] },
+    ] },
+  ])
+  const card = page.locator('.version-card.active')
+  const parent = card.locator(`.tile-label[aria-label="${parentName}"]`)
+  await expect(parent).toHaveAttribute('aria-label', parentName)
+  await expect(parent.locator('tspan')).toHaveCount(1)
+  await expect(parent).toContainText('...')
+  const font = async (label) => card.locator(`.tile-label[aria-label="${label}"]`).evaluate((element) => getComputedStyle(element).fontSize)
+  expect(await font(parentName)).toBe(await font('Nested parent'))
+  expect(await font('Leaf one')).toBe(await font('Leaf two'))
+  expect(parseFloat(await font('Leaf one'))).toBeGreaterThan(parseFloat(await font(parentName)))
+})
+
 test('number shortcuts select the four camera presets directly', async ({ page }) => {
   await openRoom(page)
   for (let index = 0; index < 6; index++) await addEntries(page, [`Entry ${index}`])
@@ -1180,7 +1369,7 @@ test('expanded sidebar exposes additional actions and search while collapsed sho
   const expandedOnly = ['Copy entry', 'Cut entry', 'Paste entry', 'Box select', 'Zoom version', 'Pan version',
     'Zoom graph', 'Pan graph', 'Previous version', 'Next version', 'Timeline above', 'Timeline below',
     'First timeline', 'Last timeline', 'First version in timeline', 'Last version in timeline',
-    'Undo', 'Redo', 'Search versions']
+    'Undo', 'Redo', 'Search versions', 'Select entry', 'Select multiple entries', 'Activate version', 'Focus version']
   for (const name of expandedOnly) await expect(sidebar.locator(`[title^="${name} ·"]`)).toHaveCount(0)
   await page.keyboard.press('Control+f')
   await expect(page.getByRole('dialog', { name: 'Search versions' })).toBeVisible()
@@ -1188,6 +1377,19 @@ test('expanded sidebar exposes additional actions and search while collapsed sho
   await page.getByRole('button', { name: 'Expand action sidebar' }).click()
   await expect(sidebar.locator('section').first()).toHaveAttribute('aria-label', 'Communication actions')
   for (const name of expandedOnly) await expect(sidebar.locator(`[title^="${name} ·"]`)).toHaveCount(1)
+  for (const [name, gesture, group] of [
+    ['Select entry', 'Click entry', 'Local version actions'],
+    ['Select multiple entries', 'Shift + click entry', 'Local version actions'],
+    ['Activate version', 'Click version', 'Global version actions'],
+    ['Focus version', 'Double-click version', 'Global viewport actions'],
+  ]) {
+    const item = sidebar.getByRole('region', { name: group }).locator(`[title="${name} · ${gesture}"]`)
+    await expect(item.locator('span')).toHaveText(name)
+    await expect(item.locator('kbd')).toHaveText(gesture)
+  }
+  await page.getByRole('button', { name: 'Collapse action sidebar' }).click()
+  for (const name of expandedOnly) await expect(sidebar.locator(`[title^="${name} ·"]`)).toHaveCount(0)
+  await page.getByRole('button', { name: 'Expand action sidebar' }).click()
   await sidebar.getByRole('button', { name: 'Search versions, Ctrl or Command+F' }).click()
   await expect(page.getByRole('dialog', { name: 'Search versions' })).toBeVisible()
 })
@@ -1635,7 +1837,7 @@ test('lane buttons stay attached to the viewport and navigate without changing t
   expect(after.height).toBeGreaterThan(before.height)
 })
 
-test('active version and lane outlines remain visible when zoomed out', async ({ page }) => {
+test('active version remains outlined and its lane buttons are wider when zoomed out', async ({ page }) => {
   const room = `test-${randomUUID()}`
   const versions = [{ id: 'v0', parentId: null, step: 0, lane: 0, branch: 'ROOT', change: 'Empty structure', data: [], createdAt: 0 }]
   for (let lane = 0; lane < 24; lane++) versions.push({
@@ -1663,10 +1865,24 @@ test('active version and lane outlines remain visible when zoomed out', async ({
   await expect(page.locator('.lane-navigation.active-lane')).toHaveCount(2)
   await expect(page.locator(`.lane-navigation.active-lane[data-lane="${lane}"]`)).toHaveCount(2)
   const other = saved.versions.find((item) => item.id !== 'v0' && item.lane !== lane)
+  async function checkWidths(activeLane, inactiveLane) {
+    for (const side of ['left', 'right']) {
+      const activeButton = page.locator(`.lane-navigation-${side}[data-lane="${activeLane}"]`)
+      const otherButton = page.locator(`.lane-navigation-${side}[data-lane="${inactiveLane}"]`)
+      await expect(activeButton).toHaveCSS('width', '42px')
+      await expect(otherButton).toHaveCSS('width', '28px')
+      await expect(activeButton).toHaveCSS('box-shadow', 'none')
+      const activeBounds = await activeButton.boundingBox()
+      const canvas = await page.locator('.graph-canvas').boundingBox()
+      expect(side === 'left' ? activeBounds.x - canvas.x : activeBounds.x + activeBounds.width - canvas.x - canvas.width).toBeCloseTo(0, 1)
+    }
+  }
+  await checkWidths(lane, other.lane)
   await page.locator(`.version-card[data-version="${other.id}"]`).click()
   await expect.poll(async () => (await state(page, room)).activeId).toBe(other.id)
   await expect(page.locator(`.lane-navigation.active-lane[data-lane="${other.lane}"]`)).toHaveCount(2)
   await expect(page.locator(`.lane-navigation.active-lane[data-lane="${lane}"]`)).toHaveCount(0)
+  await checkWidths(other.lane, lane)
 })
 
 test('lane buttons navigate to both endpoints at a densely zoomed-out scale', async ({ page }) => {

@@ -18,7 +18,8 @@ const { useVersionComparison } = await vite.ssrLoadModule('/src/composables/useV
 const { useVersionHistory } = await vite.ssrLoadModule('/src/composables/useVersionHistory.ts')
 const { changedEntryIds } = await vite.ssrLoadModule('/src/utils/versionDifferences.ts')
 const { reflowVersionLayout, allocateVersionNumber, assignMissingVersionNumbers, assignVersionSuffixes, displayVersionId, isLatestOnBranch, retireVersionNumbers } = await vite.ssrLoadModule('/src/utils/versions.ts')
-const { layoutTileLabel, tilesForForest, tilesFor } = await vite.ssrLoadModule('/src/utils/treemap.ts')
+const { layoutTileLabel, tilesForForest, tilesFor, fitMapViewAfterDrag, outOfViewDirections, positionsAfterMoves,
+  positionsAfterDetach, outerTreemapDimensions, nearestPositionIsFree, CARD_WIDTH, TREE_MAP_HEIGHT, MAP_GAP } = await vite.ssrLoadModule('/src/utils/treemap.ts')
 const { duplicateLinks } = await vite.ssrLoadModule('/src/utils/duplicateLinks.ts')
 const { nodeParentIds } = await vite.ssrLoadModule('/src/utils/tree.ts')
 const { useGraphCamera } = await vite.ssrLoadModule('/src/composables/useGraphCamera.ts')
@@ -496,6 +497,88 @@ test('entry labels wrap at word boundaries and truncate without breaking words a
   assert.equal(hyphenated.lines.join(''), 'alpha-beta')
   assert.ok(hyphenated.lines.length === 1 || hyphenated.lines[0].endsWith('-'))
   assert.match(layoutTileLabel({ ...tile, height: 30, label: 'An entry with a much longer label that cannot fit' }).lines[0], /\.\.\.$/)
+  const parent = layoutTileLabel({ ...tile, hasChildren: true })
+  assert.equal(parent.lines.length, 1)
+  assert.match(parent.lines[0], /\.\.\.$/)
+  assert.equal(parent.fontSize, layoutTileLabel({ ...tile, hasChildren: true, height: 12 }).fontSize)
+  assert.equal(wrapped.fontSize, layoutTileLabel({ ...tile, height: 12 }).fontSize)
+  assert.ok(wrapped.fontSize > parent.fontSize && parent.fontSize > 14)
+})
+
+test('drag layout makes room and keeps previously visible content in view', () => {
+  const before = [node('parent', [node('child')]), node('other')]
+  const after = [node('parent'), node('other'), node('child')]
+  const oldPositions = { parent: { x: 0.1, y: 0.1 }, other: { x: 1.4, y: 0.1 } }
+  const positions = positionsAfterMoves(after, { ...oldPositions, child: { x: 0.4, y: 0.1 } }, ['child'])
+  assert.deepEqual(positions.child, { x: 0.4, y: 0.1 })
+  assert.notDeepEqual(positions.parent, oldPositions.parent)
+  const view = { zoom: 0.35, panX: 24, panY: 28, manual: true }
+  const viewport = { width: 400, height: 240 }
+  const nextView = fitMapViewAfterDrag(before, oldPositions, after, positions, view, viewport)
+  assert.ok(nextView.zoom <= view.zoom)
+  for (const tile of tilesForForest(after, positions)) {
+    assert.ok(tile.x * nextView.zoom + nextView.panX >= 11.99)
+    assert.ok(tile.y * nextView.zoom + nextView.panY >= 11.99)
+    assert.ok((tile.x + tile.width) * nextView.zoom + nextView.panX <= viewport.width - 11.99)
+    assert.ok((tile.y + tile.height) * nextView.zoom + nextView.panY <= viewport.height - 11.99)
+  }
+  const unchanged = fitMapViewAfterDrag(before, oldPositions, before, oldPositions, view, viewport)
+  assert.deepEqual(unchanged, view)
+})
+
+test('out-of-view indicators combine entries by the eight actual directions', () => {
+  const base = { id: '', label: '', width: 10, height: 10, depth: 0, hasChildren: false }
+  const tile = (x, y) => ({ ...base, x, y })
+  const view = { zoom: 1, panX: 0, panY: 0, manual: true }
+  const viewport = { width: 100, height: 100 }
+  assert.deepEqual(outOfViewDirections([tile(20, 20)], view, viewport), [])
+  assert.deepEqual(outOfViewDirections([tile(120, 20), tile(150, 40), tile(-20, -20)], view, viewport), ['right', 'up-left'])
+  assert.deepEqual(outOfViewDirections([
+    tile(40, -20), tile(120, -20), tile(120, 40), tile(120, 120),
+    tile(40, 120), tile(-20, 120), tile(-20, 40), tile(-20, -20),
+  ], view, viewport), ['up', 'up-right', 'right', 'down-right', 'down', 'down-left', 'left', 'up-left'])
+  assert.deepEqual(outOfViewDirections([tile(90, 40)], view, viewport), [])
+  assert.deepEqual(outOfViewDirections([tile(-5, 40), tile(95, 95), tile(40, -5), tile(40, 95)], view, viewport), [])
+  assert.deepEqual(outOfViewDirections([tile(-10, 40), tile(100, 40), tile(40, -10), tile(40, 100)], view, viewport),
+    ['up', 'right', 'down', 'left'])
+  assert.deepEqual(outOfViewDirections([tile(95, 95), tile(110, 110)], view, viewport), ['down-right'])
+})
+
+test('detached entries use the nearest free position, preferring the parent in a tie', () => {
+  const parent = node('parent')
+  const child = node('child')
+  const blocker = node('blocker')
+  const size = outerTreemapDimensions(child)
+  const data = [parent, blocker, child]
+  const preferred = { x: 130 / CARD_WIDTH, y: 0 }
+  const positions = { parent: { x: 0, y: 0 }, blocker: { x: 400 / CARD_WIDTH, y: 0 }, child: preferred }
+  const resolved = positionsAfterDetach(data, positions, [{ id: 'child', parentId: 'parent' }])
+  assert.deepEqual(resolved.parent, positions.parent)
+  assert.deepEqual(resolved.blocker, positions.blocker)
+  assert.ok(Math.abs(resolved.child.x * CARD_WIDTH - (size.width + MAP_GAP)) < 1e-8)
+  assert.equal(resolved.child.y, 0)
+  assert.ok(nearestPositionIsFree(resolved.child, size, [parent, blocker], resolved))
+  const free = { ...positions, child: { x: 250 / CARD_WIDTH, y: 250 / TREE_MAP_HEIGHT } }
+  assert.deepEqual(positionsAfterDetach(data, free, [{ id: 'child', parentId: 'parent' }]).child, free.child)
+
+  const top = -size.height - MAP_GAP
+  const tie = {
+    parent: { x: -400 / CARD_WIDTH, y: (top + 30) / TREE_MAP_HEIGHT },
+    blocker: { x: 0, y: 0 },
+    child: { x: (-size.width - MAP_GAP + 30) / CARD_WIDTH, y: (top + 30) / TREE_MAP_HEIGHT },
+  }
+  const tied = positionsAfterDetach(data, tie, [{ id: 'child', parentId: 'parent' }])
+  assert.ok(Math.abs(tied.child.x * CARD_WIDTH - (-size.width - MAP_GAP)) < 1e-8)
+  assert.ok(Math.abs(tied.child.y - tie.child.y) < 1e-8)
+
+  const second = node('second')
+  const groupPositions = { ...positions, child: preferred, second: preferred }
+  const group = positionsAfterDetach([...data, second], groupPositions, [
+    { id: 'child', parentId: 'parent' }, { id: 'second', parentId: 'parent' },
+  ])
+  assert.deepEqual(group.parent, positions.parent)
+  assert.deepEqual(group.blocker, positions.blocker)
+  assert.ok(nearestPositionIsFree(group.second, size, [parent, blocker, child], group))
 })
 
 test('treemap layout reuses subtree geometry and reflects later edits', () => {

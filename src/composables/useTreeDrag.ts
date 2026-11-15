@@ -1,11 +1,11 @@
 import { computed, ref, type ComputedRef, type Ref } from 'vue'
 import type { MapView, SpatialPreview, StoredState, TreeNode, Version } from '../types/workspace'
 import { descendants, findNode, findParent, removeNode } from '../utils/tree'
-import { CARD_WIDTH, TREE_MAP_HEIGHT, defaultPositions, fitMapViewToLayout, nearestPositionIsFree, outerTreemapDimensions, positionsForData, tileForNode, tilesForForest } from '../utils/treemap'
+import { CARD_WIDTH, TREE_MAP_HEIGHT, defaultPositions, fitMapViewAfterDrag, positionsAfterDetach, positionsAfterMoves, positionsForData, tileForNode, tilesForForest } from '../utils/treemap'
 
 export function useTreeDrag(options: {
   state: Ref<StoredState>; active: ComputedRef<Version>
-  zoom: Ref<number>; isReadOnly: ComputedRef<boolean>; selectedNodes: Ref<string[]>
+  isReadOnly: ComputedRef<boolean>; selectedNodes: Ref<string[]>
   hoveredNode: Ref<{ versionId: string; nodeId: string } | null>
   entryTooltip: Ref<{ versionId: string; nodeId: string; description: string; x: number; y: number } | null>
   mapViewFor: (version: Version) => MapView
@@ -16,7 +16,7 @@ export function useTreeDrag(options: {
   createVersion: (data: TreeNode[], change: string, forceNew?: boolean) => Version | null
   setSelectedNodes: (ids: string[]) => void; notify: (message: string) => void; suppressClicks: () => void
 }) {
-  const { state, active, zoom, isReadOnly, selectedNodes, hoveredNode, entryTooltip, mapViewFor, mapViewport,
+  const { state, active, isReadOnly, selectedNodes, hoveredNode, entryTooltip, mapViewFor, mapViewport,
     canAttach, attachEntry, detachEntry, createVersion, setSelectedNodes, notify, suppressClicks } = options
   const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
   const draggedNode = ref<string | null>(null)
@@ -34,6 +34,7 @@ export function useTreeDrag(options: {
     lastX: number
     lastY: number
     moved: boolean
+    map: HTMLElement
     space?: {
       grabX: number
       grabY: number
@@ -56,18 +57,11 @@ export function useTreeDrag(options: {
       return {
         data,
         positions,
-        view: fitMapViewToLayout(data, positions, mapViewFor(active.value), 0, mapViewport(active.value)),
+        view: fitMapViewAfterDrag(active.value.data, active.value.positions, data, positions, mapViewFor(active.value), mapViewport(active.value)),
         kind: 'attach' as const,
       }
     }
-    if (!spatialPreview.value) return null
-    if (!spatialPreview.value.valid) return null
-    return {
-      data: spatialPreview.value.data,
-      positions: spatialPreview.value.positions,
-      view: spatialPreview.value.view,
-      kind: spatialPreview.value.kind === 'detach' ? 'detach' as const : 'layout' as const,
-    }
+    return null
   })
 
   const draggedSubtreeIds = computed(() => {
@@ -81,83 +75,41 @@ export function useTreeDrag(options: {
     if (!draggedNode.value) return null
     return tileForNode(active.value.data, active.value.positions, draggedNode.value) ?? null
   })
-  function positionAt(version: Version, clientX: number, clientY: number, map: HTMLElement) {
-    const drag = treeDrag.value
+  function pointInMap(version: Version, clientX: number, clientY: number, map: HTMLElement) {
     const rect = map.getBoundingClientRect()
     const view = mapViewFor(version)
     const viewport = mapViewport(version)
-    const localX = (clientX - rect.left) / zoom.value * viewport.width / (rect.width / zoom.value)
-    const localY = (clientY - rect.top) / zoom.value * viewport.height / (rect.height / zoom.value)
+    const matrix = map.querySelector('svg')?.getScreenCTM()
+    const local = matrix
+      ? new DOMPoint(clientX, clientY).matrixTransform(matrix.inverse())
+      : { x: (clientX - rect.left) * viewport.width / rect.width, y: (clientY - rect.top) * viewport.height / rect.height }
+    return { x: (local.x - view.panX) / view.zoom, y: (local.y - view.panY) / view.zoom }
+  }
+  function positionAt(version: Version, clientX: number, clientY: number, map: HTMLElement) {
+    const drag = treeDrag.value
+    const pointer = pointInMap(version, clientX, clientY, map)
     if (!drag?.space) {
-      const x = (localX - view.panX) / view.zoom
-      const y = (localY - view.panY) / view.zoom
       return {
-        x: x / CARD_WIDTH,
-        y: y / TREE_MAP_HEIGHT,
+        x: pointer.x / CARD_WIDTH,
+        y: pointer.y / TREE_MAP_HEIGHT,
       }
     }
-    const pointerX = (localX - view.panX) / view.zoom
-    const pointerY = (localY - view.panY) / view.zoom
     return {
-      x: (pointerX - drag.space.grabX * drag.space.width) / CARD_WIDTH,
-      y: (pointerY - drag.space.grabY * drag.space.height) / TREE_MAP_HEIGHT,
+      x: (pointer.x - drag.space.grabX * drag.space.width) / CARD_WIDTH,
+      y: (pointer.y - drag.space.grabY * drag.space.height) / TREE_MAP_HEIGHT,
     }
   }
   function treeNodeAt(clientX: number, clientY: number, map: HTMLElement) {
-    const versionId = map.closest('.version-card')?.getAttribute('data-version')
-    if (versionId !== active.value.id) return null
-    if (overNode.value) {
-      const currentTarget = [...map.querySelectorAll<SVGRectElement>('.tree-tile')]
-        .find((tile) => tile.dataset.node === overNode.value)
-      const bounds = currentTarget?.getBoundingClientRect()
-      if (bounds && clientX >= bounds.left && clientX <= bounds.right
-        && clientY >= bounds.top && clientY <= bounds.bottom) return overNode.value
-    }
     const rect = map.getBoundingClientRect()
-    const view = mapViewFor(active.value)
-    const viewport = mapViewport(active.value)
-    const localX = (clientX - rect.left) / zoom.value * viewport.width / (rect.width / zoom.value)
-    const localY = (clientY - rect.top) / zoom.value * viewport.height / (rect.height / zoom.value)
-    const x = (localX - view.panX) / view.zoom
-    const y = (localY - view.panY) / view.zoom
+    if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) return null
+    const { x, y } = pointInMap(active.value, clientX, clientY, map)
     const tiles = tilesForForest(active.value.data, active.value.positions)
-    const draggedIds = new Set(draggedSubtreeIds.value)
-    if (tiles.some((tile) => draggedIds.has(tile.id)
-      && x >= tile.x && x <= tile.x + tile.width && y >= tile.y && y <= tile.y + tile.height)) return null
-    for (let index = tiles.length - 1; index >= 0; index -= 1) {
-      const tile = tiles[index]!
-      if (draggedIds.has(tile.id)) continue
-      if (x >= tile.x && x <= tile.x + tile.width && y >= tile.y && y <= tile.y + tile.height) return tile.id
+    let hit: typeof tiles[number] | undefined
+    for (const tile of tiles) {
+      if (x >= tile.x && x <= tile.x + tile.width && y >= tile.y && y <= tile.y + tile.height
+        && (!hit || tile.depth >= hit.depth)) hit = tile
     }
-    return null
-  }
-  function rootPositionIsAvailable(
-    version: Version,
-    nodeId: string,
-    position: { x: number; y: number },
-    data = version.data,
-    positions = version.positions,
-    sizeOverride?: { width: number; height: number },
-    occupiedData = data,
-    occupiedPositions = positions,
-  ) {
-    const node = findNode(data, nodeId)
-    if (!node || !data.some((root) => root.id === nodeId)) return false
-    const candidatePositions = { ...positions, [nodeId]: position }
-    const view = fitMapViewToLayout(data, candidatePositions, mapViewFor(version), 0, mapViewport(version))
-    const size = sizeOverride ?? outerTreemapDimensions(node)
-    const left = position.x * CARD_WIDTH
-    const top = position.y * TREE_MAP_HEIGHT
-    const bounds = {
-      left: -view.panX / view.zoom,
-      top: -view.panY / view.zoom,
-      right: (mapViewport(version).width - view.panX) / view.zoom,
-      bottom: (mapViewport(version).height - view.panY) / view.zoom,
-    }
-    if (left < bounds.left || top < bounds.top
-      || left + size.width > bounds.right || top + size.height > bounds.bottom) return false
-    const occupied = occupiedData.filter((root) => root.id !== nodeId)
-    return nearestPositionIsFree(position, size, occupied, { ...occupiedPositions, [nodeId]: position })
+    return hit?.id ?? null
   }
   function spatialDropLayout(
     version: Version,
@@ -167,52 +119,23 @@ export function useTreeDrag(options: {
     const data = clone(version.data)
     const existingPositions = { ...defaultPositions(data, version.positions), ...version.positions }
     const isRoot = data.some((root) => root.id === nodeId)
-    let kind: SpatialPreview['kind'] = isRoot ? 'move' : 'detach'
-    let nextData = data
-    let positions = { ...existingPositions }
-    if (isRoot) {
-      positions[nodeId] = position
-    } else {
-      const parent = findParent(data, nodeId)
-      const draggedTile = tileForNode(data, existingPositions, nodeId)
-      const parentTile = parent ? tileForNode(data, existingPositions, parent.id) : null
-      const center = draggedTile ? {
-        x: position.x * CARD_WIDTH + draggedTile.width / 2,
-        y: position.y * TREE_MAP_HEIGHT + draggedTile.height / 2,
-      } : null
-      const staysInParent = !!parentTile && !!center
-        && center.x >= parentTile.x && center.x <= parentTile.x + parentTile.width
-        && center.y >= parentTile.y && center.y <= parentTile.y + parentTile.height
-      if (staysInParent) {
-        kind = 'noop'
-      } else {
-        const detached = removeNode(data, nodeId)
-        if (detached) {
-          data.push(detached)
-          nextData = data
-          positions[nodeId] = position
-        }
-      }
+    const parentId = findParent(data, nodeId)?.id
+    if (!isRoot) {
+      const detached = removeNode(data, nodeId)
+      if (detached) data.push(detached)
     }
-    const valid = kind === 'noop' || rootPositionIsAvailable(
-      version,
-      nodeId,
-      position,
-      nextData,
-      positions,
-      !isRoot ? tileForNode(version.data, version.positions, nodeId) : undefined,
-      !isRoot ? version.data : nextData,
-      !isRoot ? existingPositions : positions,
-    )
+    const requestedPositions = { ...existingPositions, [nodeId]: position }
+    const positions = isRoot ? positionsAfterMoves(data, requestedPositions, [nodeId])
+      : positionsAfterDetach(data, requestedPositions, [{ id: nodeId, parentId }])
     return {
       ...position,
       versionId: version.id,
       nodeId,
-      kind: valid ? kind : 'invalid',
-      valid,
-      data: nextData,
+      kind: isRoot ? 'move' : 'detach',
+      valid: true,
+      data,
       positions,
-      view: valid ? fitMapViewToLayout(nextData, positions, mapViewFor(version), 0, mapViewport(version)) : mapViewFor(version),
+      view: fitMapViewAfterDrag(version.data, version.positions, data, positions, mapViewFor(version), mapViewport(version)),
     }
   }
   function groupDropLayout(version: Version, ids: string[], anchorId: string, position: { x: number; y: number }): SpatialPreview {
@@ -223,6 +146,7 @@ export function useTreeDrag(options: {
     const deltaX = anchor ? position.x * CARD_WIDTH - anchor.x : 0
     const deltaY = anchor ? position.y * TREE_MAP_HEIGHT - anchor.y : 0
     const hasNested = ids.some((id) => !!findParent(version.data, id))
+    const moves = ids.map((id) => ({ id, parentId: findParent(version.data, id)?.id }))
     for (const id of ids) {
       const tile = tileForNode(version.data, originalPositions, id)
       if (!tile) return { ...position, versionId: version.id, nodeId: anchorId, kind: 'invalid', valid: false, data, positions, view: mapViewFor(version) }
@@ -232,13 +156,13 @@ export function useTreeDrag(options: {
       }
       positions[id] = { x: (tile.x + deltaX) / CARD_WIDTH, y: (tile.y + deltaY) / TREE_MAP_HEIGHT }
     }
-    const valid = ids.every((id) => rootPositionIsAvailable(version, id, positions[id]!, data, positions))
-    return { ...position, versionId: version.id, nodeId: anchorId, kind: valid ? (hasNested ? 'detach' : 'move') : 'invalid',
-      valid, data, positions, view: valid ? fitMapViewToLayout(data, positions, mapViewFor(version), 0, mapViewport(version)) : mapViewFor(version) }
+    const resolved = hasNested ? positionsAfterDetach(data, positions, moves) : positionsAfterMoves(data, positions, ids)
+    return { ...position, versionId: version.id, nodeId: anchorId, kind: hasNested ? 'detach' : 'move',
+      valid: true, data, positions: resolved, view: fitMapViewAfterDrag(version.data, version.positions, data, resolved, mapViewFor(version), mapViewport(version)) }
   }
-  function placeRoot(version: Version, nodeId: string, preview: SpatialPreview) {
+  function placeRoot(version: Version, preview: SpatialPreview) {
     const map = document.querySelector<HTMLElement>(`.version-card[data-version="${version.id}"] .mini-map`)
-    if (isReadOnly.value || !map || !rootPositionIsAvailable(version, nodeId, preview)) return false
+    if (isReadOnly.value || !map) return false
     version.positions = clone(preview.positions)
     version.mapView = clone(preview.view)
     notify('Treemap layout updated')
@@ -249,9 +173,7 @@ export function useTreeDrag(options: {
     if (isReadOnly.value) return
     event.preventDefault()
     const map = (event.currentTarget as SVGRectElement).closest<HTMLElement>('.mini-map')
-    const rect = map?.getBoundingClientRect()
-    const view = mapViewFor(version)
-    const viewport = mapViewport(version)
+    if (!map) return
     const selection = version.id === active.value.id && selectedNodes.value.includes(id) ? selectedNodes.value : [id]
     state.value.activeId = version.id
     const selected = new Set(selection)
@@ -265,18 +187,13 @@ export function useTreeDrag(options: {
     })
     const anchorId = ids.find((item) => item === id || descendants(findNode(version.data, item)!).includes(id)) ?? id
     const originalTile = tileForNode(version.data, version.positions, anchorId)
-    const pointerX = rect
-      ? (((event.clientX - rect.left) / zoom.value * viewport.width / (rect.width / zoom.value)) - view.panX) / view.zoom
-      : 0
-    const pointerY = rect
-      ? (((event.clientY - rect.top) / zoom.value * viewport.height / (rect.height / zoom.value)) - view.panY) / view.zoom
-      : 0
+    const pointer = pointInMap(version, event.clientX, event.clientY, map)
     treeDrag.value = {
       id: anchorId, ids, selection: [...selection], versionId: version.id, pointerId: event.pointerId,
-      x: event.clientX, y: event.clientY, lastX: event.clientX, lastY: event.clientY, moved: false,
-      space: rect && originalTile ? {
-        grabX: (pointerX - originalTile.x) / originalTile.width,
-        grabY: (pointerY - originalTile.y) / originalTile.height,
+      x: event.clientX, y: event.clientY, lastX: event.clientX, lastY: event.clientY, moved: false, map,
+      space: originalTile ? {
+        grabX: (pointer.x - originalTile.x) / originalTile.width,
+        grabY: (pointer.y - originalTile.y) / originalTile.height,
         width: originalTile.width,
         height: originalTile.height,
       } : undefined,
@@ -301,32 +218,28 @@ export function useTreeDrag(options: {
       draggedPosition.value = original ? { x: original.x / CARD_WIDTH, y: original.y / TREE_MAP_HEIGHT } : null
     }
     if (!drag.moved) return
-    const hit = document.elementFromPoint(event.clientX, event.clientY)
-    const map = hit?.closest<HTMLElement>('.mini-map')
-    const targetId = map ? treeNodeAt(event.clientX, event.clientY, map) : null
-    const targetVersion = map?.closest('.version-card')?.getAttribute('data-version')
-    const point = map && targetVersion === active.value.id
-      ? positionAt(active.value, event.clientX, event.clientY, map)
-      : null
+    const map = drag.map
+    const card = map.closest('.version-card')?.getBoundingClientRect()
+    const inside = !!card && event.clientX >= card.left && event.clientX <= card.right
+      && event.clientY >= card.top && event.clientY <= card.bottom
+    const targetId = inside ? treeNodeAt(event.clientX, event.clientY, map) : null
+    const point = inside ? positionAt(active.value, event.clientX, event.clientY, map) : null
     if (point) draggedPosition.value = point
-    const parent = findParent(active.value.data, drag.id)
-    if (targetId && targetVersion === active.value.id
-      && !drag.ids.every((id) => findParent(active.value.data, id)?.id === targetId)
-      && drag.ids.every((id) => canAttach(id, targetId))) {
+    if (targetId && drag.ids.every((id) => canAttach(id, targetId))) {
       overNode.value = targetId
       invalidNode.value = null
       spatialPreview.value = null
       return
     }
     overNode.value = null
-    const isDraggedDescendant = targetId ? draggedSubtreeIds.value.includes(targetId) : false
-    invalidNode.value = targetId && targetVersion === active.value.id
-      && parent?.id !== targetId && !isDraggedDescendant && !drag.ids.every((id) => canAttach(id, targetId))
-      ? targetId : null
-    if (map && targetVersion === active.value.id && point) {
-      spatialPreview.value = invalidNode.value ? null : drag.ids.length > 1
-        ? groupDropLayout(active.value, drag.ids, drag.id, point)
-        : spatialDropLayout(active.value, drag.id, point)
+    invalidNode.value = targetId && draggedSubtreeIds.value.includes(targetId) && targetId !== drag.id ? targetId : null
+    const ignoreTarget = targetId && (targetId !== drag.id || !!findParent(active.value.data, drag.id))
+    if (point && !ignoreTarget) {
+      spatialPreview.value = {
+        ...point, versionId: drag.versionId, nodeId: drag.id,
+        kind: drag.ids.some((id) => !!findParent(active.value.data, id)) ? 'detach' : 'move',
+        valid: true, data: active.value.data, positions: active.value.positions ?? {}, view: mapViewFor(active.value),
+      }
     } else {
       spatialPreview.value = null
     }
@@ -335,12 +248,12 @@ export function useTreeDrag(options: {
     const drag = treeDrag.value
     if (!drag || drag.pointerId !== event.pointerId) return
     if (active.value.id !== drag.versionId) state.value.activeId = drag.versionId
-    if (drag.moved && (event.clientX !== drag.lastX || event.clientY !== drag.lastY)) moveTreeDrag(event)
-    const target = document.elementFromPoint(event.clientX, event.clientY)
-    const map = target?.closest<HTMLElement>('.mini-map')
-    const targetVersion = target?.closest('.version-card')?.getAttribute('data-version')
+    if (event.clientX !== drag.lastX || event.clientY !== drag.lastY) moveTreeDrag(event)
+    const card = drag.map.closest('.version-card')?.getBoundingClientRect()
+    const inside = !!card && event.clientX >= card.left && event.clientX <= card.right
+      && event.clientY >= card.top && event.clientY <= card.bottom
     let committed = false
-    if (drag.moved && map && targetVersion === active.value.id) {
+    if (drag.moved && inside) {
       if (overNode.value && drag.ids.every((id) => canAttach(id, overNode.value!))) {
         const layout = previewLayout.value
         if (drag.ids.length > 1 && layout) {
@@ -348,14 +261,17 @@ export function useTreeDrag(options: {
           if (version) { version.positions = clone(layout.positions); version.mapView = clone(layout.view); committed = true }
         } else committed = !!attachEntry(drag.id, overNode.value, layout ?? undefined)
       } else if (spatialPreview.value?.valid && spatialPreview.value.nodeId === drag.id) {
-        const preview = spatialPreview.value
+        const preview = drag.ids.length > 1
+          ? groupDropLayout(active.value, drag.ids, drag.id, spatialPreview.value)
+          : spatialDropLayout(active.value, drag.id, spatialPreview.value)
+        if (!preview.valid) notify('Cannot move the selected entries')
         if (preview.kind === 'move') {
           if (drag.ids.length > 1) {
             active.value.positions = clone(preview.positions)
             active.value.mapView = clone(preview.view)
             notify('Treemap layout updated')
             committed = true
-          } else committed = placeRoot(active.value, drag.id, preview)
+          } else committed = placeRoot(active.value, preview)
         } else if (preview.kind === 'detach') {
           if (drag.ids.length > 1) {
             const version = createVersion(preview.data, `Detach ${drag.ids.length} selected entries`, true)

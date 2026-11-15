@@ -257,7 +257,7 @@ function suppressGraphClicks() {
 
 const { draggedNode, draggedPosition, overNode, invalidNode, treeDrag, spatialPreview,
   draggedSubtreeIds, draggedOriginalTile, startTreeDrag, moveTreeDrag, finishTreeDrag, cancelTreeDrag,
-} = useTreeDrag({ state, active, zoom, isReadOnly, selectedNodes, hoveredNode, entryTooltip, mapViewFor, mapViewport,
+} = useTreeDrag({ state, active, isReadOnly, selectedNodes, hoveredNode, entryTooltip, mapViewFor, mapViewport,
   canAttach, attachEntry, detachEntry, createVersion, setSelectedNodes, notify, suppressClicks: suppressGraphClicks })
 
 watch(selectedNode, (nodeId) => {
@@ -1315,11 +1315,11 @@ const cardModel: VersionCardModel = reactive({
           <template v-for="lane in visibleLanes" :key="lane.lane">
             <button type="button" class="lane-navigation lane-navigation-left" :class="{ 'active-lane': active.id !== 'v0' && active.lane === lane.lane }" :data-lane="lane.lane"
               :aria-label="`Go to beginning of lane ${lane.lane + 1}`" title="Go to beginning of lane"
-              :style="{ top: `${lane.top}px`, height: `${lane.height}px`, '--lane-color': versionColor(lane.first), '--user-color': colorForUser(CLIENT_ID) }"
+              :style="{ top: `${lane.top}px`, height: `${lane.height}px`, '--lane-color': versionColor(lane.first) }"
               @pointerdown.stop @click.stop="navigateLane(lane.first)"><ChevronLeft :size="Math.min(18, lane.height)" /></button>
             <button type="button" class="lane-navigation lane-navigation-right" :class="{ 'active-lane': active.id !== 'v0' && active.lane === lane.lane }" :data-lane="lane.lane"
               :aria-label="`Go to end of lane ${lane.lane + 1}`" title="Go to end of lane"
-              :style="{ top: `${lane.top}px`, height: `${lane.height}px`, '--lane-color': versionColor(lane.last), '--user-color': colorForUser(CLIENT_ID) }"
+              :style="{ top: `${lane.top}px`, height: `${lane.height}px`, '--lane-color': versionColor(lane.last) }"
               @pointerdown.stop @click.stop="navigateLane(lane.last)"><ChevronRight :size="Math.min(18, lane.height)" /></button>
           </template>
 

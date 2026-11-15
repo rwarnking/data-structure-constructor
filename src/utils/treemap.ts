@@ -6,16 +6,24 @@ let labelContext: CanvasRenderingContext2D | null | undefined
 export function layoutTileLabel(tile: Tile) {
   const width = Math.max(0, tile.width - 10)
   const height = Math.max(0, Math.min(tile.height, tile.hasChildren ? TREE_HEADER_HEIGHT : tile.height) - 6)
-  const fontSize = Math.min(14, Math.floor(height / 1.15))
-  const maxLines = Math.floor(height / (fontSize * 1.15))
-  if (fontSize < 9 || !maxLines) return { fontSize: 0, lines: [] as string[] }
+  const fontSize = tile.hasChildren ? 16 : 18
+  const maxLines = tile.hasChildren ? Math.min(1, Math.floor(height / (fontSize * 1.15))) : Math.floor(height / (fontSize * 1.15))
+  if (!maxLines) return { fontSize, lines: [] as string[] }
   if (labelContext === undefined && typeof document !== 'undefined') {
     labelContext = document.createElement('canvas').getContext('2d')
   }
   if (labelContext) labelContext.font = `500 ${fontSize}px Arial, sans-serif`
   const measure = (text: string) => labelContext
     ? labelContext.measureText(text).width : text.length * fontSize * 0.65
-  if (measure('...') > width) return { fontSize: 0, lines: [] as string[] }
+  if (measure('...') > width) return { fontSize, lines: [] as string[] }
+  if (tile.hasChildren) {
+    let text = tile.label.trim()
+    if (measure(text) > width) {
+      while (text && measure(`${text}...`) > width) text = Array.from(text).slice(0, -1).join('')
+      text = `${text.trimEnd()}...`
+    }
+    return { fontSize, lines: text ? [text] : [] }
+  }
   const words = tile.label.trim().split(/\s+/).filter(Boolean)
   const lines: string[] = []
   let line = ''
@@ -84,6 +92,76 @@ export function fitMapViewToLayout(
     panY: (viewport.height - geometry.height * fit) / 2 - geometry.minY * fit,
     manual: true,
   }
+}
+
+export function fitMapViewAfterDrag(
+  previousData: TreeNode[],
+  previousPositions: Record<string, { x: number; y: number }> | undefined,
+  data: TreeNode[],
+  positions: Record<string, { x: number; y: number }> | undefined,
+  view: MapView,
+  viewport: { width: number; height: number },
+): MapView {
+  const oldTiles = tilesForForest(previousData, previousPositions)
+  const newTiles = new Map(tilesForForest(data, positions).map((tile) => [tile.id, tile]))
+  const visible = {
+    left: -view.panX / view.zoom, top: -view.panY / view.zoom,
+    right: (viewport.width - view.panX) / view.zoom, bottom: (viewport.height - view.panY) / view.zoom,
+  }
+  const bounds: { left: number; top: number; right: number; bottom: number }[] = []
+  for (const old of oldTiles) {
+    const next = newTiles.get(old.id)
+    if (!next || old.width <= 0 || old.height <= 0) continue
+    const left = Math.max(old.x, visible.left)
+    const top = Math.max(old.y, visible.top)
+    const right = Math.min(old.x + old.width, visible.right)
+    const bottom = Math.min(old.y + old.height, visible.bottom)
+    if (left >= right || top >= bottom) continue
+    bounds.push({
+      left: next.x + (left - old.x) / old.width * next.width,
+      top: next.y + (top - old.y) / old.height * next.height,
+      right: next.x + (right - old.x) / old.width * next.width,
+      bottom: next.y + (bottom - old.y) / old.height * next.height,
+    })
+  }
+  if (!bounds.length) return view
+  const left = Math.min(...bounds.map((bound) => bound.left))
+  const top = Math.min(...bounds.map((bound) => bound.top))
+  const right = Math.max(...bounds.map((bound) => bound.right))
+  const bottom = Math.max(...bounds.map((bound) => bound.bottom))
+  const padding = Math.min(MAP_PADDING, viewport.width / 4, viewport.height / 4)
+  const scale = Math.max(MAP_ZOOM_MIN, Math.min(view.zoom,
+    (viewport.width - padding * 2) / Math.max(1, right - left),
+    (viewport.height - padding * 2) / Math.max(1, bottom - top)))
+  const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
+  return {
+    zoom: scale,
+    panX: clamp(view.panX, padding - left * scale, viewport.width - padding - right * scale),
+    panY: clamp(view.panY, padding - top * scale, viewport.height - padding - bottom * scale),
+    manual: true,
+  }
+}
+
+export type MapDirection = 'up' | 'up-right' | 'right' | 'down-right' | 'down' | 'down-left' | 'left' | 'up-left'
+export function outOfViewDirections(tiles: Tile[], view: MapView, viewport: { width: number; height: number }): MapDirection[] {
+  const found = new Set<MapDirection>()
+  const diagonals = { up: { left: 'up-left', right: 'up-right' }, down: { left: 'down-left', right: 'down-right' } } as const
+  for (const tile of tiles) {
+    if (tile.width <= 0 || tile.height <= 0) continue
+    const left = tile.x * view.zoom + view.panX
+    const right = (tile.x + tile.width) * view.zoom + view.panX
+    const top = tile.y * view.zoom + view.panY
+    const bottom = (tile.y + tile.height) * view.zoom + view.panY
+    const horizontal = right <= 0 ? 'left' : left >= viewport.width ? 'right' : ''
+    const vertical = bottom <= 0 ? 'up' : top >= viewport.height ? 'down' : ''
+    if (vertical && horizontal) {
+      found.add(diagonals[vertical][horizontal])
+    }
+    else if (vertical) found.add(vertical)
+    else if (horizontal) found.add(horizontal)
+  }
+  return (['up', 'up-right', 'right', 'down-right', 'down', 'down-left', 'left', 'up-left'] as const)
+    .filter((direction) => found.has(direction))
 }
 type ChildLayout = { node: TreeNode; x: number; y: number; width: number; height: number }
 type LayoutCache = Map<TreeNode, { width: number; height: number; children: ChildLayout[] }>
@@ -269,7 +347,80 @@ export function positionsAfterMove(
 ) {
   const defaults = defaultPositions(data, existing)
   if (!data.some((node) => node.id === nodeId)) return { ...defaults, ...existing }
-  return resolveRootOverlaps(data, { ...defaults, ...existing, [nodeId]: position }, nodeId)
+  return resolveRootOverlaps(data, { ...defaults, ...existing, [nodeId]: position }, [nodeId])
+}
+export function positionsAfterMoves(
+  data: TreeNode[],
+  positions: Record<string, { x: number; y: number }>,
+  fixedIds: string[],
+) {
+  return resolveRootOverlaps(data, positions, fixedIds)
+}
+export function positionsAfterDetach(
+  data: TreeNode[],
+  positions: Record<string, { x: number; y: number }>,
+  moves: { id: string; parentId?: string }[],
+) {
+  const resolved = { ...positions }
+  const moving = new Set(moves.map((move) => move.id))
+  const occupied = data.filter((node) => !moving.has(node.id))
+  for (const move of moves) {
+    const node = data.find((item) => item.id === move.id)
+    const position = resolved[move.id]
+    if (!node || !position) throw new Error(`Missing detached root or position: ${move.id}`)
+    const parent = move.parentId ? tileForNode(data, resolved, move.parentId) : undefined
+    resolved[move.id] = nearestDetachedPosition(position, outerTreemapDimensions(node), occupied, resolved, parent)
+    occupied.push(node)
+  }
+  return resolved
+}
+
+function nearestDetachedPosition(
+  preferred: { x: number; y: number },
+  size: { width: number; height: number },
+  occupied: TreeNode[],
+  positions: Record<string, { x: number; y: number }>,
+  parent?: Tile,
+) {
+  const x = preferred.x * CARD_WIDTH
+  const y = preferred.y * TREE_MAP_HEIGHT
+  const obstacles = occupied.map((node) => {
+    const position = positions[node.id] ?? { x: 0, y: 0 }
+    const other = outerTreemapDimensions(node)
+    return {
+      left: position.x * CARD_WIDTH - size.width - MAP_GAP,
+      right: position.x * CARD_WIDTH + other.width + MAP_GAP,
+      top: position.y * TREE_MAP_HEIGHT - size.height - MAP_GAP,
+      bottom: position.y * TREE_MAP_HEIGHT + other.height + MAP_GAP,
+    }
+  })
+  // The closest point outside these expanded rectangles lies at the requested x or a rectangle edge.
+  const xs = [x, ...obstacles.flatMap((obstacle) => [obstacle.left, obstacle.right])]
+  let best: { x: number; y: number; distance: number; parentDistance: number } | undefined
+  for (const candidateX of xs) {
+    const intervals = obstacles.filter((obstacle) => candidateX > obstacle.left && candidateX < obstacle.right)
+      .map((obstacle) => ({ top: obstacle.top, bottom: obstacle.bottom }))
+      .sort((a, b) => a.top - b.top)
+    const merged: { top: number; bottom: number }[] = []
+    for (const interval of intervals) {
+      const last = merged.at(-1)
+      if (last && interval.top < last.bottom) last.bottom = Math.max(last.bottom, interval.bottom)
+      else merged.push({ ...interval })
+    }
+    const collision = merged.find((interval) => y > interval.top && y < interval.bottom)
+    const ys = collision ? [collision.top, collision.bottom] : [y]
+    for (const candidateY of ys) {
+      const distance = (candidateX - x) ** 2 + (candidateY - y) ** 2
+      const dx = parent ? Math.max(parent.x - candidateX - size.width, candidateX - parent.x - parent.width, 0) : 0
+      const dy = parent ? Math.max(parent.y - candidateY - size.height, candidateY - parent.y - parent.height, 0) : 0
+      const parentDistance = dx * dx + dy * dy
+      if (!best || distance < best.distance - 1e-8
+        || (Math.abs(distance - best.distance) <= 1e-8 && parentDistance < best.parentDistance)) {
+        best = { x: candidateX, y: candidateY, distance, parentDistance }
+      }
+    }
+  }
+  return { x: best!.x / CARD_WIDTH, y: best!.y / TREE_MAP_HEIGHT }
 }
 export function positionsForData(
   previousData: TreeNode[],
@@ -345,11 +496,12 @@ function nearestFreePosition(
 function resolveRootOverlaps(
   data: TreeNode[],
   positions: Record<string, { x: number; y: number }>,
-  fixedId?: string,
+  fixedIds: string[] = [],
 ) {
   const resolved = { ...positions }
-  const ordered = fixedId
-    ? [...data].sort((left, right) => Number(right.id === fixedId) - Number(left.id === fixedId))
+  const fixed = new Set(fixedIds)
+  const ordered = fixed.size
+    ? [...data].sort((left, right) => Number(fixed.has(right.id)) - Number(fixed.has(left.id)))
     : data
   const occupied: TreeNode[] = []
   for (const node of ordered) {
