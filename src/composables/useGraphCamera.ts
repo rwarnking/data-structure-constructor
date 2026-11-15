@@ -102,9 +102,20 @@ export function useGraphCamera(options: {
     return Math.max(0.005, Math.min(1, Math.max(1, canvasSize.value.width - 100) / (bounds.right - bounds.left),
       Math.max(1, canvasSize.value.height - 100) / (bounds.bottom - bounds.top)))
   })
-  watch([canvasSize, windowDimensions], () => {
+  watch([canvasSize, windowDimensions], ([size, dimensions], [oldSize, oldDimensions]) => {
     const current = preset.value
-    if (!current) return
+    if (!current) {
+      const anchor = active.value
+      if (anchor.id === 'v0') return
+      const step = anchor.step
+      const lane = anchor.lane
+      pan.value = {
+        x: pan.value.x + step * (oldDimensions.width - dimensions.width) * zoom.value,
+        y: pan.value.y + (oldSize.height / 2 - oldDimensions.height / 2 + lane * oldDimensions.height
+          - size.height / 2 + dimensions.height / 2 - lane * dimensions.height) * zoom.value,
+      }
+      return
+    }
     const version = current.versionId && versions.value.find((item) => item.id === current.versionId)
     if (current.mode === 'version' && version) focusVersion(version, false)
     else if (current.mode === 'neighborhood' && version) focusNeighborhood(version, false)
@@ -300,7 +311,7 @@ export function useGraphCamera(options: {
       && Math.abs(centerY - canvasSize.value.height / 2) < 2
   }
   function panToVersion(version: Version, centerImmediately: boolean) {
-    preset.value = null
+    preset.value = centerImmediately ? { mode: 'version', versionId: version.id } : null
     focusedVersionId.value = centerImmediately ? version.id : null
     cancelPanAnimation()
     const position = cardPosition(version)

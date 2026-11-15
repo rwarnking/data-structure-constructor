@@ -1,6 +1,10 @@
 import type { Version } from '../types/workspace'
 
 const branchColors = [1, 2, 3, 4, 5, 6].map((number) => `var(--theme-branch-${number})`)
+export const collaboratorColors = [
+  '#0075b8', '#d55e00', '#009e73', '#c675a3', '#8a6d00',
+  '#9566cc', '#d33f3f', '#007f82', '#a36a4c', '#62800b',
+]
 
 export function userColor(userId: string) {
   let hash = 2166136261

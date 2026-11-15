@@ -7,9 +7,9 @@ import type { Version } from '../types/workspace'
 import TileLabel from './TileLabel.vue'
 import { displayVersionId } from '../utils/versions'
 
-const props = defineProps<{ model: UnwrapNestedRefs<ReturnType<typeof useVersionComparison>>; versions: Version[] }>()
+const props = defineProps<{ model: UnwrapNestedRefs<ReturnType<typeof useVersionComparison>>; versions: Version[]; sidebarCollapsed: boolean }>()
 const emit = defineEmits<{ confirm: [] }>()
-const { compareMode, mergeMode, showOverview, compareIds, chooseCompare, closeVersionSelection, resetMerge, mergePreviewTiles, mergePreviewViewBox, moveMergeDrag, finishMergeDrag, cancelMergeDrag, mergeDropTarget, startMergeDrag, onMergeTileClick, mergeResult, mergeRows, setMergePicked, onMergeParentChange, mergeParentOptions, differentEntryCount, comparison, showDifferenceColors, comparisonPanels, comparisonViewBox, comparisonGhosts, comparisonSelectedNode, selectComparedNode, comparisonKinds } = toRefs(props.model)
+const { compareMode, mergeMode, showOverview, compareIds, chooseCompare, closeVersionSelection, resetMerge, mergePreviewTiles, mergeDraggedTiles, mergePreviewViewBox, moveMergeDrag, finishMergeDrag, cancelMergeDrag, mergeDropTarget, startMergeDrag, onMergeTileClick, mergeResult, mergeRows, setMergePicked, onMergeParentChange, mergeParentOptions, differentEntryCount, comparison, showDifferenceColors, comparisonPanels, comparisonViewBox, comparisonGhosts, comparisonSelectedNode, selectComparedNode, comparisonKinds } = toRefs(props.model)
 function versionLabel(id: string) {
   const version = props.versions.find((item) => item.id === id)
   return version ? displayVersionId(version) : id
@@ -21,7 +21,7 @@ function versionLabel(id: string) {
     :role="mergeMode && compareIds.length === 2 ? 'dialog' : undefined"
     :aria-modal="mergeMode && compareIds.length === 2 ? 'true' : undefined"
     :aria-label="mergeMode ? 'Branch merge' : 'Version comparison'"
-    :class="{ 'comparison-overlay': compareIds.length === 2, 'merge-overlay': mergeMode && compareIds.length === 2 }"
+    :class="{ 'comparison-overlay': compareIds.length === 2, 'merge-overlay': mergeMode && compareIds.length === 2, 'sidebar-collapsed': sidebarCollapsed }"
     @pointerdown.stop @pointerup.stop @pointermove.stop @pointercancel.stop @click.stop
     @dblclick.stop @contextmenu.stop @wheel.stop @touchmove.stop>
     <div class="compare-drawer" :class="{ open: compareIds.length === 2, 'merge-view': mergeMode }">
@@ -32,6 +32,12 @@ function versionLabel(id: string) {
           ? `${versionLabel(compareIds[0]!)} ${mergeMode ? '→' : '↔'} ${versionLabel(compareIds[1]!)}`
           : mergeMode ? 'Choose source, then target' : 'Choose two versions' }}</strong>
         </div>
+      <div v-if="compareIds.length === 2 && !mergeMode" class="compare-summary">
+        <span class="compare-count">{{ differentEntryCount }}</span>
+        <span>{{ differentEntryCount === 1 ? 'entry differs' : 'entries differ' }}</span>
+        <button type="button" class="small-button difference-toggle" :aria-pressed="showDifferenceColors"
+          @click="showDifferenceColors = !showDifferenceColors">{{ showDifferenceColors ? 'Hide' : 'Show' }} difference highlights</button>
+      </div>
       <button class="quiet-icon" title="Close comparison" aria-label="Abort and close" @click="closeVersionSelection"><X :size="17" /></button>
     </div>
     <div v-if="compareIds.length === 2" class="comparison-content">
@@ -46,9 +52,14 @@ function versionLabel(id: string) {
                   @pointermove="moveMergeDrag" @pointerup="finishMergeDrag" @pointercancel="cancelMergeDrag">
                   <g v-for="tile in mergePreviewTiles" :key="tile.id">
                     <rect :x="tile.x" :y="tile.y" :width="tile.width" :height="tile.height"
-                      :class="['merge-preview-tile', `depth-${tile.depth}`, { 'drop-target': mergeDropTarget === tile.id }]"
-                      :data-node="tile.id" :fill="tile.depth === 0 ? 'var(--theme-entry-root)' : tile.depth === 3 ? 'var(--theme-entry-deep)' : tile.depth % 2 ? 'var(--theme-entry-odd)' : 'var(--theme-entry-even)'"
+                      :class="['merge-preview-tile', 'tree-tile', `depth-${tile.depth}`, { 'is-over': mergeDropTarget === tile.id }]"
+                      :data-node="tile.id" :style="{ '--tile-base': tile.depth === 0 ? 'var(--theme-entry-root)' : tile.depth === 3 ? 'var(--theme-entry-deep)' : tile.depth % 2 ? 'var(--theme-entry-odd)' : 'var(--theme-entry-even)' }"
                       @pointerdown.stop="startMergeDrag($event, tile.id)" @click.stop="onMergeTileClick(tile.id)" />
+                    <TileLabel :tile="tile" class="merge-preview-label" />
+                  </g>
+                  <g v-for="tile in mergeDraggedTiles" :key="`drag-${tile.id}`" pointer-events="none">
+                    <rect :x="tile.x" :y="tile.y" :width="tile.width" :height="tile.height" class="dragged-overlay"
+                      :fill="tile.depth === 0 ? 'var(--theme-entry-root)' : tile.depth === 3 ? 'var(--theme-entry-deep)' : tile.depth % 2 ? 'var(--theme-entry-odd)' : 'var(--theme-entry-even)'" />
                     <TileLabel :tile="tile" class="merge-preview-label" />
                   </g>
                 </svg>
@@ -57,6 +68,7 @@ function versionLabel(id: string) {
             </section>
             <section class="merge-entry-list">
               <header><strong>Entry selection</strong><span>Pick entries and choose their result parent</span></header>
+              <div class="merge-list-scroll">
               <div class="merge-list-head">
                 <strong>{{ mergeResult && displayVersionId(mergeResult.source) }} source</strong>
                 <strong>Result</strong>
@@ -96,6 +108,7 @@ function versionLabel(id: string) {
                   </div>
                 </div>
               </div>
+              </div>
             </section>
           </div>
           <aside class="merge-changes">
@@ -113,14 +126,6 @@ function versionLabel(id: string) {
       </template>
       <template v-else>
         <div class="compare-layout">
-          <div class="compare-summary">
-            <span class="compare-count">{{ differentEntryCount }}</span>
-            <span>{{ differentEntryCount === 1 ? 'entry differs' : 'entries differ' }}</span>
-            <button type="button" class="small-button difference-toggle" :aria-pressed="showDifferenceColors"
-              @click="showDifferenceColors = !showDifferenceColors">
-              {{ showDifferenceColors ? 'Hide' : 'Show' }} difference highlights
-            </button>
-          </div>
           <div class="comparison-panels">
             <section v-for="(panel, panelIndex) in comparisonPanels" :key="panel.id" class="comparison-panel">
               <header><span>{{ panel.label }}</span><strong>{{ displayVersionId(panel.version) }}<template v-if="panel.version.tag"> · {{ panel.version.tag.title }}</template></strong></header>

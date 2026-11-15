@@ -5,7 +5,7 @@ import { shortcutLabel } from '../config/hotkeys'
 import type { RoomStatus } from '../collaboration'
 import type { InteractionEntry } from '../types/collaboration'
 import type { Version } from '../types/workspace'
-import { userColor, versionColor } from '../utils/colors'
+import { versionColor } from '../utils/colors'
 import { findNode } from '../utils/tree'
 import { displayVersionChange, displayVersionId } from '../utils/versions'
 
@@ -13,6 +13,7 @@ const props = defineProps<{
   sidebarCollapsed: boolean; darkMode: boolean; currentRoomName: string; roomStatus: RoomStatus; localOnly: boolean
   connectedUsers: { id: string; name: string; activeVersionId: string | null }[]
   clientId: string; versions: Version[]; recentInteractions: InteractionEntry[]
+  colorForUser: (id: string) => string
   branchCount: number; active: Version; activeNodes: number; activeChildren: number
 }>()
 const { expand: ChevronDown, export: Download, layers: Layers3, darkMode: Moon,
@@ -78,7 +79,7 @@ const emit = defineEmits<{
           :disabled="!user.activeVersionId || !versions.some((version) => version.id === user.activeVersionId)"
           :title="`${user.name} · ${user.activeVersionId ? versionLabel(user.activeVersionId) : 'No active version'}`"
           @click="emit('focus-collaborator', user.id)">
-          <span class="collaborator-avatar" :style="{ '--collaborator-color': userColor(user.id) }" aria-hidden="true">
+          <span class="collaborator-avatar" :style="{ '--collaborator-color': colorForUser(user.id) }" aria-hidden="true">
             <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4" /><path d="M4.5 21a7.5 7.5 0 0 1 15 0" /></svg>
           </span>
           <span class="collaborator-info"><strong>{{ user.name }}<span v-if="user.id === clientId"> (you)</span></strong>
@@ -94,7 +95,7 @@ const emit = defineEmits<{
       <div class="interaction-heading"><span class="section-label">INTERACTION LOG</span><small>LAST 10</small></div>
       <ol v-if="recentInteractions.length" class="interaction-list">
         <li v-for="entry in recentInteractions" :key="entry.id">
-          <span class="interaction-user" :style="{ color: userColor(entry.actorId) }">{{ entry.actorName }}</span>
+          <span class="interaction-user" :style="{ color: colorForUser(entry.actorId) }">{{ entry.actorName }}</span>
           <span class="interaction-action">{{ entry.action }}</span>
           <button v-if="entry.ping" class="interaction-reference" type="button"
             :title="`Focus ping by ${entry.actorName}`" @click="emit('focus-ping', entry.ping)">Ping location</button>

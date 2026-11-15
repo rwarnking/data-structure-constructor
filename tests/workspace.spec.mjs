@@ -46,7 +46,8 @@ async function fillEntries(page, names) {
   }
   await page.getByRole('button', { name: `Add ${names.length} ${names.length === 1 ? 'entry' : 'entries'}` }).click()
   await expect(page.getByPlaceholder('Entry name')).toHaveCount(0)
-  await expect(page.locator('.version-card.active')).toContainText(names[0])
+  const label = names[0].split(/\s+/).map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s*')
+  await expect(page.locator('.version-card.active')).toContainText(new RegExp(label))
 }
 
 async function focusActive(page) {
@@ -372,6 +373,7 @@ test('low zoom summaries place action and tag above large entry and treemap coun
   await page.locator('.version-card.active .card-menu').click()
   await page.getByRole('button', { name: 'Add tag', exact: true }).click()
   await page.getByLabel('Title', { exact: true }).fill('Milestone')
+  await page.getByLabel('Description', { exact: true }).fill('Important release')
   await page.getByRole('button', { name: 'Save tag' }).click()
   await page.keyboard.press('Shift+a')
   await expect(page.locator('.root-version .overview-action-detail')).toHaveText('Root: Empty')
@@ -380,6 +382,24 @@ test('low zoom summaries place action and tag above large entry and treemap coun
   await expect(summary.locator('.overview-action-symbol')).toHaveText('+')
   await expect(summary.locator('.overview-action-detail')).toContainText('Entry 5')
   await expect(summary.locator('.overview-tag')).toBeVisible()
+  await expect(summary.locator('.overview-tag')).toHaveAttribute('title', 'Milestone\nImportant release')
+  await summary.locator('.overview-tag').hover()
+  await expect(page.locator('.overview-preview')).toContainText((await page.locator(`.version-card[data-version="${id}"] .version-header-id`).getAttribute('title')))
+  await expect(page.locator('.overview-preview svg')).toBeVisible()
+  const head = page.locator(`.version-card[data-version="${id}"] .version-card-head`)
+  await expect(head.locator(':scope > *')).toHaveCount(2)
+  expect(await head.evaluate((element) => getComputedStyle(element).backgroundColor))
+    .toBe(await head.evaluate((element) => {
+      const color = element.closest('.version-card').style.getPropertyValue('--author-color')
+      const probe = document.createElement('span')
+      probe.style.color = color
+      element.append(probe)
+      const result = getComputedStyle(probe).color
+      probe.remove()
+      return result
+    }))
+  await page.mouse.move(10, 10)
+  await expect(page.locator('.overview-preview')).toHaveCount(0)
   await expect(summary.locator('.overview-stats b')).toHaveText(['6', '6'])
   const layout = await summary.evaluate((element) => {
     const rect = (selector) => element.querySelector(selector).getBoundingClientRect()
@@ -486,6 +506,7 @@ test('camera presets fit the available canvas and refocus after resizing', async
           return rect.top >= area.top - 1 && rect.bottom <= area.bottom + 1
             && (!checkX || (rect.left >= area.left - 1 && rect.right <= area.right + 1))
         })
+
       }, horizontal)).toBe(true)
     }
     await page.getByRole('button', { name: 'Focus neighborhood' }).click()
@@ -495,6 +516,35 @@ test('camera presets fit the available canvas and refocus after resizing', async
   await expectCentered(page, active)
   await page.setViewportSize({ width: 1100, height: 800 })
   await expectCentered(page, active)
+})
+
+test('resizing keeps the manually panned active version in place at different zoom levels', async ({ page }) => {
+  const room = await openRoom(page)
+  for (let index = 0; index < 6; index++) await addEntries(page, [`Resize ${index}`])
+  const id = (await state(page, room)).activeId
+  for (const zoomOut of [false, true]) {
+    if (zoomOut) await page.keyboard.press('Shift+a')
+    else await focusActive(page)
+    await page.waitForTimeout(600)
+    const canvas = page.locator('.graph-canvas')
+    const bounds = await canvas.boundingBox()
+    await page.mouse.move(bounds.x + 30, bounds.y + 30)
+    await page.mouse.down()
+    await page.mouse.move(bounds.x + 65, bounds.y + 65, { steps: 4 })
+    await page.mouse.up()
+    const position = () => page.locator(`.version-card[data-version="${id}"]`).evaluate((element) => {
+      const bounds = element.getBoundingClientRect()
+      return { x: bounds.left, y: bounds.top }
+    })
+    const before = await position()
+    for (const width of [1200, 1440]) {
+      await page.setViewportSize({ width, height: 900 })
+      await expect.poll(async () => {
+        const after = await position()
+        return Math.max(Math.abs(after.x - before.x), Math.abs(after.y - before.y))
+      }).toBeLessThan(2)
+    }
+  }
 })
 
 test('settings export and import create an isolated local room without overwriting the source', async ({ page }) => {
@@ -612,8 +662,9 @@ test('split, merge and bulk delete operate on selected entries and preserve assi
   await contextAction(page, room, 'Parent', 'Add child')
   await fillEntries(page, ['Child'])
   await contextAction(page, room, 'Parent', 'Split entry')
-  await page.getByLabel('Entry name').nth(0).fill('Left')
-  await page.getByLabel('Entry name').nth(1).fill('Right')
+  await expect(page.locator('.entry-editor .entry-draft-table')).toBeVisible()
+  await page.getByLabel('Result 1 name').fill('Left')
+  await page.getByLabel('Result 2 name').fill('Right')
   await page.getByLabel('Assign Child to a result entry').selectOption({ label: 'Result 2 · Right' })
   await page.getByRole('button', { name: 'Split entry', exact: true }).click()
   await expect.poll(async () => findNode(await activeData(page, room), 'Right')?.children.map((node) => node.value)).toEqual(['Child'])
@@ -701,12 +752,48 @@ test('branching, comparison and merge result controls update the graph', async (
   await expect(page.locator('.comparison-content')).toContainText('First branch')
   await expect(page.locator('.comparison-content')).toContainText('Second branch')
   await expect(page.locator('.comparison-content')).not.toContainText('These versions are structurally identical.')
+  await expect(page.locator('.drawer-head .compare-summary')).toContainText('entries differ')
+  await expect(page.locator('.drawer-head .difference-toggle')).toBeVisible()
+  await expect(page.locator('.canvas-hotbar')).toHaveCount(0)
+  const compareMargins = await page.locator('.comparison-overlay').evaluate((element) => {
+    const bounds = element.getBoundingClientRect()
+    const sidebar = document.querySelector('.sidebar').getBoundingClientRect()
+    return [bounds.left - sidebar.right, innerWidth - bounds.right, bounds.top, innerHeight - bounds.bottom]
+  })
+  expect(compareMargins).toEqual([12, 12, 12, 12])
   expect((await state(page, room)).activeId).toBe(first)
   await page.getByRole('button', { name: 'Abort and close' }).click()
 
   await page.keyboard.press('m')
   await page.locator(`.version-card[data-version="${second}"]`).click()
   const dialog = page.getByRole('dialog', { name: 'Branch merge' })
+  await expect(page.locator('.canvas-hotbar')).toHaveCount(0)
+  const mergeMargins = await dialog.evaluate((element) => {
+    const bounds = element.getBoundingClientRect()
+    const sidebar = document.querySelector('.sidebar').getBoundingClientRect()
+    return [bounds.left - sidebar.right, innerWidth - bounds.right, bounds.top, innerHeight - bounds.bottom]
+  })
+  expect(mergeMargins).toEqual(compareMargins)
+  const columnOffsets = await dialog.locator('.merge-list-scroll').evaluate((element) => {
+    const positions = (selector) => [...element.querySelector(selector).children].map((cell) => cell.getBoundingClientRect().right)
+    return [positions('.merge-list-head'), positions('.merge-view-row')]
+  })
+  for (let index = 0; index < 3; index++) expect(Math.abs(columnOffsets[0][index] - columnOffsets[1][index])).toBeLessThan(1)
+  const sourceTile = dialog.locator('.merge-preview-label[aria-label="First branch"]').locator('..').locator('rect')
+  const targetTile = dialog.locator('.merge-preview-label[aria-label="Base"]').locator('..').locator('rect')
+  const normalFill = await sourceTile.evaluate((element) => getComputedStyle(element).fill)
+  await sourceTile.hover()
+  await expect.poll(() => sourceTile.evaluate((element) => getComputedStyle(element).fill)).not.toBe(normalFill)
+  const sourceBounds = await sourceTile.boundingBox()
+  const targetBounds = await targetTile.boundingBox()
+  await page.mouse.move(sourceBounds.x + sourceBounds.width / 2, sourceBounds.y + sourceBounds.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(targetBounds.x + targetBounds.width / 2, targetBounds.y + targetBounds.height / 2, { steps: 6 })
+  await expect(dialog.locator('.dragged-overlay')).toHaveCount(1)
+  await expect(targetTile).toHaveClass(/is-over/)
+  await page.mouse.up()
+  await expect(dialog.locator('.merge-preview-tile.depth-1')).toHaveCount(1)
+  await dialog.getByRole('button', { name: 'Reset' }).click()
   const row = dialog.locator('.merge-view-row').filter({ has: page.locator('.merge-entry-cell strong').getByText('First branch', { exact: true }) })
   await row.getByLabel('Parent for First branch in merged result').selectOption({ label: 'Base' })
   await expect(dialog.locator('.merge-preview-tile.depth-1')).toHaveCount(1)
@@ -1474,6 +1561,11 @@ test('dense lane controls follow visible lane bounds and colors without extra co
       const canvas = element.closest('.graph-canvas').getBoundingClientRect()
       const card = document.querySelector(`.version-card[data-version="v${Number(element.dataset.lane) + 1}"]`)
       const lane = card.getBoundingClientRect()
+      const sample = document.createElement('span')
+      sample.style.color = card.style.getPropertyValue('--branch-color')
+      card.appendChild(sample)
+      const laneColor = getComputedStyle(sample).color
+      sample.remove()
       return {
         left: bounds.left, right: bounds.right, top: bounds.top, bottom: bounds.bottom, width: bounds.width, height: bounds.height,
         canvasLeft: canvas.left, canvasRight: canvas.right, expectedTop: Math.max(canvas.top, lane.top),
@@ -1481,7 +1573,7 @@ test('dense lane controls follow visible lane bounds and colors without extra co
         partial: lane.top < canvas.top || lane.bottom > canvas.bottom,
         side: element.classList.contains('lane-navigation-left') ? 'left' : 'right',
         color: getComputedStyle(element).backgroundColor,
-        laneColor: getComputedStyle(card.querySelector('.branch-mark')).backgroundColor,
+        laneColor,
       }
     }))
     for (const button of buttons) {
@@ -1674,6 +1766,74 @@ test('room switching, persistence and deletion keep room data independent', asyn
   expect(await state(page, 'Second room')).toBeNull()
 })
 
+test('room joining accepts invite URLs and names and rejects invalid input', async ({ page }) => {
+  await openRoom(page)
+  await page.getByRole('button', { name: 'Change Room' }).click()
+  await page.getByRole('button', { name: 'Join room' }).click()
+  await expect(page.getByRole('alert')).toContainText('room name')
+  await page.getByLabel('Join a room').fill('https://example.test/no-room')
+  await page.getByRole('button', { name: 'Join room' }).click()
+  await expect(page.getByRole('alert')).toContainText('room name')
+  const first = `joined-${randomUUID()}`
+  await page.getByLabel('Join a room').fill(`http://127.0.0.1:5173/?room=${encodeURIComponent(first)}`)
+  await page.getByRole('button', { name: 'Join room' }).click()
+  await expect(page.getByTitle(first)).toBeVisible()
+  const second = `joined-${randomUUID()}`
+  await page.getByRole('button', { name: 'Change Room' }).click()
+  await page.getByLabel('Join a room').fill(second)
+  await page.getByRole('button', { name: 'Join room' }).click()
+  await expect(page.getByTitle(second)).toBeVisible()
+})
+
+test('bulk titles are concise and entry descriptions appear promptly', async ({ page }) => {
+  const room = await openRoom(page)
+  await page.getByRole('button', { name: 'New free entry, N' }).click()
+  await page.getByPlaceholder('Entry name').first().fill('First')
+  await page.getByPlaceholder('Optional description').first().fill('A helpful description')
+  await page.getByRole('button', { name: 'Add another entry' }).click()
+  await page.getByPlaceholder('Entry name').nth(1).fill('Second')
+  await page.getByRole('button', { name: 'Add 2 entries' }).click()
+  await expect.poll(async () => (await state(page, room)).versions.at(-1).change).toBe('Created 2 items')
+  await focusActive(page)
+  await (await activeTile(page, room, 'First')).hover()
+  await expect(page.locator('.entry-tooltip')).toContainText('A helpful description', { timeout: 1500 })
+  await page.keyboard.press('Control+a')
+  await page.locator('.version-card.active .tree-tile').first().click({ button: 'right' })
+  await page.getByRole('button', { name: 'Delete selected entries' }).click()
+  await page.getByRole('button', { name: 'Delete entries', exact: true }).click()
+  await expect.poll(async () => (await state(page, room)).versions.at(-1).change).toBe('Deleted 2 items')
+})
+
+test('pruning a section moves local and remote active versions to its surviving parent', async ({ browser }) => {
+  const contexts = await Promise.all([browser.newContext(), browser.newContext()])
+  const [host, guest] = await Promise.all(contexts.map((context) => context.newPage()))
+  try {
+    const room = await openRoom(host)
+    await guest.goto(`/?room=${room}`)
+    await expect(guest.getByRole('status').first()).toHaveText('Connected', { timeout: 20000 })
+    await addEntries(host, ['Base'])
+    const base = (await state(host, room)).activeId
+    await addEntries(host, ['Branch'])
+    const branch = (await state(host, room)).activeId
+    await addEntries(host, ['Nested'])
+    const nested = (await state(host, room)).activeId
+    await expect.poll(async () => (await state(guest, room)).activeId).toBe(nested)
+    await host.keyboard.press('Shift+a')
+    host.once('dialog', (dialog) => dialog.accept())
+    await host.locator(`.version-card[data-version="${branch}"]`).click({ button: 'right' })
+    await host.getByRole('button', { name: 'Delete version and descendants' }).click()
+    await expect.poll(async () => (await state(host, room)).activeId).toBe(base)
+    await expect.poll(async () => (await state(guest, room)).activeId).toBe(base)
+    host.once('dialog', (dialog) => dialog.accept())
+    await host.locator(`.version-card[data-version="${base}"] .version-header-id`).click({ button: 'right' })
+    await host.getByRole('button', { name: 'Delete version and descendants' }).click()
+    await expect.poll(async () => (await state(host, room)).activeId).toBe('v0')
+    await expect.poll(async () => (await state(guest, room)).activeId).toBe('v0')
+  } finally {
+    await Promise.all(contexts.map((context) => context.close()))
+  }
+})
+
 test('peers follow new children only when viewing their parent', async ({ browser }) => {
   const hostContext = await browser.newContext()
   const guestContext = await browser.newContext()
@@ -1816,11 +1976,17 @@ test('simultaneous joiners receive unique stable names from the room host', asyn
   try {
     const room = await openRoom(pages[0])
     await Promise.all(pages.slice(1, 4).map((page) => page.goto(`/?room=${room}`)))
+    let identities
     for (const page of pages.slice(0, 4)) {
       await expect(page.locator('.collaborator-list button')).toHaveCount(4, { timeout: 20000 })
       await expect.poll(async () => page.locator('.collaborator-list button').evaluateAll((buttons) =>
-        buttons.map((button) => button.title.split(' · ')[0]).sort()), { timeout: 20000 })
-        .toEqual(['Otter', 'Otter 2', 'Otter 3', 'Otter 4'])
+        new Set(buttons.map((button) => button.title.split(' · ')[0])).size), { timeout: 20000 }).toBe(4)
+      const current = await page.locator('.collaborator-list button').evaluateAll((buttons) =>
+        buttons.map((button) => [button.title.split(' · ')[0], button.querySelector('.collaborator-avatar').style.getPropertyValue('--collaborator-color')]).sort())
+      expect(current.every(([name]) => !/\d/.test(name))).toBe(true)
+      expect(new Set(current.map(([, color]) => color)).size).toBe(4)
+      if (identities) expect(current).toEqual(identities)
+      else identities = current
     }
     await openRoom(pages[4])
     await expect(pages[4].locator('.collaborator-info strong')).toHaveText('Otter (you)')
@@ -1831,7 +1997,7 @@ test('simultaneous joiners receive unique stable names from the room host', asyn
     await expect(pages[0].locator('.collaborator-list button')).toHaveCount(3)
     await expect.poll(async () => pages[0].locator('.collaborator-list button').evaluateAll((buttons) =>
       buttons.map((button) => button.title.split(' · ')[0]).sort()))
-      .toEqual(['Otter', 'Otter 2', 'Otter 3', 'Otter 4'].filter((name) => name !== leavingName))
+      .toEqual(identities.map(([name]) => name).filter((name) => name !== leavingName).sort())
   } finally {
     await Promise.all(contexts.map((context) => context.close()))
   }

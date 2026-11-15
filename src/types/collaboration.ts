@@ -34,6 +34,6 @@ export type InteractionEntry = {
   nodeLabel?: string
   ping?: { x: number; y: number }
 }
-export type RemoteUser = { name: string; activeVersionId: string | null; selectedNodeIds: string[]; lastSeen: number }
+export type RemoteUser = { name: string; color: string; activeVersionId: string | null; selectedNodeIds: string[]; lastSeen: number }
 export type Ping = { id: string; userId: string; x: number; y: number; createdAt: number }
 

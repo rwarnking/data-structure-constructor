@@ -1,11 +1,11 @@
 import { computed, ref, type ComputedRef } from 'vue'
 import type { MapView, TreeNode, Version } from '../types/workspace'
 import { descendants, findNode, flattenNodes, type FlatNode } from '../utils/tree'
-import { CARD_WIDTH, TREE_MAP_HEIGHT, MAP_PADDING, positionsAfterMove, positionsForData, tilesForForest } from '../utils/treemap'
+import { CARD_WIDTH, TREE_MAP_HEIGHT, MAP_PADDING, compactTreemapPositions, positionsAfterMove, tilesForForest } from '../utils/treemap'
 
 export function useVersionComparison(
   versions: ComputedRef<Version[]>,
-  mapViewFor: (version: Version) => MapView,
+  _mapViewFor: (version: Version) => MapView,
   mapViewport: (version: Version) => { width: number; height: number },
 ) {
   const compareMode = ref(false)
@@ -17,6 +17,7 @@ export function useVersionComparison(
   const mergePositionOverrides = ref<Record<string, { x: number; y: number }>>({})
   const mergeDrag = ref<{ id: string; pointerId: number; x: number; y: number; moved: boolean } | null>(null)
   const mergeDropTarget = ref<string | null>(null)
+  const mergeDragOffset = ref<{ x: number; y: number } | null>(null)
   const comparisonSelectedNode = ref<string | null>(null)
   let suppressMergeClick = false
 
@@ -157,7 +158,7 @@ export function useVersionComparison(
       if (parent) parent.children.push(node)
       else roots.push(node)
     }
-    const positions = positionsForData(target.data, roots, target.positions, mapViewFor(target), mapViewport(target))
+    const positions = compactTreemapPositions(roots, mapViewport(target))
     for (const [id, position] of Object.entries(mergePositionOverrides.value)) {
       if (roots.some((node) => node.id === id)) {
         Object.assign(positions, positionsAfterMove(roots, positions, id, position))
@@ -249,6 +250,7 @@ export function useVersionComparison(
     mergePositionOverrides.value = {}
     mergeDrag.value = null
     mergeDropTarget.value = null
+    mergeDragOffset.value = null
   }
   const comparisonPanels = computed(() => {
     if (compareIds.value.length !== 2) return []
@@ -301,6 +303,20 @@ export function useVersionComparison(
     const bottom = Math.max(...tiles.map((tile) => tile.y + tile.height))
     return `${left - MAP_PADDING} ${top - MAP_PADDING} ${Math.max(1, right - left) + MAP_PADDING * 2} ${Math.max(1, bottom - top) + MAP_PADDING * 2}`
   })
+  const mergeDraggedTiles = computed(() => {
+    const drag = mergeDrag.value
+    const offset = mergeDragOffset.value
+    const node = drag && findNode(mergeResult.value?.data ?? [], drag.id)
+    if (!node || !offset) return []
+    const ids = new Set(descendants(node))
+    return mergePreviewTiles.value.filter((tile) => ids.has(tile.id))
+      .map((tile) => ({ ...tile, x: tile.x + offset.x, y: tile.y + offset.y }))
+  })
+  function mergePoint(svg: SVGSVGElement, clientX: number, clientY: number) {
+    const matrix = svg.getScreenCTM()
+    if (!matrix) return null
+    return new DOMPoint(clientX, clientY).matrixTransform(matrix.inverse())
+  }
   function startMergeDrag(event: PointerEvent, nodeId: string) {
     if (event.button !== 0) return
     event.preventDefault()
@@ -312,8 +328,13 @@ export function useVersionComparison(
     if (!drag || drag.pointerId !== event.pointerId) return
     if (!drag.moved && Math.hypot(event.clientX - drag.x, event.clientY - drag.y) > 5) drag.moved = true
     if (!drag.moved) return
+    const svg = event.currentTarget as SVGSVGElement
+    const from = mergePoint(svg, drag.x, drag.y)
+    const to = mergePoint(svg, event.clientX, event.clientY)
+    if (from && to) mergeDragOffset.value = { x: to.x - from.x, y: to.y - from.y }
     const hit = document.elementFromPoint(event.clientX, event.clientY)?.closest<SVGRectElement>('.merge-preview-tile')
-    mergeDropTarget.value = hit?.dataset.node ?? null
+    const target = hit?.dataset.node
+    mergeDropTarget.value = target && mergeParentOptions(drag.id).some(([id]) => id === target) ? target : null
   }
   function finishMergeDrag(event: PointerEvent) {
     const drag = mergeDrag.value
@@ -323,30 +344,32 @@ export function useVersionComparison(
       moveMergeDrag(event)
       const hit = document.elementFromPoint(event.clientX, event.clientY)
       const targetTile = hit?.closest<SVGRectElement>('.merge-preview-tile')
-      if (targetTile && targetTile.dataset.node !== drag.id) {
-        setMergeParent(drag.id, targetTile.dataset.node ?? '')
+      if (targetTile && mergeDropTarget.value) {
+        setMergeParent(drag.id, mergeDropTarget.value)
       } else if (!targetTile) {
         const svg = document.querySelector<SVGSVGElement>('.merge-preview-canvas')
         const rect = svg?.getBoundingClientRect()
         if (svg && rect && hit && svg.contains(hit)) {
-          const { x: viewX, y: viewY, width: viewWidth, height: viewHeight } = svg.viewBox.baseVal
-          const x = viewX + (event.clientX - rect.left) / rect.width * viewWidth
-          const y = viewY + (event.clientY - rect.top) / rect.height * viewHeight
-          setMergeParent(drag.id, '')
-          mergePositionOverrides.value = {
-            ...mergePositionOverrides.value,
-            [drag.id]: { x: x / CARD_WIDTH, y: y / TREE_MAP_HEIGHT },
+          const point = mergePoint(svg, event.clientX, event.clientY)
+          if (point) {
+            setMergeParent(drag.id, '')
+            mergePositionOverrides.value = {
+              ...mergePositionOverrides.value,
+              [drag.id]: { x: point.x / CARD_WIDTH, y: point.y / TREE_MAP_HEIGHT },
+            }
           }
         }
       }
     }
     mergeDrag.value = null
     mergeDropTarget.value = null
+    mergeDragOffset.value = null
   }
   function cancelMergeDrag(event: PointerEvent) {
     if (mergeDrag.value?.pointerId !== event.pointerId) return
     mergeDrag.value = null
     mergeDropTarget.value = null
+    mergeDragOffset.value = null
   }
 
   return {
@@ -383,6 +406,7 @@ export function useVersionComparison(
     comparisonGhosts,
     selectComparedNode,
     mergePreviewTiles,
+    mergeDraggedTiles,
     mergePreviewViewBox,
     startMergeDrag,
     moveMergeDrag,

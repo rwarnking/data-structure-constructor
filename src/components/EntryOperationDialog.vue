@@ -10,7 +10,7 @@ const emit = defineEmits<{ close: []; commit: []; 'add-split': []; 'remove-split
 
 <template>
   <div class="editor-scrim" @click.self="emit('close')">
-    <form class="entry-editor operation-editor" @submit.prevent="emit('commit')">
+    <form class="entry-editor operation-editor" :class="{ 'table-editor': entryOperation.mode === 'split' }" @submit.prevent="emit('commit')">
       <div class="editor-heading">
         <span class="section-label">{{ entryOperation.mode === 'merge' ? 'MERGE ENTRIES' : 'SPLIT ENTRY' }}</span>
         <button type="button" class="quiet-icon" title="Close" @click="emit('close')"><X :size="17" /></button>
@@ -25,12 +25,17 @@ const emit = defineEmits<{ close: []; commit: []; 'add-split': []; 'remove-split
       </template>
       <template v-else>
         <p class="operation-note">Each original child must be assigned to exactly one resulting entry.</p>
-        <div v-for="(entry, index) in entryOperation.entries" :key="entry.id" class="entry-draft-row">
-          <div class="entry-draft-heading"><strong>Result {{ index + 1 }}</strong><button v-if="entryOperation.entries.length > 2" type="button" class="quiet-icon" :aria-label="`Remove result ${index + 1}`" @click="emit('remove-split', entry.id)"><X :size="14" /></button></div>
-          <label class="editor-label" :for="`split-value-${entry.id}`">Entry name</label>
-          <input :id="`split-value-${entry.id}`" v-model="entry.value" maxlength="120" />
-          <label class="editor-label" :for="`split-description-${entry.id}`">Description <span>optional</span></label>
-          <textarea :id="`split-description-${entry.id}`" v-model="entry.description" maxlength="400" rows="2"></textarea>
+        <div class="entry-draft-table-wrap">
+          <table class="entry-draft-table">
+            <thead><tr><th scope="col">Name / Value</th><th scope="col">Description</th><th scope="col"><span class="sr-only">Remove</span></th></tr></thead>
+            <tbody>
+              <tr v-for="(entry, index) in entryOperation.entries" :key="entry.id">
+                <td><input :id="`split-value-${entry.id}`" v-model="entry.value" maxlength="120" required :aria-label="`Result ${index + 1} name`" placeholder="Entry name" /></td>
+                <td><input :id="`split-description-${entry.id}`" v-model="entry.description" maxlength="400" :aria-label="`Result ${index + 1} description`" placeholder="Optional description" /></td>
+                <td><button v-if="entryOperation.entries.length > 2" type="button" class="quiet-icon" :aria-label="`Remove result ${index + 1}`" @click="emit('remove-split', entry.id)"><X :size="14" /></button></td>
+              </tr>
+            </tbody>
+          </table>
         </div>
         <button type="button" class="add-draft-button" @click="emit('add-split')"><Plus :size="14" /> Add result entry</button>
         <div v-if="findNode(data, entryOperation.nodeId)?.children.length" class="child-assignment-list">

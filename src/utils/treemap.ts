@@ -138,6 +138,54 @@ function outerDimensions(node: TreeNode, positions: Record<string, { x: number; 
 export function outerTreemapDimensions(node: TreeNode, positions?: Record<string, { x: number; y: number }>) {
   return outerDimensions(node, positions, new Map())
 }
+export function compactTreemapPositions(data: TreeNode[], viewport: { width: number; height: number }) {
+  const cache: LayoutCache = new Map()
+  const ordered = data.map((node, index) => ({
+    node, index, size: outerDimensions(node, undefined, cache),
+  })).sort((left, right) => right.size.height - left.size.height
+    || right.size.width - left.size.width || left.index - right.index)
+  const candidateWidths = [...new Set(ordered.reduce<number[]>((widths, item) => {
+    widths.push((widths.at(-1) ?? MAP_PADDING) + item.size.width + (widths.length ? MAP_GAP : 0))
+    return widths
+  }, []))]
+  let best: { area: number; aspectDelta: number; fitScale: number; positions: Record<string, { x: number; y: number }> } | null = null
+  for (const targetWidth of candidateWidths) {
+    let x = MAP_PADDING
+    let y = MAP_PADDING
+    let rowHeight = 0
+    let maxRight = MAP_PADDING
+    let maxBottom = MAP_PADDING
+    const placed = new Map<string, { x: number; y: number }>()
+    for (const { node, size } of ordered) {
+      if (x > MAP_PADDING && x + size.width > MAP_PADDING + targetWidth) {
+        x = MAP_PADDING
+        y += rowHeight + MAP_GAP
+        rowHeight = 0
+      }
+      placed.set(node.id, { x, y })
+      x += size.width + MAP_GAP
+      rowHeight = Math.max(rowHeight, size.height)
+      maxRight = Math.max(maxRight, x - MAP_GAP)
+      maxBottom = Math.max(maxBottom, y + size.height)
+    }
+    const width = maxRight - MAP_PADDING
+    const height = maxBottom - MAP_PADDING
+    const area = width * height
+    const aspectDelta = Math.abs(Math.log((width / Math.max(1, height)) / (viewport.width / viewport.height)))
+    const fitScale = Math.min(1, viewport.width / Math.max(1, width), viewport.height / Math.max(1, height))
+    if (best && (fitScale < best.fitScale
+      || (fitScale === best.fitScale && aspectDelta > best.aspectDelta)
+      || (fitScale === best.fitScale && aspectDelta === best.aspectDelta && area >= best.area))) continue
+    best = {
+      area, aspectDelta, fitScale,
+      positions: Object.fromEntries(data.map((node) => {
+        const position = placed.get(node.id)!
+        return [node.id, { x: position.x / CARD_WIDTH, y: position.y / TREE_MAP_HEIGHT }]
+      })),
+    }
+  }
+  return best?.positions ?? {}
+}
 function treeDimensions(node: TreeNode, positions: Record<string, { x: number; y: number }> | undefined, cache: LayoutCache): { width: number; height: number } {
   const cached = cache.get(node)
   if (cached) return cached

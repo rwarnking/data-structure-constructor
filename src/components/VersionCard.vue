@@ -1,17 +1,38 @@
 <script setup lang="ts">
-import { computed, toRefs } from 'vue'
+import { computed, ref, toRefs } from 'vue'
 import { actionIcons } from '../config/icons'
 import type { Version } from '../types/workspace'
 import type { VersionCardModel } from '../types/graph'
-import { userColor, versionColor } from '../utils/colors'
+import { versionColor } from '../utils/colors'
 import TileLabel from './TileLabel.vue'
 import { displayVersionChange, displayVersionId } from '../utils/versions'
 
 const props = defineProps<{ version: Version; model: VersionCardModel }>()
 const { menu: MoreHorizontal, tag: TagIcon } = actionIcons
-const { active, compareIds, compareMode, zoom, overNode, invalidNode, hoveredNode, selectedNodes, draggedSubtreeIds, draggedOriginalTile, selectionBox, windowDimensions, clientId, isReadOnly, versionTiles, duplicateValueLinks, displayCardPosition, cardHeight, rootLabelOffset, rootLabelX, versionAuthorColor, activeUsersFor, descendantsCount, isPreviewing, previewLabel, versionAction, cardData, mapViewport, cardMapView, mapTransform, changedEntries, tileSelectionColor, dragOverlayTiles, handleVersionClick, handleVersionDoubleClick, onVersionContext, onVersionMenu, startMapPan, zoomMap, startMapTileGesture, enterTile, moveTileTooltip, leaveTile, onTileClick, onTileDoubleClick, onTileContext } = toRefs(props.model)
+const { active, compareIds, compareMode, zoom, overNode, invalidNode, hoveredNode, selectedNodes, draggedSubtreeIds, draggedOriginalTile, selectionBox, windowDimensions, clientId, colorForUser, isReadOnly, versionTiles, duplicateValueLinks, displayCardPosition, cardHeight, rootLabelOffset, rootLabelX, versionAuthorColor, activeUsersFor, descendantsCount, isPreviewing, previewLabel, versionAction, cardData, mapViewport, cardMapView, mapTransform, changedEntries, tileSelectionColor, dragOverlayTiles, handleVersionClick, handleVersionDoubleClick, onVersionContext, onVersionMenu, startMapPan, zoomMap, startMapTileGesture, enterTile, moveTileTooltip, leaveTile, onTileClick, onTileDoubleClick, onTileContext } = toRefs(props.model)
 const overlayTiles = computed(() => dragOverlayTiles.value(props.version))
 const overlayIds = computed(() => new Set(overlayTiles.value.map((tile) => tile.id)))
+const overviewHover = ref(false)
+const previewPosition = ref({ left: 0, top: 0 })
+const previewTiles = computed(() => versionTiles.value.get(props.version.id) ?? [])
+const previewViewBox = computed(() => {
+  const tiles = previewTiles.value
+  if (!tiles.length) return '0 0 260 220'
+  const left = Math.min(...tiles.map((tile) => tile.x))
+  const top = Math.min(...tiles.map((tile) => tile.y))
+  const right = Math.max(...tiles.map((tile) => tile.x + tile.width))
+  const bottom = Math.max(...tiles.map((tile) => tile.y + tile.height))
+  return `${left - 12} ${top - 12} ${right - left + 24} ${bottom - top + 24}`
+})
+function showOverviewPreview(event: PointerEvent) {
+  if (!isReadOnly.value) return
+  const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect()
+  previewPosition.value = {
+    left: Math.max(8, Math.min(window.innerWidth - 288, bounds.right + 8)),
+    top: Math.max(8, Math.min(window.innerHeight - 248, bounds.top)),
+  }
+  overviewHover.value = true
+}
 const renderedTiles = computed(() => {
   const view = cardMapView.value(props.version)
   const viewport = mapViewport.value(props.version)
@@ -28,8 +49,9 @@ const renderedTiles = computed(() => {
 </script>
 
 <template>
-  <article class="version-card" :class="{ active: version.id === active.id, compared: compareIds.includes(version.id), 'compare-pick': compareMode, compact: zoom < 0.66, previewing: isPreviewing(version), 'root-version': version.id === 'v0' }"
-    :data-version="version.id" :style="{ left: `${displayCardPosition(version).x}px`, top: `${displayCardPosition(version).y}px`, width: `${windowDimensions.width}px`, height: `${cardHeight(version)}px`, '--branch-color': versionColor(version), '--user-color': userColor(clientId), '--author-color': versionAuthorColor(version) }"
+  <article class="version-card" :class="{ active: version.id === active.id, compared: compareIds.includes(version.id), 'compare-pick': compareMode, compact: zoom < 0.66, 'lod-overview': isReadOnly, previewing: isPreviewing(version), 'root-version': version.id === 'v0' }"
+    :data-version="version.id" :style="{ left: `${displayCardPosition(version).x}px`, top: `${displayCardPosition(version).y}px`, width: `${windowDimensions.width}px`, height: `${cardHeight(version)}px`, '--branch-color': versionColor(version), '--user-color': colorForUser(clientId), '--author-color': versionAuthorColor(version) }"
+    @pointerenter="showOverviewPreview" @pointerleave="overviewHover = false"
     @click="handleVersionClick(version, $event)" @dblclick.stop="handleVersionDoubleClick(version)" @contextmenu="onVersionContext(version, $event)" :data-over="overNode === version.id">
     <span v-for="(user, index) in activeUsersFor(version.id)" :key="`active-${user.id}`"
       class="version-user-outline" :style="{ borderColor: user.color, borderWidth: `${2 / Math.min(1, zoom)}px`, inset: `${(-2 - index * 3) / Math.min(1, zoom)}px` }"></span>
@@ -37,14 +59,14 @@ const renderedTiles = computed(() => {
       :style="{ transform: `scale(${1 / zoom})`, top: `${rootLabelOffset() - 42}px`, left: `${rootLabelX()}px` }"
       :aria-label="`Tag: ${version.tag.title}. ${version.tag.description}`" role="img"><TagIcon :size="18" /></span>
     <div v-if="version.id !== 'v0'" class="version-card-head">
-      <span class="branch-mark" :style="{ background: versionColor(version) }"></span>
-      <span class="version-header-id" :title="displayVersionId(version)">{{ displayVersionId(version) }}</span>
-      <span v-if="version.tag" class="version-tag-indicator" :title="`${version.tag.title}\n${version.tag.description}`"
+      <span v-if="!isReadOnly" class="branch-mark" :style="{ background: versionColor(version) }"></span>
+      <span class="version-header-id" :style="isReadOnly ? { fontSize: `${Math.min(28, 330 / displayVersionId(version).length)}px` } : undefined" :title="displayVersionId(version)">{{ displayVersionId(version) }}</span>
+      <span v-if="version.tag && !isReadOnly" class="version-tag-indicator" :title="`${version.tag.title}\n${version.tag.description}`"
         :aria-label="`Tag: ${version.tag.title}. ${version.tag.description}`" role="img"><TagIcon :size="14" /></span>
-      <span class="version-action-symbol" :title="versionAction(version).label" aria-hidden="true">{{ versionAction(version).symbol }}</span>
-      <strong class="version-action">{{ version.change }}</strong>
-      <span class="version-count">({{ descendantsCount(version.data) }} Entries)</span>
-      <button class="card-menu quiet-icon" title="Version actions" @click.stop="onVersionMenu(version, $event)" @dblclick.stop><MoreHorizontal :size="17" /></button>
+      <span v-if="!isReadOnly" class="version-action-symbol" :title="versionAction(version).label" aria-hidden="true">{{ versionAction(version).symbol }}</span>
+      <strong v-if="!isReadOnly" class="version-action">{{ version.change }}</strong>
+      <span v-if="!isReadOnly" class="version-count">({{ descendantsCount(version.data) }} Entries)</span>
+      <button class="card-menu quiet-icon" title="Version actions" @click.stop="onVersionMenu(version, $event)" @dblclick.stop><MoreHorizontal :size="isReadOnly ? 30 : 17" /></button>
     </div>
     <div v-if="isPreviewing(version)" class="preview-badge">{{ previewLabel() }}</div>
     <div v-if="isReadOnly || version.id === 'v0'" class="overview-map"
@@ -54,7 +76,8 @@ const renderedTiles = computed(() => {
         <div class="overview-action" :class="{ 'has-tag': version.tag }">
           <span class="overview-action-symbol">{{ versionAction(version).symbol }}</span>
           <strong class="overview-action-detail">{{ displayVersionChange(version) || versionAction(version).label }}</strong>
-          <TagIcon v-if="version.tag" class="overview-tag" :title="version.tag.title" aria-label="Tagged version" />
+          <span v-if="version.tag" class="overview-tag" :title="`${version.tag.title}\n${version.tag.description}`"
+            :aria-label="`Tag: ${version.tag.title}. ${version.tag.description}`" tabindex="0"><TagIcon /></span>
         </div>
         <div class="overview-stats">
           <span><b>{{ descendantsCount(version.data) }}</b><small>entries</small></span>
@@ -108,4 +131,16 @@ const renderedTiles = computed(() => {
         :style="{ left: `${selectionBox.left}%`, top: `${selectionBox.top}%`, width: `${selectionBox.width}%`, height: `${selectionBox.height}%` }"></div>
     </div>
   </article>
+  <Teleport to=".app-shell">
+    <div v-if="overviewHover && isReadOnly" class="overview-preview" :style="{ left: `${previewPosition.left}px`, top: `${previewPosition.top}px` }">
+      <strong>{{ displayVersionId(version) }}</strong>
+      <svg v-if="previewTiles.length" :viewBox="previewViewBox" role="img" :aria-label="`Treemap preview for ${displayVersionId(version)}`">
+        <rect v-for="tile in previewTiles" :key="tile.id" :x="tile.x" :y="tile.y" :width="tile.width" :height="tile.height"
+          :fill="tile.depth === 0 ? 'var(--theme-entry-root)' : tile.depth === 3 ? 'var(--theme-entry-deep)' : tile.depth % 2 ? 'var(--theme-entry-odd)' : 'var(--theme-entry-even)'"
+          stroke="var(--theme-entry-outline)" stroke-width="3" />
+        <TileLabel v-for="tile in previewTiles" :key="`preview-${tile.id}`" :tile="tile" class="tile-label" />
+      </svg>
+      <span v-else>Empty structure</span>
+    </div>
+  </Teleport>
 </template>

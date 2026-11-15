@@ -75,7 +75,8 @@ export function useHierarchyEditor(options: {
           parent!.children.push(...entries.map((entry) => makeNode(entry.value, entry.description)))
         }
         editor.value = null
-        createVersion(data, `Add ${entries.length} child ${entries.length === 1 ? 'entry' : 'entries'} to ${parents.length} selected ${parents.length === 1 ? 'entry' : 'entries'}`, parents.length > 1 || entries.length > 1)
+        const count = parents.length * entries.length
+        createVersion(data, count > 1 ? `Created ${count} items` : `Add ${entries[0]!.value}`, count > 1)
         return
       }
       if (currentEditor.parentOf) {
@@ -116,7 +117,7 @@ export function useHierarchyEditor(options: {
       const operation = currentEditor.parentId ? 'Add' : 'Create'
       const summary = nodes.length === 1
         ? `${operation} ${entries[0]!.value}`
-        : `${operation} ${entries.length} entries: ${entries.map((entry) => entry.value).join(', ')}`
+        : `Created ${nodes.length} items`
       createVersion(data, summary, nodes.length > 1)
       return
     }
@@ -212,8 +213,8 @@ export function useHierarchyEditor(options: {
     })
     const nextData = removeSelected(data)
     if (mode === 'detach-children') nextData.push(...detachedRoots)
-    const count = selected.size
-    const version = createVersion(nextData, `Delete ${count} selected entries`, true)
+    const count = countNodes(active.value.data) - countNodes(nextData)
+    const version = createVersion(nextData, `Deleted ${count} items`, true)
     if (version) setSelectedNodes([])
     entryOperation.value = null
     bulkDeleteDialog.value = false

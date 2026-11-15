@@ -16,7 +16,7 @@ import WorkspaceSidebar from '../components/WorkspaceSidebar.vue'
 import VersionConnections from '../components/VersionConnections.vue'
 import VersionCard from '../components/VersionCard.vue'
 import type { VersionCardModel } from '../types/graph'
-import { selectionColor, userColor, versionColor } from '../utils/colors'
+import { versionColor } from '../utils/colors'
 import EntryEditor from '../components/EntryEditor.vue'
 import EntryOperationDialog from '../components/EntryOperationDialog.vue'
 import RoomManager from '../components/RoomManager.vue'
@@ -45,6 +45,7 @@ const TERMINAL_TAIL_LENGTH = GRAPH_GAP_X
 const TERMINAL_ARROW_BASE_INSET = 0.3
 const SIDEBAR_LAYOUT_WIDTH = 238
 const ZOOM_MAX = 4
+const ENTRY_TOOLTIP_DELAY = 500
 const { seed, roomDataKey, persistLocalRooms, initializeLocalRooms, readRoomState, normalizeState } = createRoomStorage()
 const initialRooms = initializeLocalRooms()
 const localRooms = ref(initialRooms.rooms)
@@ -216,7 +217,7 @@ function endBoxSelection(event: PointerEvent, cancel = false) {
 function cancelBoxSelection(event: PointerEvent) { endBoxSelection(event, true) }
 
 const {
-  remoteUsers, pings, roomStatus, peerRoom, connectedUsers, recentInteractions, metadataKey,
+  remoteUsers, pings, roomStatus, peerRoom, connectedUsers, recentInteractions, colorForUser, metadataKey,
   interactionStorageKey, logInteraction, initializeCollaborationMetadata, sendPingAt,
   expireRemoteUsers, connectAutomatically, resetRoomTracking, setObservedState, finishRoomSwitch,
 } = useCollaboration({
@@ -362,7 +363,7 @@ function enterTile(event: PointerEvent, version: Version, nodeId: string) {
     if (hoveredNode.value?.versionId === version.id && hoveredNode.value.nodeId === nodeId) {
       entryTooltip.value = { versionId: version.id, nodeId, description, ...tilePointer }
     }
-  }, 2000)
+  }, ENTRY_TOOLTIP_DELAY)
 }
 function moveTileTooltip(event: PointerEvent, versionId: string, nodeId: string) {
   tilePointer = { x: event.clientX, y: event.clientY }
@@ -492,8 +493,12 @@ function createRoomFromDialog() {
     notify('Enter a room name of 1–80 characters')
     return
   }
+  if (localRooms.value.includes(name) || localStorage.getItem(roomDataKey(name)) !== null) {
+    notify('A saved room with that name already exists; choose it from the list or join it')
+    return
+  }
   newRoomName.value = ''
-  void activateRoom(name, !localRooms.value.includes(name))
+  void activateRoom(name, true)
 }
 
 function switchFromBlockedRoom(room: string) {
@@ -694,13 +699,13 @@ function terminalTailEnd(version: Version) {
 }
 function versionAuthorColor(version: Version) {
   const author = version.createdBy ?? version.id.match(/-([a-f0-9]{12})$/)?.[1]
-  return author ? userColor(author) : 'var(--theme-branch-root)'
+  return author ? colorForUser(author) : 'var(--theme-branch-root)'
 }
 function activeUsersFor(versionId: string) {
   const users = []
-  if (active.value.id === versionId) users.push({ id: CLIENT_ID, color: userColor(CLIENT_ID) })
+  if (active.value.id === versionId) users.push({ id: CLIENT_ID, color: colorForUser(CLIENT_ID) })
   for (const [id, user] of Object.entries(remoteUsers.value)) {
-    if (user.activeVersionId === versionId) users.push({ id, color: userColor(id) })
+    if (user.activeVersionId === versionId) users.push({ id, color: colorForUser(id) })
   }
   return users
 }
@@ -708,11 +713,12 @@ function tileSelectionHighlights(versionId: string, nodeId: string) {
   const highlights: { id: string; color: string }[] = []
   if (active.value.id === versionId) {
     const localIndex = selectedNodes.value.indexOf(nodeId)
-    if (localIndex >= 0) highlights.push({ id: CLIENT_ID, color: selectionColor(CLIENT_ID, localIndex > 0) })
+    if (localIndex >= 0) highlights.push({ id: CLIENT_ID, color: localIndex > 0
+      ? `color-mix(in srgb, ${colorForUser(CLIENT_ID)} 70%, white)` : colorForUser(CLIENT_ID) })
   }
   for (const [id, user] of Object.entries(remoteUsers.value)) {
     if (user.activeVersionId === versionId && user.selectedNodeIds.includes(nodeId)) {
-      highlights.push({ id, color: userColor(id) })
+      highlights.push({ id, color: colorForUser(id) })
     }
   }
   return highlights
@@ -1190,6 +1196,7 @@ const cardModel: VersionCardModel = reactive({
   onTileDoubleClick,
   onTileContext,
   clientId: CLIENT_ID,
+  colorForUser,
 })
 </script>
 
@@ -1207,7 +1214,7 @@ const cardModel: VersionCardModel = reactive({
     <div class="workspace" :inert="mergeMode && compareIds.length === 2">
       <WorkspaceSidebar :sidebar-collapsed="sidebarCollapsed" :dark-mode="darkMode" :current-room-name="currentRoomName"
         :room-status="roomStatus" :local-only="isLocalOnlyRoom(currentRoomName)" :connected-users="connectedUsers" :client-id="CLIENT_ID" :versions="versions"
-        :recent-interactions="recentInteractions" :branch-count="branchCount" :active="active"
+        :recent-interactions="recentInteractions" :branch-count="branchCount" :active="active" :color-for-user="colorForUser"
         :active-nodes="activeNodes" :active-children="activeChildren"
         @toggle-sidebar="sidebarCollapsed = !sidebarCollapsed" @toggle-theme="darkMode = !darkMode"
         @change-room="roomDialogOpen = true" @copy-invite="copySessionInvite" @focus-collaborator="focusCollaborator"
@@ -1246,7 +1253,7 @@ const cardModel: VersionCardModel = reactive({
               </g>
             </svg>
             <span v-for="ping in pings" :key="ping.id" class="ping-origin"
-              :style="{ left: `${ping.x}px`, top: `${ping.y}px`, '--ping-color': userColor(ping.userId) }">
+              :style="{ left: `${ping.x}px`, top: `${ping.y}px`, '--ping-color': colorForUser(ping.userId) }">
               <span v-for="pulse in 3" :key="pulse" class="ping-ripple"
                 :style="{ animationDelay: `${(pulse - 1) * 180}ms` }"></span>
             </span>
@@ -1255,15 +1262,15 @@ const cardModel: VersionCardModel = reactive({
           <template v-for="lane in visibleLanes" :key="lane.lane">
             <button type="button" class="lane-navigation lane-navigation-left" :class="{ 'active-lane': active.id !== 'v0' && active.lane === lane.lane }" :data-lane="lane.lane"
               :aria-label="`Go to beginning of lane ${lane.lane + 1}`" title="Go to beginning of lane"
-              :style="{ top: `${lane.top}px`, height: `${lane.height}px`, '--lane-color': versionColor(lane.first), '--user-color': userColor(CLIENT_ID) }"
+              :style="{ top: `${lane.top}px`, height: `${lane.height}px`, '--lane-color': versionColor(lane.first), '--user-color': colorForUser(CLIENT_ID) }"
               @pointerdown.stop @click.stop="navigateLane(lane.first)"><ChevronLeft :size="Math.min(18, lane.height)" /></button>
             <button type="button" class="lane-navigation lane-navigation-right" :class="{ 'active-lane': active.id !== 'v0' && active.lane === lane.lane }" :data-lane="lane.lane"
               :aria-label="`Go to end of lane ${lane.lane + 1}`" title="Go to end of lane"
-              :style="{ top: `${lane.top}px`, height: `${lane.height}px`, '--lane-color': versionColor(lane.last), '--user-color': userColor(CLIENT_ID) }"
+              :style="{ top: `${lane.top}px`, height: `${lane.height}px`, '--lane-color': versionColor(lane.last), '--user-color': colorForUser(CLIENT_ID) }"
               @pointerdown.stop @click.stop="navigateLane(lane.last)"><ChevronRight :size="Math.min(18, lane.height)" /></button>
           </template>
 
-          <div class="canvas-controls" @pointerdown.stop @click.stop @wheel.stop>
+          <div v-if="compareIds.length !== 2" class="canvas-controls" @pointerdown.stop @click.stop @wheel.stop>
             <div v-if="pingMode" class="ping-mode-banner" role="status">PING MODE · Click to place a ping · Press {{ shortcutLabel('ping') }} or {{ shortcutLabel('dismiss') }} to exit</div>
             <div class="canvas-hotbar" role="toolbar" aria-label="Quick actions">
             <button data-action="new-entry" :title="`Create a free entry · ${shortcutLabel('newEntry')}`" :aria-label="`New free entry, ${shortcutLabel('newEntry', true)}`" @click="createFreeEntry"><Plus :size="16" /><span>New entry</span><kbd>{{ shortcutLabel('newEntry') }}</kbd></button>
@@ -1282,7 +1289,7 @@ const cardModel: VersionCardModel = reactive({
       </section>
     </div>
 
-    <VersionComparison :model="comparisonModel" :versions="versions" @confirm="confirmMerge" />
+    <VersionComparison :model="comparisonModel" :versions="versions" :sidebar-collapsed="sidebarCollapsed" @confirm="confirmMerge" />
 
     <div v-if="menu" ref="contextMenuElement" class="context-menu" :style="{ left: `${contextMenuPosition.x}px`, top: `${contextMenuPosition.y}px` }" @click.stop>
       <template v-if="menu.kind === 'version'">

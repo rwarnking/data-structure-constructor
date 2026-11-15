@@ -14,6 +14,7 @@ export type VersionCardModel = {
   selectionBox: { versionId: string; left: number; top: number; width: number; height: number } | null
   windowDimensions: { width: number; height: number }
   clientId: string
+  colorForUser: (id: string) => string
   isReadOnly: boolean
   versionTiles: Map<string, Tile[]>
   duplicateValueLinks: Map<string, { id: string; path: string }[]>

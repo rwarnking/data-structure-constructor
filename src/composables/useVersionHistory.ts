@@ -181,6 +181,8 @@ export function useVersionHistory(options: {
       return
     }
     const fallbackId = versions.value.find((version) => version.id === id)?.parentId ?? 'v0'
+    const activeRemoved = removeIds.has(state.value.activeId)
+    const wasCentered = activeRemoved && isVersionCentered(active.value)
     if (!window.confirm(`Prune ${removeIds.size} version${removeIds.size === 1 ? '' : 's'} from this branch?`)) return
     for (const versionId of removeIds) {
       const timer = mapViewTimers.get(versionId)
@@ -194,7 +196,12 @@ export function useVersionHistory(options: {
     state.value.versions = versions.value.filter((version) => !removeIds.has(version.id))
     assignVersionSuffixes(state.value.versions, state.value.retiredVersionNumbers)
     reflowLayout()
-    if (removeIds.has(state.value.activeId)) state.value.activeId = fallbackId
+    if (activeRemoved) {
+      state.value.activeId = fallbackId
+      setSelectedNodes([])
+      const fallback = versions.value.find((version) => version.id === fallbackId)
+      if (fallback) panToVersion(fallback, wasCentered)
+    }
     compareIds.value = compareIds.value.filter((versionId) => !removeIds.has(versionId))
     notify('Branch pruned')
   }

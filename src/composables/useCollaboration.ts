@@ -5,6 +5,7 @@ import type { InteractionEntry, Ping, RemoteUser, SyncDelta, SyncSnapshot, Versi
 import { hasValidVersionStep, isCollaborationMetadata, isCopyLink, isInteractionEntry, isRecord, isRetiredVersionNumber, isRevision, isStoredState, isVersion } from '../utils/validation'
 import { findNode } from '../utils/tree'
 import { assignMissingVersionNumbers, assignVersionSuffixes, compareCopyLinks, retireVersionNumbers } from '../utils/versions'
+import { collaboratorColors, userColor } from '../utils/colors'
 
 export function useCollaboration(options: {
   clientId: string
@@ -31,7 +32,12 @@ export function useCollaboration(options: {
   ]
 
   const remoteUsers = ref<Record<string, RemoteUser>>({})
-  const userName = ref(localStorage.getItem('canopy-user-name')?.trim().slice(0, 32) || animalForUser(CLIENT_ID))
+  const savedName = localStorage.getItem('canopy-user-name')?.trim()
+  const userName = ref(savedName && animalNames.includes(savedName) ? savedName : animalForUser(CLIENT_ID))
+  const localColor = ref(collaboratorColors[0]!)
+  function colorForUser(id: string) {
+    return id === CLIENT_ID ? localColor.value : remoteUsers.value[id]?.color ?? userColor(id)
+  }
   localStorage.setItem('canopy-user-name', userName.value)
   const interactions = ref<InteractionEntry[]>([])
   const pings = ref<Ping[]>([])
@@ -256,7 +262,8 @@ export function useCollaboration(options: {
       notify('Ignored an invalid shared-state update')
       return
     }
-    const versionsById = new Map(state.value.versions.map((version) => [version.id, version]))
+    const previousVersions = new Map(state.value.versions.map((version) => [version.id, version]))
+    const versionsById = new Map(previousVersions)
     const newVersions: Version[] = []
     let changed = false
     const retired = state.value.retiredVersionNumbers ?? []
@@ -386,7 +393,10 @@ export function useCollaboration(options: {
     state.value.nextVersion = nextVersion
     state.value.nextLane = nextLane
     if (!versionsById.has(state.value.activeId)) {
-      state.value.activeId = versionsById.has('v0') ? 'v0' : versionsById.keys().next().value ?? ''
+      let ancestor = previousVersions.get(state.value.activeId)?.parentId
+      while (ancestor && !versionsById.has(ancestor)) ancestor = previousVersions.get(ancestor)?.parentId
+      const fallback = versionsById.get(ancestor ?? 'v0')
+      if (fallback) followVersion(fallback)
       changed = true
     }
     if (!changed) {
@@ -425,16 +435,16 @@ export function useCollaboration(options: {
     const packet = message as { type?: string }
     if (packet.type === 'sync-request') {
       sendSyncSnapshot(reply)
-      reply(presenceMessage(CLIENT_ID, userName.value, active.value.id, selectedNodes.value))
+      reply(presenceMessage(CLIENT_ID, userName.value, localColor.value, active.value.id, selectedNodes.value))
       for (const [id, user] of Object.entries(remoteUsers.value)) {
-        reply(presenceMessage(id, user.name, user.activeVersionId, user.selectedNodeIds))
+        reply(presenceMessage(id, user.name, user.color, user.activeVersionId, user.selectedNodeIds))
       }
     } else if (packet.type === 'sync-snapshot') {
       applySyncSnapshot(packet as SyncSnapshot)
     } else if (packet.type === 'sync-delta') {
       applySyncDelta(packet as SyncDelta)
     } else if (packet.type === 'presence') {
-      const presence = message as { userId?: unknown; name?: unknown; activeVersionId?: unknown; selectedNodeIds?: unknown }
+      const presence = message as { userId?: unknown; name?: unknown; color?: unknown; activeVersionId?: unknown; selectedNodeIds?: unknown }
       if (typeof presence.userId !== 'string' || !presence.userId
         || !(typeof presence.activeVersionId === 'string' || presence.activeVersionId === null)
         || !Array.isArray(presence.selectedNodeIds)
@@ -442,24 +452,33 @@ export function useCollaboration(options: {
       const requestedName = typeof presence.name === 'string' && presence.name.trim()
         ? presence.name.trim().slice(0, 32)
         : animalForUser(presence.userId)
+      const requestedColor = typeof presence.color === 'string' && collaboratorColors.includes(presence.color)
+        ? presence.color : collaboratorColors[0]!
       if (presence.userId === CLIENT_ID) {
-        if (!peerRoom.isHosting()) userName.value = requestedName
+        if (!peerRoom.isHosting()) {
+          userName.value = requestedName
+          localColor.value = requestedColor
+        }
         return peerRoom.isHosting() ? false : undefined
       }
       const name = peerRoom.isHosting()
         ? remoteUsers.value[presence.userId]?.name ?? availableName(requestedName)
         : requestedName
+      const color = peerRoom.isHosting()
+        ? remoteUsers.value[presence.userId]?.color ?? availableColor()
+        : requestedColor
       remoteUsers.value = {
         ...remoteUsers.value,
         [presence.userId]: {
           name,
+          color,
           activeVersionId: presence.activeVersionId,
           selectedNodeIds: presence.selectedNodeIds,
           lastSeen: Date.now(),
         },
       }
       if (peerRoom.isHosting()) {
-        peerRoom.send(presenceMessage(presence.userId, name, presence.activeVersionId, presence.selectedNodeIds))
+        peerRoom.send(presenceMessage(presence.userId, name, color, presence.activeVersionId, presence.selectedNodeIds))
         return false
       }
     } else if (packet.type === 'presence-leave') {
@@ -483,7 +502,8 @@ export function useCollaboration(options: {
   function availableName(requested: string) {
     const used = new Set([userName.value, ...Object.values(remoteUsers.value).map((user) => user.name)]
       .map((name) => name.toLocaleLowerCase()))
-    if (!used.has(requested.toLocaleLowerCase())) return requested
+    if (animalNames.includes(requested) && !used.has(requested.toLocaleLowerCase())) return requested
+    for (const animal of animalNames) if (!used.has(animal.toLocaleLowerCase())) return animal
     for (let index = 2; ; index++) {
       const suffix = ` ${index}`
       const candidate = `${requested.slice(0, 32 - suffix.length)}${suffix}`
@@ -491,13 +511,18 @@ export function useCollaboration(options: {
     }
   }
 
-  function presenceMessage(userId: string, name: string, activeVersionId: string | null, selectedNodeIds: string[]) {
-    return { type: 'presence', userId, name, activeVersionId, selectedNodeIds }
+  function availableColor() {
+    const used = new Set([localColor.value, ...Object.values(remoteUsers.value).map((user) => user.color)])
+    return collaboratorColors.find((color) => !used.has(color))
+      ?? collaboratorColors[(Object.keys(remoteUsers.value).length + 1) % collaboratorColors.length]!
+  }
+  function presenceMessage(userId: string, name: string, color: string, activeVersionId: string | null, selectedNodeIds: string[]) {
+    return { type: 'presence', userId, name, color, activeVersionId, selectedNodeIds }
   }
 
   function publishPresence() {
     if (!collaborationRoom) return
-    peerRoom.send(presenceMessage(CLIENT_ID, userName.value.trim() || animalForUser(CLIENT_ID), active.value.id, selectedNodes.value))
+    peerRoom.send(presenceMessage(CLIENT_ID, userName.value.trim() || animalForUser(CLIENT_ID), localColor.value, active.value.id, selectedNodes.value))
   }
   function showPing(ping: Ping) {
     pings.value = [...pings.value.filter((item) => item.id !== ping.id), ping]
@@ -577,11 +602,11 @@ export function useCollaboration(options: {
     }
   }
 
-  function resetRoomTracking() { collaborationRoom = ''; collaborationMetadata = null }
+  function resetRoomTracking() { collaborationRoom = ''; collaborationMetadata = null; localColor.value = collaboratorColors[0]! }
   function setObservedState(value: StoredState) { lastObservedState = JSON.stringify(toRaw(value)) }
   function finishRoomSwitch() { applyingRemoteState = false }
 
-  return { remoteUsers, interactions, pings, roomStatus, peerRoom, connectedUsers, recentInteractions,
+  return { remoteUsers, interactions, pings, roomStatus, peerRoom, connectedUsers, recentInteractions, colorForUser,
     metadataKey, interactionStorageKey, logInteraction, initializeCollaborationMetadata, sendPingAt,
     expireRemoteUsers, connectAutomatically, resetRoomTracking, setObservedState, finishRoomSwitch }
 }

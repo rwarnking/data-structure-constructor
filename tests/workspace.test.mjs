@@ -26,6 +26,7 @@ const { parseDataset } = await vite.ssrLoadModule('/src/services/dataset.ts')
 const { isStoredState, isVersion } = await vite.ssrLoadModule('/src/utils/validation.ts')
 const { shortcutAction, shortcuts } = await vite.ssrLoadModule('/src/config/hotkeys.ts')
 const { actionIcons, actionSymbols } = await vite.ssrLoadModule('/src/config/icons.ts')
+const { collaboratorColors } = await vite.ssrLoadModule('/src/utils/colors.ts')
 
 function node(id, children = []) {
   return { id, value: id, children }
@@ -43,6 +44,22 @@ test('action configuration resolves editable shortcut mappings and icons', () =>
   assert.ok(shortcuts.addChild.length)
   assert.ok(actionIcons.add)
   assert.equal(actionSymbols.merge, '⋈')
+})
+
+test('collaborator palette stays distinct and visible on light and dark surfaces', () => {
+  const luminance = (hex) => {
+    const [r, g, b] = hex.slice(1).match(/../g).map((part) => parseInt(part, 16) / 255)
+      .map((value) => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+  }
+  const light = luminance('#fcfdfb')
+  const dark = luminance('#1d2722')
+  assert.equal(new Set(collaboratorColors).size, collaboratorColors.length)
+  for (const color of collaboratorColors) {
+    const value = luminance(color)
+    assert.ok((light + 0.05) / (value + 0.05) >= 3, `${color} on light`)
+    assert.ok((value + 0.05) / (dark + 0.05) >= 3, `${color} on dark`)
+  }
 })
 
 test('adding children applies one independent entry per selected parent', () => {
@@ -159,13 +176,15 @@ test('comparison and merge retain differences and prevent cyclic parents', () =>
   scope.run(() => {
     const versions = computed(() => [
       version('source', [node('a', [node('b')])]),
-      version('target', [node('a'), node('c')]),
+      { ...version('target', [node('a'), node('c')]), positions: { a: { x: 0, y: 0 }, c: { x: 100, y: 100 } } },
     ])
     const comparison = useVersionComparison(versions, () => ({ zoom: 1, panX: 0, panY: 0, manual: false }), () => ({ width: 246, height: 213 }))
     comparison.startVersionSelection('merge', 'source')
     comparison.chooseCompare('target')
     assert.deepEqual(comparison.comparison.value.map(({ id, kind }) => [id, kind]), [['b', 'Removed'], ['c', 'Added']])
     assert.deepEqual(comparison.mergeResult.value.data.map((item) => item.id), ['a', 'c'])
+    assert.ok(comparison.mergeResult.value.positions.c.x < 5)
+    assert.ok(comparison.mergeResult.value.positions.c.y < 5)
     comparison.setMergeParent('a', 'b')
     assert.equal(comparison.mergeResult.value.data.find((item) => item.id === 'a').children[0].id, 'b')
     comparison.setMergePicked('b', false)

@@ -1,10 +1,34 @@
 <script setup lang="ts">
+import { ref } from 'vue'
 import { actionIcons } from '../config/icons'
 const { delete: Trash2, close: X } = actionIcons
 
 defineProps<{ localRooms: string[]; currentRoomName: string }>()
 const newRoomName = defineModel<string>({ required: true })
 const emit = defineEmits<{ close: []; activate: [room: string]; delete: [room: string]; create: [] }>()
+const joinInput = ref('')
+const joinError = ref('')
+function joinRoom() {
+  const input = joinInput.value.trim()
+  let room = input
+  if (/^(?:https?|ftp):/i.test(input) || /^[a-z][a-z0-9+.-]*:\/\//i.test(input)) {
+    let url: URL
+    try { url = new URL(input) }
+    catch { joinError.value = 'Enter a valid room URL or name.'; return }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      joinError.value = 'Room links must use HTTP or HTTPS.'
+      return
+    }
+    room = url.searchParams.get('room')?.trim() ?? ''
+    if (!room) { joinError.value = 'The room link must include a room name.'; return }
+  }
+  if (!room || room.length > 80) {
+    joinError.value = 'Enter a room name of 1–80 characters.'
+    return
+  }
+  joinError.value = ''
+  emit('activate', room)
+}
 </script>
 
 <template>
@@ -29,10 +53,20 @@ const emit = defineEmits<{ close: []; activate: [room: string]; delete: [room: s
       </div>
       <form class="new-room-form" @submit.prevent="emit('create')">
         <label class="editor-label" for="new-room-name">Create a new empty room</label>
-        <input id="new-room-name" v-model="newRoomName" maxlength="80" placeholder="Room name" />
+        <div class="room-form-row">
+          <input id="new-room-name" v-model="newRoomName" maxlength="80" placeholder="Room name" />
+          <button type="submit" class="primary-button" :disabled="!newRoomName.trim()">Create room</button>
+        </div>
+      </form>
+      <form class="new-room-form" @submit.prevent="joinRoom">
+        <label class="editor-label" for="join-room-name">Join a room</label>
+        <div class="room-form-row">
+          <input id="join-room-name" v-model="joinInput" placeholder="Room name or invite link" @input="joinError = ''" />
+          <button type="submit" class="primary-button">Join room</button>
+        </div>
+        <p v-if="joinError" class="room-error" role="alert">{{ joinError }}</p>
         <div class="editor-actions">
           <button type="button" class="cancel-button" @click="emit('close')">Cancel</button>
-          <button type="submit" class="primary-button" :disabled="!newRoomName.trim()">Create room</button>
         </div>
       </form>
     </section>
