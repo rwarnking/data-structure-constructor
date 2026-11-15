@@ -11,6 +11,7 @@ export type VersionCardModel = {
   selectedNodes: string[]
   draggedSubtreeIds: string[]
   draggedOriginalTile: Tile | null
+  selectionBox: { versionId: string; left: number; top: number; width: number; height: number } | null
   windowDimensions: { width: number; height: number }
   clientId: string
   isReadOnly: boolean

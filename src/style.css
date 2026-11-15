@@ -43,6 +43,7 @@ button { color: inherit; }
 .sidebar-toggle { margin-left: auto; transform: rotate(90deg); }
 .sidebar.collapsed .sidebar-head { justify-content: center; padding-right: 0; padding-left: 0; }
 .sidebar.collapsed .brand-mark, .sidebar.collapsed .brand-name, .sidebar.collapsed .side-section, .sidebar.collapsed .sidebar-footer { display: none; }
+.sidebar.collapsed .sidebar-settings { display: none; }
 .sidebar.collapsed .sidebar-toggle { margin: 0; transform: rotate(-90deg); }
 .side-section { padding: 0 5px; }
 .section-label { display: block; color: #8a9690; font: 9px var(--mono); letter-spacing: .04em; }
@@ -67,6 +68,14 @@ button { color: inherit; }
 .active-meta { margin-top: 5px; color: #849089; font: 9px var(--mono); }
 .active-meta span { margin: 0 4px; }
 .settings-section { padding-top: 10px; padding-bottom: 10px; border-bottom: 1px solid #edf0ed;}
+.settings-section .theme-toggle + .theme-toggle { margin-top: 5px; }
+.search-scrim { z-index: 40; }
+.version-search { width: min(580px, calc(100vw - 32px)); }
+.version-search-fields { display: flex; align-items: center; gap: 7px; margin-top: 14px; }
+.version-search-fields input { min-width: 0; width: 100%; padding: 8px; border: 1px solid #dfe6e1; border-radius: 5px; font: 11px var(--mono); }
+.version-search-results { display: grid; gap: 5px; max-height: 45vh; overflow-y: auto; margin-top: 16px; }
+.version-search-results button { display: flex; gap: 10px; align-items: center; padding: 8px; border: 1px solid #dfe6e1; border-radius: 5px; background: transparent; text-align: left; cursor: pointer; }
+.version-search-results button:hover { border-color: #9dc2b8; }
 .select-wrap { margin-top: 10px; display: flex; align-items: center; position: relative; }
 .select-wrap select { appearance: none; width: 100%; padding: 8px 26px 8px 9px; border: 1px solid #e1e7e2; border-radius: 5px; background: #fff; color: #59675f; font-size: 9px; cursor: pointer; }
 .select-wrap svg { position: absolute; right: 8px; pointer-events: none; color: #87938d; }
@@ -139,16 +148,17 @@ h1 { margin: 7px 0 0; font-size: 21px; line-height: 1.25; font-weight: 700; lett
 .mode-hint { display: flex; align-items: center; gap: 7px; color: #176b68; font-size: 10px; margin-right: 5px; }
 .small-button { width: 30px; height: 30px; background: #fff; border: 1px solid #e0e6e1; border-radius: 5px; }
 .small-button:hover { border-color: #9dbbb0; color: var(--green); }
-.graph-canvas { flex: 1; min-height: 0; overflow: hidden; position: relative; background: #f5f7f4; cursor: grab; touch-action: none; }
+.graph-canvas { flex: 1; min-height: 0; overflow: clip; position: relative; background: #f5f7f4; cursor: grab; touch-action: none; }
 .graph-canvas.ping-mode { cursor: crosshair; }
 .graph-canvas:active { cursor: grabbing; }
+.selection-box { position: absolute; z-index: 4; border: 1px dashed #176b68; background: #176b6820; pointer-events: none; }
 .lane-navigation { position: absolute; z-index: 7; width: 28px; min-height: 0; padding: 0; display: grid; place-items: center; overflow: hidden; border: 0; background: var(--lane-color); color: #fff; cursor: pointer; }
 .lane-navigation:hover { filter: brightness(1.15); }
 .lane-navigation-left { left: 0; border-radius: 0 5px 5px 0; }
 .lane-navigation-right { right: 0; border-radius: 5px 0 0 5px; }
 .ping-mode-banner { align-self: center; padding: 6px 12px; border: 1px solid #d59b48; border-radius: 6px; background: #fff3d4; color: #73510f; box-shadow: 0 3px 11px #26392d20; font: 9px var(--mono); }
 .canvas-controls { position: absolute; z-index: 8; left: 50%; bottom: 5px; transform: translateX(-50%); display: flex; flex-direction: column; align-items: stretch; gap: 6px; width: max-content; max-width: calc(100% - 32px); cursor: default; }
-.canvas-hotbar { position: relative; display: flex; flex-wrap: nowrap; align-items: center; justify-content: center; gap: 4px; width: 100%; max-width: 100%; overflow-x: auto; padding: 7px; border: 1px solid #dfe6e1; border-radius: 8px; background: #fcfdfb; box-shadow: 0 5px 18px #26392d20; }
+.canvas-hotbar { position: relative; display: flex; flex-wrap: nowrap; align-items: center; justify-content: safe center; gap: 4px; width: 100%; max-width: 100%; overflow-x: auto; padding: 7px; border: 1px solid #dfe6e1; border-radius: 8px; background: #fcfdfb; box-shadow: 0 5px 18px #26392d20; }
 .canvas-hotbar button { min-height: 36px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 0 8px; border: 0; border-radius: 5px; background: transparent; color: #617068; font-size: 10px; white-space: nowrap; cursor: pointer; }
 .canvas-hotbar button:hover:not(:disabled), .canvas-hotbar button.selected { background: #eff5f0; color: var(--green); }
 .canvas-hotbar button:disabled { opacity: .42; cursor: default; }

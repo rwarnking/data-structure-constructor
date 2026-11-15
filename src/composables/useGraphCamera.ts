@@ -19,6 +19,7 @@ export function useGraphCamera(options: {
 }) {
   const { versions, active, state, compareIds, draggedVersionId, zoom, pan, canvasSize, windowDimensions, suppressClicks } = options
   const focusedVersionId = ref<string | null>(null)
+  const preset = ref<{ mode: 'version' | 'neighborhood' | 'height' | 'all'; versionId?: string } | null>(null)
   const versionArrival = ref<{ versionId: string; from: { x: number; y: number }; progress: number } | null>(null)
   let versionArrivalFrame = 0
   let panAnimationFrame: number | null = null
@@ -79,15 +80,36 @@ export function useGraphCamera(options: {
       canvasSize.value.height / 2 + windowDimensions.value.height / 2 + maxLane.value * (windowDimensions.value.height + GRAPH_GAP_Y) + 140,
     ),
   }))
-  const fitZoom = computed(() => Math.max(0.005, Math.min(
-    1,
-    Math.max(1, canvasSize.value.width - 100) / graphBounds.value.width,
-    Math.max(1, canvasSize.value.height - 100) / graphBounds.value.height,
-  )))
-  watch(canvasSize, () => {
-    if (zoom.value < fitZoom.value) fitGraph()
+  function boundsFor(items: Version[], includeRoot = false) {
+    const cards = items.filter((version) => version.id !== 'v0')
+    const positions = cards.map(cardPosition)
+    if (!positions.length) {
+      const { width, height } = windowDimensions.value
+      return { left: 0, top: canvasSize.value.height / 2 - height / 2, right: width, bottom: canvasSize.value.height / 2 + height / 2 }
+    }
+    return {
+      left: includeRoot ? 0 : Math.min(...positions.map((position) => position.x)),
+      top: Math.min(...positions.map((position) => position.y)),
+      right: Math.max(...positions.map((position) => position.x + windowDimensions.value.width)) + (includeRoot ? 140 : 0),
+      bottom: Math.max(...positions.map((position) => position.y + windowDimensions.value.height)),
+    }
+  }
+  const fitZoom = computed(() => {
+    const bounds = boundsFor(versions.value, true)
+    return Math.max(0.005, Math.min(1, Math.max(1, canvasSize.value.width - 100) / (bounds.right - bounds.left),
+      Math.max(1, canvasSize.value.height - 100) / (bounds.bottom - bounds.top)))
+  })
+  watch([canvasSize, windowDimensions], () => {
+    const current = preset.value
+    if (!current) return
+    const version = current.versionId && versions.value.find((item) => item.id === current.versionId)
+    if (current.mode === 'version' && version) focusVersion(version, false)
+    else if (current.mode === 'neighborhood' && version) focusNeighborhood(version, false)
+    else if (current.mode === 'height') fitHeight(false)
+    else if (current.mode === 'all') fitGraph(false)
   })
   function zoomAt(nextZoom: number, x = canvasSize.value.width / 2, y = canvasSize.value.height / 2) {
+    preset.value = null
     focusedVersionId.value = null
     suppressClicks()
     cancelPanAnimation()
@@ -102,13 +124,40 @@ export function useGraphCamera(options: {
   }
   function zoomIn() { zoomAt(zoom.value * 1.25) }
   function zoomOut() { zoomAt(zoom.value / 1.25) }
-  function fitGraph() {
+  function fitBounds(bounds: { left: number; top: number; right: number; bottom: number }, targetZoom: number, animate: boolean, preserveX = false) {
+    const target = {
+      x: preserveX ? canvasSize.value.width / 2 - (canvasSize.value.width / 2 - pan.value.x) / zoom.value * targetZoom
+        : canvasSize.value.width / 2 - (bounds.left + bounds.right) / 2 * targetZoom,
+      y: canvasSize.value.height / 2 - (bounds.top + bounds.bottom) / 2 * targetZoom,
+    }
+    if (animate) animateCamera(targetZoom, target, 360, true)
+    else { cancelPanAnimation(); zoom.value = targetZoom; pan.value = target }
+  }
+  function fitGraph(animate = true) {
     focusedVersionId.value = null
-    const targetZoom = fitZoom.value
-    animateCamera(targetZoom, {
-      x: (canvasSize.value.width - graphBounds.value.width * targetZoom) / 2,
-      y: (canvasSize.value.height - graphBounds.value.height * targetZoom) / 2,
-    })
+    preset.value = { mode: 'all' }
+    fitBounds(boundsFor(versions.value, true), fitZoom.value, animate)
+  }
+  function fitHeight(animate = true) {
+    focusedVersionId.value = null
+    preset.value = { mode: 'height' }
+    const bounds = boundsFor(versions.value)
+    const targetZoom = Math.max(0.005, Math.min(ZOOM_MAX, Math.max(1, canvasSize.value.height - 100) / (bounds.bottom - bounds.top)))
+    fitBounds(bounds, targetZoom, animate, true)
+  }
+  function focusNeighborhood(version = active.value, animate = true) {
+    focusedVersionId.value = null
+    preset.value = { mode: 'neighborhood', versionId: version.id }
+    const ids = new Set([version.id, version.parentId, version.mergeSourceId])
+    for (const candidate of versions.value) {
+      if (candidate.parentId === version.id || candidate.mergeSourceId === version.id
+        || (version.parentId && candidate.parentId === version.parentId)) ids.add(candidate.id)
+    }
+    const bounds = boundsFor(versions.value.filter((item) => ids.has(item.id)), ids.has('v0'))
+    const targetZoom = Math.max(0.005, Math.min(ZOOM_MAX,
+      Math.max(1, canvasSize.value.width - 100) / (bounds.right - bounds.left),
+      Math.max(1, canvasSize.value.height - 100) / (bounds.bottom - bounds.top)))
+    fitBounds(bounds, targetZoom, animate)
   }
   function startCanvasPan(event: PointerEvent) {
     const target = event.target as HTMLElement
@@ -126,6 +175,7 @@ export function useGraphCamera(options: {
       dragOrigin.value.moved = true
       ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
     }
+    preset.value = null
     focusedVersionId.value = null
     pan.value = { x: dragOrigin.value.panX + event.clientX - dragOrigin.value.x, y: dragOrigin.value.panY + event.clientY - dragOrigin.value.y }
   }
@@ -137,16 +187,21 @@ export function useGraphCamera(options: {
     event.preventDefault()
     zoomAt(zoom.value * Math.exp(-event.deltaY * 0.0012))
   }
-  function focusVersion(version: Version) {
+  function focusVersion(version: Version, animate = true) {
     focusedVersionId.value = version.id
+    preset.value = { mode: 'version', versionId: version.id }
     const position = cardPosition(version)
     const availableWidth = Math.max(1, canvasSize.value.width - 100)
     const availableHeight = Math.max(1, canvasSize.value.height - 100)
-    const targetZoom = Math.max(0.005, Math.min(ZOOM_MAX, availableWidth / windowDimensions.value.width, availableHeight / cardHeight(version)))
-    animateCamera(targetZoom, {
+    const height = version.id === 'v0' ? windowDimensions.value.height : cardHeight(version)
+    const targetZoom = Math.max(0.005, Math.min(ZOOM_MAX, availableWidth / windowDimensions.value.width, availableHeight / height))
+    const target = {
       x: canvasSize.value.width / 2 - (position.x + windowDimensions.value.width / 2) * targetZoom,
-      y: canvasSize.value.height / 2 - (position.y + cardHeight(version) / 2) * targetZoom,
-    }, 420)
+      y: version.id === 'v0' ? canvasSize.value.height / 2 - (canvasSize.value.height / 2 - pan.value.y) / zoom.value * targetZoom
+        : canvasSize.value.height / 2 - (position.y + height / 2) * targetZoom,
+    }
+    if (animate) animateCamera(targetZoom, target, 420, true)
+    else { cancelPanAnimation(); zoom.value = targetZoom; pan.value = target }
   }
   function focusActive() { focusVersion(active.value) }
   const visibleVersions = computed<Version[]>((previous) => {
@@ -205,7 +260,8 @@ export function useGraphCamera(options: {
     if (panAnimationFrame !== null) cancelAnimationFrame(panAnimationFrame)
     panAnimationFrame = null
   }
-  function animateCamera(targetZoom: number, targetPan: { x: number; y: number }, duration = 360) {
+  function animateCamera(targetZoom: number, targetPan: { x: number; y: number }, duration = 360, keepPreset = false) {
+    if (!keepPreset) { preset.value = null; focusedVersionId.value = null }
     cancelPanAnimation()
     const start = { zoom: zoom.value, panX: pan.value.x, panY: pan.value.y }
     const startedAt = performance.now()
@@ -230,6 +286,7 @@ export function useGraphCamera(options: {
       && Math.abs(centerY - canvasSize.value.height / 2) < 2
   }
   function panToVersion(version: Version, centerImmediately: boolean) {
+    preset.value = null
     focusedVersionId.value = centerImmediately ? version.id : null
     cancelPanAnimation()
     const position = cardPosition(version)
@@ -277,7 +334,7 @@ export function useGraphCamera(options: {
   }
 
   return { focusedVersionId, cardPosition, cardHeight, rootLabelOffset, rootLabelX, displayCardPosition, startVersionArrival, graphBounds,
-    visibleVersions, visibleConnectionVersions, visibleMergeConnectionVersions, intersectsViewport, zoomAt, zoomIn, zoomOut, fitGraph,
+    visibleVersions, visibleConnectionVersions, visibleMergeConnectionVersions, intersectsViewport, zoomAt, zoomIn, zoomOut, fitGraph, fitHeight, focusNeighborhood,
     startCanvasPan, moveCanvasPan, endCanvasPan, onWheel, focusVersion, focusActive, animateCamera,
     isVersionCentered, panToVersion, stopGraphAnimations }
 }

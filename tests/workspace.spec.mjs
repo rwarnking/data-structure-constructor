@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test'
 import { randomUUID } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 
 async function openRoom(page, room = `test-${randomUUID()}`) {
   await page.goto(`/?room=${room}`)
@@ -85,6 +86,132 @@ async function contextAction(page, room, name, action) {
   await tile.click({ button: 'right', position: { x: 8, y: 8 } })
   await page.getByRole('button', { name: action, exact: true }).click()
 }
+
+test('box selection moves selected roots together and cancels outside drops', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['One', 'Two', 'Target'])
+  await focusActive(page)
+  await expectCentered(page, (await state(page, room)).activeId)
+  const map = page.locator('.version-card.active .mini-map')
+  const one = await activeTile(page, room, 'One')
+  const two = await activeTile(page, room, 'Two')
+  const target = await activeTile(page, room, 'Target')
+  await map.hover({ trial: true })
+  const box = await map.boundingBox()
+  const start = await emptyMapPoint(map)
+  await page.keyboard.down('Control')
+  await page.mouse.move(start.x, start.y)
+  await page.mouse.down()
+  await page.mouse.move(box.x + box.width - 2, box.y + box.height - 2, { steps: 4 })
+  await expect(page.locator('.selection-box')).toBeVisible()
+  await page.mouse.up()
+  await page.keyboard.up('Control')
+  await expect(page.locator('.version-card.active .tree-tile.is-selected')).toHaveCount(3)
+  await target.click({ modifiers: ['Shift'], position: { x: 8, y: 8 } })
+  await expect(page.locator('.version-card.active .tree-tile.is-selected')).toHaveCount(2)
+  const original = await state(page, room)
+  let a = await one.boundingBox()
+  await page.mouse.move(a.x + 8, a.y + 8)
+  await page.mouse.down()
+  await page.mouse.move(260, 20, { steps: 5 })
+  await page.mouse.up()
+  expect((await state(page, room)).versions.length).toBe(original.versions.length)
+  await expect(page.locator('.version-card.active .tree-tile.is-selected')).toHaveCount(2)
+  a = await one.boundingBox()
+  const b = await target.boundingBox()
+  await page.mouse.move(a.x + 8, a.y + 8)
+  await page.mouse.down()
+  await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2, { steps: 8 })
+  const movedTarget = await target.boundingBox()
+  await page.mouse.move(movedTarget.x + movedTarget.width / 2, movedTarget.y + movedTarget.height / 2)
+  await expect(target).toHaveClass(/is-over/)
+  await page.mouse.up()
+  await expect.poll(async () => findNode(await activeData(page, room), 'Target')?.children.map((item) => item.value)).toEqual(['One', 'Two'])
+  await expect(page.locator('.version-card.active .tree-tile.is-selected')).toHaveCount(2)
+  await expect(two).toBeVisible()
+})
+
+test('version search persists recent queries and focuses a result', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['First'])
+  const first = (await state(page, room)).activeId
+  const identifier = await page.locator('.version-card.active .version-header-id').innerText()
+  await addEntries(page, ['Second'])
+  await page.keyboard.press('Control+f')
+  const dialog = page.getByRole('dialog', { name: 'Search versions' })
+  await expect(dialog).toBeVisible()
+  const parts = identifier.split('.')
+  await page.getByLabel('Version step').fill(parts[0])
+  await page.getByLabel('Version branch').fill(parts[1])
+  await page.getByLabel('Version subbranch').fill(parts.slice(2).join('.'))
+  await dialog.getByRole('button', { name: new RegExp(identifier.replaceAll('.', '\\.')) }).click()
+  await expect.poll(async () => (await state(page, room)).activeId).toBe(first)
+  await expectCentered(page, first)
+  await page.reload()
+  await page.keyboard.press('Control+f')
+  await expect(dialog.getByRole('button', { name: identifier, exact: true })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(dialog).toHaveCount(0)
+})
+
+test('camera presets fit the available canvas and refocus after resizing', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['Base'])
+  const base = (await state(page, room)).activeId
+  await addEntries(page, ['Main'])
+  await page.keyboard.press('ArrowLeft')
+  await expect.poll(async () => (await state(page, room)).activeId).toBe(base)
+  await addEntries(page, ['Branch'])
+  const active = (await state(page, room)).activeId
+  for (const size of [{ width: 1280, height: 720 }, { width: 900, height: 900 }, { width: 1500, height: 600 }]) {
+    await page.setViewportSize(size)
+    await focusActive(page)
+    await expectCentered(page, active)
+    for (const [button, horizontal] of [['Fit height', false], ['Fit all versions, Shift+A', true]]) {
+      await page.getByRole('button', { name: button }).click()
+      await expect.poll(() => page.locator('.graph-canvas').evaluate((canvas, checkX) => {
+        const area = canvas.getBoundingClientRect()
+        return [...canvas.querySelectorAll('.version-card:not(.root-version)')].every((card) => {
+          const rect = card.getBoundingClientRect()
+          return rect.top >= area.top - 1 && rect.bottom <= area.bottom + 1
+            && (!checkX || (rect.left >= area.left - 1 && rect.right <= area.right + 1))
+        })
+      }, horizontal)).toBe(true)
+    }
+    await page.getByRole('button', { name: 'Focus neighborhood' }).click()
+    await expect(page.locator(`.version-card[data-version="${active}"]`)).toBeInViewport()
+  }
+  await focusActive(page)
+  await expectCentered(page, active)
+  await page.setViewportSize({ width: 1100, height: 800 })
+  await expectCentered(page, active)
+})
+
+test('settings export and import create an isolated local room without overwriting the source', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['Exported'])
+  const source = await state(page, room)
+  await page.getByRole('button', { name: 'Settings' }).click()
+  await page.getByRole('button', { name: 'Dark mode' }).click()
+  await expect(page.locator('.app-shell')).toHaveClass(/dark/)
+  const downloadPromise = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Export data' }).click()
+  const download = await downloadPromise
+  const buffer = await readFile(await download.path())
+  await page.getByRole('button', { name: 'Settings' }).click()
+  await page.locator('input[type=file]').setInputFiles({ name: 'dataset.json', mimeType: 'application/json', buffer })
+  await expect(page.getByRole('status').first()).toHaveText('Local only')
+  await expect.poll(async () => !!(await state(page, `${room}_1`))).toBe(true)
+  expect(await state(page, room)).toEqual(source)
+  expect((await state(page, `${room}_1`)).versions.map(({ id, parentId, data, number }) => ({ id, parentId, data, number })))
+    .toEqual(source.versions.map(({ id, parentId, data, number }) => ({ id, parentId, data, number })))
+  await page.reload()
+  await expect(page.getByRole('status').first()).toHaveText('Local only')
+  await page.getByRole('button', { name: 'Settings' }).click()
+  await page.locator('input[type=file]').setInputFiles({ name: 'invalid.json', mimeType: 'application/json', buffer: Buffer.from('{}') })
+  await expect(page.getByText(/Import failed/)).toBeVisible()
+  expect(await state(page, room)).toEqual(source)
+})
 
 test('bulk creation, editing, copy connector, and deleting an entry create versions', async ({ page }) => {
   const room = await openRoom(page)

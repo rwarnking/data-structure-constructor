@@ -2,7 +2,7 @@ import { computed, nextTick, ref, watch, type ComputedRef, type Ref } from 'vue'
 import { PeerRoom, type RoomStatus } from '../collaboration'
 import type { CollaborationMetadata, Revision, StoredState, Version } from '../types/workspace'
 import type { InteractionEntry, Ping, RemoteUser, SyncDelta, SyncSnapshot, VersionChange, VersionRemoval } from '../types/collaboration'
-import { hasValidVersionStep, isCollaborationMetadata, isCopyLink, isRecord, isRetiredVersionNumber, isRevision, isStoredState, isVersion } from '../utils/validation'
+import { hasValidVersionStep, isCollaborationMetadata, isCopyLink, isInteractionEntry, isRecord, isRetiredVersionNumber, isRevision, isStoredState, isVersion } from '../utils/validation'
 import { findNode } from '../utils/tree'
 import { assignMissingVersionNumbers, assignVersionSuffixes, compareCopyLinks, retireVersionNumbers } from '../utils/versions'
 
@@ -89,17 +89,6 @@ export function useCollaboration(options: {
     let hash = 2166136261
     for (const character of userId) hash = Math.imul(hash ^ character.charCodeAt(0), 16777619)
     return animalNames[(hash >>> 0) % animalNames.length]!
-  }
-
-  function isInteractionEntry(value: unknown): value is InteractionEntry {
-    if (!isRecord(value) || typeof value.id !== 'string' || typeof value.actorId !== 'string'
-      || typeof value.actorName !== 'string' || typeof value.action !== 'string'
-      || !Number.isFinite(value.createdAt)
-      || (value.versionId !== undefined && typeof value.versionId !== 'string')
-      || (value.nodeId !== undefined && typeof value.nodeId !== 'string')
-      || (value.nodeLabel !== undefined && typeof value.nodeLabel !== 'string')) return false
-    return value.ping === undefined || (isRecord(value.ping)
-      && Number.isFinite(value.ping.x) && Number.isFinite(value.ping.y))
   }
 
   function addInteraction(entry: InteractionEntry, broadcast = true) {

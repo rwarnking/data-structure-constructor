@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ChevronDown, Layers3, Moon, Sun } from '@lucide/vue'
+import { ref } from 'vue'
+import { ChevronDown, Download, Layers3, Moon, Settings, Sun, Upload } from '@lucide/vue'
 import type { RoomStatus } from '../collaboration'
 import type { InteractionEntry } from '../types/collaboration'
 import type { Version } from '../types/workspace'
@@ -8,11 +9,20 @@ import { findNode } from '../utils/tree'
 import { displayVersionId } from '../utils/versions'
 
 const props = defineProps<{
-  sidebarCollapsed: boolean; darkMode: boolean; currentRoomName: string; roomStatus: RoomStatus
+  sidebarCollapsed: boolean; darkMode: boolean; currentRoomName: string; roomStatus: RoomStatus; localOnly: boolean
   connectedUsers: { id: string; name: string; activeVersionId: string | null }[]
   clientId: string; versions: Version[]; recentInteractions: InteractionEntry[]
   branchCount: number; active: Version; activeNodes: number; activeChildren: number
 }>()
+const settingsOpen = ref(false)
+const importInput = ref<HTMLInputElement | null>(null)
+function importFile(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (file) emit('import-data', file)
+  input.value = ''
+  settingsOpen.value = false
+}
 function versionLabel(id: string) {
   const version = props.versions.find((item) => item.id === id)
   return version ? displayVersionId(version) : id
@@ -21,6 +31,7 @@ const emit = defineEmits<{
   'toggle-sidebar': []; 'toggle-theme': []; 'change-room': []; 'copy-invite': []
   'focus-collaborator': [id: string]; 'focus-ping': [location: { x: number; y: number }]
   navigate: [entry: InteractionEntry, kind: 'node' | 'version']; 'focus-active': []
+  'import-data': [file: File]; 'export-data': []
 }>()
 </script>
 
@@ -29,15 +40,20 @@ const emit = defineEmits<{
     <div class="sidebar-head">
       <span class="brand-mark"><Layers3 :size="19" :stroke-width="2.2" /></span>
       <span class="brand-name">DSC</span>
+      <button class="quiet-icon sidebar-settings" title="Settings" aria-label="Settings" :aria-expanded="settingsOpen"
+        @click="settingsOpen = !settingsOpen"><Settings :size="16" /></button>
       <button class="quiet-icon sidebar-toggle" :title="sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'"
         :aria-label="sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'" :aria-expanded="!sidebarCollapsed"
         @click="emit('toggle-sidebar')"><ChevronDown :size="16" /></button>
     </div>
-    <section class="side-section settings-section">
+    <section v-if="settingsOpen" class="side-section settings-section">
       <button type="button" class="theme-toggle" @click="emit('toggle-theme')">
         <component :is="darkMode ? Sun : Moon" :size="15" />
         <span>{{ darkMode ? 'Light mode' : 'Dark mode' }}</span>
       </button>
+      <button type="button" class="theme-toggle" @click="importInput?.click()"><Upload :size="15" /><span>Import data</span></button>
+      <button type="button" class="theme-toggle" @click="emit('export-data'); settingsOpen = false"><Download :size="15" /><span>Export data</span></button>
+      <input ref="importInput" type="file" accept=".json,application/json" hidden @change="importFile" />
     </section>
     <section class="side-section session-section">
       <div class="section-label">CURRENT ROOM</div>
@@ -47,7 +63,8 @@ const emit = defineEmits<{
       </div>
       <div class="session-actions">
         <button type="button" class="session-button" @click="emit('change-room')">Change Room</button>
-        <button type="button" class="session-button secondary" @click="emit('copy-invite')">Copy Invite</button>
+        <button type="button" class="session-button secondary" :disabled="localOnly"
+          :title="localOnly ? 'Imported rooms are local only' : 'Copy room invite'" @click="emit('copy-invite')">Copy Invite</button>
       </div>
     </section>
     <section class="side-section collaborators-section">

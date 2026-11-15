@@ -1,4 +1,5 @@
 import type { CollaborationMetadata, CopyLink, RetiredVersionNumber, Revision, StoredState, TreeNode, Version, VersionNumber } from '../types/workspace'
+import type { InteractionEntry } from '../types/collaboration'
 
 export function isRevision(value: unknown): value is Revision {
   if (!value || typeof value !== 'object') return false
@@ -9,6 +10,17 @@ export function isRevision(value: unknown): value is Revision {
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+export function isInteractionEntry(value: unknown): value is InteractionEntry {
+  if (!isRecord(value) || typeof value.id !== 'string' || typeof value.actorId !== 'string'
+    || typeof value.actorName !== 'string' || typeof value.action !== 'string'
+    || !Number.isFinite(value.createdAt)
+    || (value.versionId !== undefined && typeof value.versionId !== 'string')
+    || (value.nodeId !== undefined && typeof value.nodeId !== 'string')
+    || (value.nodeLabel !== undefined && typeof value.nodeLabel !== 'string')) return false
+  return value.ping === undefined || (isRecord(value.ping)
+    && Number.isFinite(value.ping.x) && Number.isFinite(value.ping.y))
 }
 
 function isTreeNode(value: unknown): value is TreeNode {

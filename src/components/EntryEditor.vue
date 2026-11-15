@@ -9,7 +9,7 @@ const emit = defineEmits<{ close: []; commit: []; 'add-row': []; 'remove-row': [
 <template>
   <div class="editor-scrim" @click.self="emit('close')">
     <form class="entry-editor" :class="{ 'table-editor': editor.mode === 'create' }" @submit.prevent="emit('commit')">
-      <div class="editor-heading"><span class="section-label">{{ editor.mode === 'create' ? 'NEW ENTRY' : 'CHANGE VALUE' }}</span><button type="button" class="quiet-icon" title="Close" @click="emit('close')"><X :size="17" /></button></div>
+      <div class="editor-heading"><span class="section-label">{{ editor.mode === 'create' ? (editor.parentOf ? 'NEW PARENT' : 'NEW ENTRY') : 'CHANGE VALUE' }}</span><button type="button" class="quiet-icon" title="Close" @click="emit('close')"><X :size="17" /></button></div>
       <template v-if="editor.mode === 'create'">
         <div class="entry-draft-table-wrap">
           <table class="entry-draft-table">
@@ -30,7 +30,7 @@ const emit = defineEmits<{ close: []; commit: []; 'add-row': []; 'remove-row': [
             </tbody>
           </table>
         </div>
-        <button type="button" class="add-draft-button" @click="emit('add-row')"><Plus :size="14" /> Add another entry</button>
+        <button v-if="!editor.parentOf" type="button" class="add-draft-button" @click="emit('add-row')"><Plus :size="14" /> Add another entry</button>
         <div class="editor-actions"><button type="button" class="cancel-button" @click="emit('close')">Cancel</button><button type="submit" class="primary-button" :disabled="editor.entries.some((entry) => !entry.value.trim())"><Check :size="15" /> Add {{ editor.entries.length }} {{ editor.entries.length === 1 ? 'entry' : 'entries' }}</button></div>
       </template>
       <template v-else>

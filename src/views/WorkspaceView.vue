@@ -10,6 +10,7 @@ import { useTreeDrag } from '../composables/useTreeDrag'
 import { useHierarchyEditor } from '../composables/useHierarchyEditor'
 import { useVersionHistory } from '../composables/useVersionHistory'
 import { createRoomStorage, LAST_ROOM_KEY } from '../services/roomStorage'
+import { parseDataset, type Dataset } from '../services/dataset'
 import VersionComparison from '../components/VersionComparison.vue'
 import WorkspaceSidebar from '../components/WorkspaceSidebar.vue'
 import VersionConnections from '../components/VersionConnections.vue'
@@ -19,6 +20,7 @@ import { selectionColor, userColor, versionColor } from '../utils/colors'
 import EntryEditor from '../components/EntryEditor.vue'
 import EntryOperationDialog from '../components/EntryOperationDialog.vue'
 import RoomManager from '../components/RoomManager.vue'
+import VersionSearch from '../components/VersionSearch.vue'
 import type { CopyLink, StoredState, Tile, TreeNode, Version } from '../types/workspace'
 import { countNodes, findNode, findParent, flattenNodes, nodeParentIds, removeNode } from '../utils/tree'
 import { compareCopyLinks, displayVersionId, reflowVersionLayout } from '../utils/versions'
@@ -101,6 +103,7 @@ const windowDimensions = computed(() => {
 const clipboard = ref<ClipboardEntry | null>(readClipboard(currentRoomName.value))
 const toast = ref('')
 const roomDialogOpen = ref(false)
+const searchOpen = ref(false)
 const newRoomName = ref('')
 let toastTimer = 0
 let presenceTimer = 0
@@ -116,7 +119,7 @@ watch([compareMode, mergeMode], () => {
 const graphCamera = useGraphCamera({ versions, active, state, compareIds, draggedVersionId: () => treeDrag.value?.versionId,
   zoom, pan, canvasSize, windowDimensions, suppressClicks: suppressGraphClicks })
 const { cardPosition, cardHeight, rootLabelOffset, rootLabelX, displayCardPosition, graphBounds,
-  visibleVersions, visibleConnectionVersions, visibleMergeConnectionVersions, zoomIn, zoomOut, fitGraph,
+  visibleVersions, visibleConnectionVersions, visibleMergeConnectionVersions, zoomIn, zoomOut, fitGraph, fitHeight, focusNeighborhood,
   startCanvasPan, moveCanvasPan, endCanvasPan, onWheel, focusVersion, focusActive, animateCamera,
   stopGraphAnimations,
 } = graphCamera
@@ -127,6 +130,55 @@ const { mapViewTimers, cardData, cardPositions, mapViewport, mapViewFor,
   centerVersionTreemaps, compactVersionTreemaps, commitMapView, clearTransientMapViews, initializeMapViews,
   zoomMap, startMapPan, moveMapPan, endMapPan,
 } = treemapViews
+const selectionBox = ref<{ versionId: string; left: number; top: number; width: number; height: number } | null>(null)
+let boxDrag: { versionId: string; pointerId: number; x: number; y: number; map: HTMLElement; initial: string[] } | null = null
+function startMapGesture(event: PointerEvent, version: Version) {
+  if ((event.ctrlKey || event.metaKey) && event.button === 0 && !isReadOnly.value
+    && !(event.target as Element).closest('.tree-tile')) {
+    event.preventDefault()
+    event.stopPropagation()
+    const map = event.currentTarget as HTMLElement
+    const initial = event.shiftKey && version.id === active.value.id ? [...selectedNodes.value] : []
+    state.value.activeId = version.id
+    boxDrag = { versionId: version.id, pointerId: event.pointerId, x: event.clientX, y: event.clientY,
+      map, initial }
+    map.setPointerCapture(event.pointerId)
+    return
+  }
+  startMapPan(event, version)
+}
+function moveBoxSelection(event: PointerEvent) {
+  const drag = boxDrag
+  if (!drag || drag.pointerId !== event.pointerId) return
+  const rect = drag.map.getBoundingClientRect()
+  const left = Math.max(rect.left, Math.min(drag.x, event.clientX))
+  const right = Math.min(rect.right, Math.max(drag.x, event.clientX))
+  const top = Math.max(rect.top, Math.min(drag.y, event.clientY))
+  const bottom = Math.min(rect.bottom, Math.max(drag.y, event.clientY))
+  selectionBox.value = { versionId: drag.versionId, left: (left - rect.left) / rect.width * 100,
+    top: (top - rect.top) / rect.height * 100, width: Math.max(0, right - left) / rect.width * 100,
+    height: Math.max(0, bottom - top) / rect.height * 100 }
+}
+function endBoxSelection(event: PointerEvent, cancel = false) {
+  const drag = boxDrag
+  if (!drag || drag.pointerId !== event.pointerId) return
+  if (!cancel && Math.hypot(event.clientX - drag.x, event.clientY - drag.y) > 3) {
+    const rect = drag.map.getBoundingClientRect()
+    const left = Math.max(rect.left, Math.min(drag.x, event.clientX))
+    const right = Math.min(rect.right, Math.max(drag.x, event.clientX))
+    const top = Math.max(rect.top, Math.min(drag.y, event.clientY))
+    const bottom = Math.min(rect.bottom, Math.max(drag.y, event.clientY))
+    const selected = [...drag.map.querySelectorAll<SVGRectElement>('.tree-tile')].filter((tile) => {
+      const bounds = tile.getBoundingClientRect()
+      return bounds.left <= right && bounds.right >= left && bounds.top <= bottom && bounds.bottom >= top
+    }).map((tile) => tile.dataset.node).filter((id): id is string => !!id)
+    setSelectedNodes([...new Set([...drag.initial, ...selected])])
+    suppressGraphClicks()
+  }
+  boxDrag = null
+  selectionBox.value = null
+}
+function cancelBoxSelection(event: PointerEvent) { endBoxSelection(event, true) }
 
 const {
   remoteUsers, pings, roomStatus, peerRoom, connectedUsers, recentInteractions, metadataKey,
@@ -150,10 +202,10 @@ const { createVersion, confirmMerge, pruneVersion } = useVersionHistory({
 })
 
 const { editor, setEntryValueInput, entryOperation, bulkDeleteMode, bulkDeleteDialog,
-  addEntry, commitEditor, renameEntry, addEditorEntryRow, removeEditorEntryRow, deleteEntry,
+  addEntry, addParent, commitEditor, renameEntry, addEditorEntryRow, removeEditorEntryRow, deleteEntry,
   deleteSelectedEntries, openBulkDelete, openMergeEntries, openSplitEntry, addSplitEntry,
   removeSplitEntry, commitEntryOperation, detachEntry, canAttach, attachEntry,
-} = useHierarchyEditor({ clientId: CLIENT_ID, state, active, selectedNodes, isReadOnly, createVersion, setSelectedNodes })
+} = useHierarchyEditor({ clientId: CLIENT_ID, state, active, selectedNodes, isReadOnly, createVersion, setSelectedNodes, notify })
 
 function suppressGraphClicks() {
   suppressVersionClick = true
@@ -167,8 +219,8 @@ function suppressGraphClicks() {
 
 const { draggedNode, draggedPosition, dragPreviewView, overNode, invalidNode, treeDrag, spatialPreview,
   previewLayout, draggedSubtreeIds, draggedOriginalTile, startTreeDrag, moveTreeDrag, finishTreeDrag, cancelTreeDrag,
-} = useTreeDrag({ state, versions, active, zoom, isReadOnly, hoveredNode, entryTooltip, mapViewFor, mapViewport,
-  canAttach, attachEntry, detachEntry, setSelectedNodes, notify, suppressClicks: suppressGraphClicks })
+} = useTreeDrag({ state, versions, active, zoom, isReadOnly, selectedNodes, hoveredNode, entryTooltip, mapViewFor, mapViewport,
+  canAttach, attachEntry, detachEntry, createVersion, setSelectedNodes, notify, suppressClicks: suppressGraphClicks })
 
 watch(selectedNode, (nodeId) => {
   if (!nodeId) selectedNodes.value = []
@@ -325,7 +377,49 @@ async function activateRoom(room: string, createEmpty = false) {
   await nextTick(initializeMapViews)
   roomDialogOpen.value = false
   fitGraph()
-  await connectAutomatically(name)
+  if (isLocalOnlyRoom(name)) roomStatus.value = { state: 'idle', peers: 1, message: 'Local only' }
+  else await connectAutomatically(name)
+}
+
+function localOnlyRoomKey(room: string) { return `canopy-local-only-${encodeURIComponent(room)}` }
+function isLocalOnlyRoom(room: string) { return localStorage.getItem(localOnlyRoomKey(room)) === 'true' }
+
+function exportData() {
+  const dataset: Dataset = { format: 'canopy-dataset', version: 1, room: currentRoomName.value,
+    state: clone(state.value), interactions: clone(recentInteractions.value) }
+  const url = URL.createObjectURL(new Blob([JSON.stringify(dataset, null, 2)], { type: 'application/json' }))
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `canopy-${currentRoomName.value.replace(/[\\/:*?"<>|]/g, '_')}.json`
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
+async function importData(file: File) {
+  let dataset: Dataset
+  try { dataset = parseDataset(JSON.parse(await file.text()) as unknown) }
+  catch (error) { notify(error instanceof Error ? `Import failed: ${error.message}` : 'Import failed'); return }
+  const base = dataset.room.trim()
+  let name = base
+  let suffix = 0
+  while (localRooms.value.includes(name) || localStorage.getItem(roomDataKey(name)) !== null
+    || localStorage.getItem(localOnlyRoomKey(name)) !== null) {
+    const tail = `_${++suffix}`
+    name = `${base.slice(0, 80 - tail.length)}${tail}`
+  }
+  try {
+    localStorage.setItem(roomDataKey(name), JSON.stringify(dataset.state))
+    localStorage.setItem(interactionStorageKey(name), JSON.stringify(dataset.interactions))
+    localStorage.setItem(localOnlyRoomKey(name), 'true')
+  } catch (error) {
+    localStorage.removeItem(roomDataKey(name))
+    localStorage.removeItem(interactionStorageKey(name))
+    localStorage.removeItem(localOnlyRoomKey(name))
+    notify(error instanceof Error ? `Import failed: ${error.message}` : 'Import failed')
+    return
+  }
+  await activateRoom(name)
+  notify(`Imported into local room "${name}"`)
 }
 
 async function copySessionInvite() {
@@ -345,6 +439,7 @@ function deleteLocalRoom(room: string) {
   localStorage.removeItem(roomDataKey(room))
   localStorage.removeItem(metadataKey(room))
   localStorage.removeItem(interactionStorageKey(room))
+  localStorage.removeItem(localOnlyRoomKey(room))
   sessionStorage.removeItem(clipboardStorageKey(room))
   localRooms.value = localRooms.value.filter((savedRoom) => savedRoom !== room)
   persistLocalRooms(localRooms.value)
@@ -365,8 +460,9 @@ async function initializeCurrentRoom() {
   localStorage.setItem(roomDataKey(currentRoomName.value), JSON.stringify(state.value))
   reflowLayout()
   await nextTick(initializeMapViews)
-  requestAnimationFrame(fitGraph)
-  await connectAutomatically(currentRoomName.value)
+  requestAnimationFrame(() => fitGraph())
+  if (isLocalOnlyRoom(currentRoomName.value)) roomStatus.value = { state: 'idle', peers: 1, message: 'Local only' }
+  else await connectAutomatically(currentRoomName.value)
 }
 
 function notify(message: string) {
@@ -407,6 +503,10 @@ function selectVersion(version: Version) {
 }
 
 function handleVersionClick(version: Version, event: MouseEvent) {
+  if (suppressVersionClick) {
+    suppressVersionClick = false
+    return
+  }
   if (compareMode.value || mergeMode.value) {
     if (event.detail > 1) return
     if (pendingCompareVersion) {
@@ -863,7 +963,6 @@ function handleAppClickCapture(event: MouseEvent) {
 }
 function startMapTileGesture(event: PointerEvent, version: Version, nodeId: string) {
   if (isReadOnly.value) return
-  state.value.activeId = version.id
   if (event.shiftKey) {
     startMapPan(event, version)
     return
@@ -912,6 +1011,11 @@ function onKeydown(event: KeyboardEvent) {
     || target instanceof HTMLElement && target.isContentEditable)) return
   const key = event.key.toLowerCase()
   const modified = event.ctrlKey || event.metaKey
+  if (modified && !event.altKey && !event.shiftKey && key === 'f') {
+    event.preventDefault()
+    searchOpen.value = true
+    return
+  }
   if (!modified && !event.altKey && !event.shiftKey && key === 'p' && !event.repeat) {
     event.preventDefault()
     pingMode.value = !pingMode.value
@@ -951,7 +1055,7 @@ function onKeydown(event: KeyboardEvent) {
     event.preventDefault()
     pasteEntry()
   }
-  if (event.key === 'Escape') { menu.value = null; closeVersionSelection(); pingMode.value = false }
+  if (event.key === 'Escape') { searchOpen.value = false; menu.value = null; closeVersionSelection(); pingMode.value = false }
 }
 function measureCanvas() {
   browserViewport.value = { width: window.innerWidth, height: window.innerHeight }
@@ -965,9 +1069,12 @@ onMounted(() => {
   window.addEventListener('keydown', onKeydown)
   window.addEventListener('pointermove', moveTreeDrag)
   window.addEventListener('pointermove', moveMapPan)
+  window.addEventListener('pointermove', moveBoxSelection)
   window.addEventListener('pointerup', finishTreeDrag)
   window.addEventListener('pointercancel', cancelTreeDrag)
   window.addEventListener('pointerup', endMapPan)
+  window.addEventListener('pointerup', endBoxSelection)
+  window.addEventListener('pointercancel', cancelBoxSelection)
   presenceTimer = window.setInterval(expireRemoteUsers, 5000)
   void initializeCurrentRoom()
 })
@@ -983,9 +1090,12 @@ onUnmounted(() => {
   window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('pointermove', moveTreeDrag)
   window.removeEventListener('pointermove', moveMapPan)
+  window.removeEventListener('pointermove', moveBoxSelection)
   window.removeEventListener('pointerup', finishTreeDrag)
   window.removeEventListener('pointercancel', cancelTreeDrag)
   window.removeEventListener('pointerup', endMapPan)
+  window.removeEventListener('pointerup', endBoxSelection)
+  window.removeEventListener('pointercancel', cancelBoxSelection)
   window.clearInterval(presenceTimer)
 })
 
@@ -1080,6 +1190,7 @@ const cardModel: VersionCardModel = reactive({
   selectedNodes,
   draggedSubtreeIds,
   draggedOriginalTile,
+  selectionBox,
   windowDimensions,
   isReadOnly,
   versionTiles,
@@ -1104,7 +1215,7 @@ const cardModel: VersionCardModel = reactive({
   handleVersionDoubleClick,
   onVersionContext,
   onVersionMenu,
-  startMapPan,
+  startMapPan: startMapGesture,
   zoomMap,
   startMapTileGesture,
   enterTile,
@@ -1121,12 +1232,13 @@ const cardModel: VersionCardModel = reactive({
   <main class="app-shell" :class="{ dark: darkMode }" @click.capture="handleAppClickCapture" @wheel="onWheel">
     <div class="workspace" :inert="mergeMode && compareIds.length === 2">
       <WorkspaceSidebar :sidebar-collapsed="sidebarCollapsed" :dark-mode="darkMode" :current-room-name="currentRoomName"
-        :room-status="roomStatus" :connected-users="connectedUsers" :client-id="CLIENT_ID" :versions="versions"
+        :room-status="roomStatus" :local-only="isLocalOnlyRoom(currentRoomName)" :connected-users="connectedUsers" :client-id="CLIENT_ID" :versions="versions"
         :recent-interactions="recentInteractions" :branch-count="branchCount" :active="active"
         :active-nodes="activeNodes" :active-children="activeChildren"
         @toggle-sidebar="sidebarCollapsed = !sidebarCollapsed" @toggle-theme="darkMode = !darkMode"
         @change-room="roomDialogOpen = true" @copy-invite="copySessionInvite" @focus-collaborator="focusCollaborator"
-        @focus-ping="focusPingLocation" @navigate="navigateInteraction" @focus-active="focusActive" />
+        @focus-ping="focusPingLocation" @navigate="navigateInteraction" @focus-active="focusActive"
+        @import-data="importData" @export-data="exportData" />
 
       <section class="canvas-region">
         <div ref="graphCanvas" class="graph-canvas" :class="{ 'ping-mode': pingMode }" @contextmenu="onCanvasContext" @pointerdown.capture="handlePingPointer" @pointermove.capture="trackPingPointerMove" @pointerup.capture="clearPingPointer" @pointercancel.capture="clearPingPointer" @click.capture="handlePingClick" @click="onCanvasClick" @pointerdown="startCanvasPan" @pointermove="moveCanvasPan" @pointerup="endCanvasPan" @pointercancel="endCanvasPan">
@@ -1185,7 +1297,9 @@ const cardModel: VersionCardModel = reactive({
             <button title="Compare two versions · Shift+C" aria-label="Compare versions, Shift+C" :class="{ selected: compareMode }" @click="compareMode ? closeVersionSelection() : startVersionSelection('compare')"><GitCompareArrows :size="16" /><span>Compare</span><kbd>Shift+C</kbd></button>
             <button title="Merge two versions · M" aria-label="Merge versions, M" :class="{ selected: mergeMode }" @click="mergeMode ? closeVersionSelection() : startVersionSelection('merge')"><GitCompareArrows :size="16" /><span>Merge</span><kbd>M</kbd></button>
             <button title="Focus the active version · F" aria-label="Focus active version, F" @click="focusActive"><Maximize :size="16" /><span>Focus</span><kbd>F</kbd></button>
-            <button title="Fit all versions in view · Shift+A" aria-label="Fit all versions, Shift+A" @click="fitGraph"><Layers3 :size="16" /><span>Fit all</span><kbd>Shift+A</kbd></button>
+            <button title="Focus the active version and its neighbors" aria-label="Focus neighborhood" @click="focusNeighborhood()"><GitBranch :size="16" /><span>Neighborhood</span></button>
+            <button title="Fit all lanes vertically" aria-label="Fit height" @click="fitHeight()"><Maximize :size="16" /><span>Fit height</span></button>
+            <button title="Fit all versions in view · Shift+A" aria-label="Fit all versions, Shift+A" @click="fitGraph()"><Layers3 :size="16" /><span>Fit all</span><kbd>Shift+A</kbd></button>
             <button title="Toggle Ping Mode · P" aria-label="Toggle Ping Mode, P" :aria-pressed="pingMode" :class="{ selected: pingMode }" @click="pingMode = !pingMode"><Radio :size="16" /><span>{{ pingMode ? 'Ping mode on' : 'Ping' }}</span><kbd>P</kbd></button>
             <span class="hotbar-divider" aria-hidden="true"></span>
             <button title="Zoom out · -" aria-label="Zoom out, minus" @click="zoomOut"><ZoomOut :size="16" /><kbd>−</kbd></button>
@@ -1214,6 +1328,7 @@ const cardModel: VersionCardModel = reactive({
         <div class="context-title">ENTRY ACTIONS</div>
         <template v-if="!isReadOnly">
           <button @click="addEntry(menu.nodeId); menu = null"><Plus :size="15" /> Add child</button>
+          <button @click="addParent(); menu = null"><GitBranch :size="15" /> Add parent</button>
           <button @click="renameEntry(menu.nodeId!); menu = null"><Pencil :size="15" /> Change value</button>
           <button v-if="selectedNodes.length >= 2" @click="openMergeEntries(); menu = null"><Layers3 :size="15" /> Merge selected entries</button>
           <button v-if="selectedNodes.length >= 2" class="danger-action" @click="openBulkDelete(); menu = null"><Trash2 :size="15" /> Delete selected entries</button>
@@ -1258,6 +1373,8 @@ const cardModel: VersionCardModel = reactive({
       @close="entryOperation = null" @commit="commitEntryOperation" @add-split="addSplitEntry" @remove-split="removeSplitEntry" />
     <RoomManager v-if="roomDialogOpen" v-model="newRoomName" :local-rooms="localRooms" :current-room-name="currentRoomName"
       @close="roomDialogOpen = false" @activate="activateRoom" @delete="deleteLocalRoom" @create="createRoomFromDialog" />
+    <VersionSearch v-if="searchOpen" :versions="versions" @close="searchOpen = false"
+      @focus="activateAndFocusVersion($event); searchOpen = false" />
     <div v-if="entryTooltip" class="entry-tooltip" role="tooltip"
       :style="{ left: `${Math.min(entryTooltip.x + 14, window.innerWidth - 300)}px`, top: `${Math.min(entryTooltip.y + 16, window.innerHeight - 100)}px` }">
       {{ entryTooltip.description }}

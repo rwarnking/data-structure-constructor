@@ -10,8 +10,9 @@ export function useHierarchyEditor(options: {
   isReadOnly: ComputedRef<boolean>
   createVersion: (data: TreeNode[], change: string, forceNew?: boolean) => Version | null
   setSelectedNodes: (ids: string[]) => void
+  notify: (message: string) => void
 }) {
-  const { clientId: CLIENT_ID, state, active, selectedNodes, isReadOnly, createVersion, setSelectedNodes } = options
+  const { clientId: CLIENT_ID, state, active, selectedNodes, isReadOnly, createVersion, setSelectedNodes, notify } = options
   const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
   const editor = ref<EditorState | null>(null)
   const entryValueInput = ref<HTMLInputElement | null>(null)
@@ -35,6 +36,21 @@ export function useHierarchyEditor(options: {
     editor.value = { mode: 'create', parentId, entries: [newEntryDraft()] }
   }
 
+  function addParent() {
+    if (isReadOnly.value || !selectedNodes.value.length) return
+    const ids = selectedNodes.value.filter((id) => !!findNode(active.value.data, id))
+    if (!ids.length) return
+    const parent = findParent(active.value.data, ids[0]!)
+    if (parent && ids.some((id) => {
+      const selected = findNode(active.value.data, id)
+      return selected && descendants(selected).includes(parent.id)
+    })) {
+      notify('Cannot add a parent inside the selected entries')
+      return
+    }
+    editor.value = { mode: 'create', parentId: parent?.id ?? null, parentOf: ids, entries: [newEntryDraft()] }
+  }
+
   function commitEditor() {
     if (!editor.value || (isReadOnly.value && editor.value.mode === 'rename')) return
     const currentEditor = editor.value
@@ -45,6 +61,34 @@ export function useHierarchyEditor(options: {
       }))
       if (!entries.length || entries.some((entry) => !entry.value)) return
       const data = clone(active.value.data)
+      if (currentEditor.parentOf) {
+        const ids = currentEditor.parentOf
+        const flat = flattenNodes(data)
+        const original = ids.map((id) => flat.get(id)?.node)
+        if (original.some((node) => !node)) { notify('Selected entries are no longer available'); return }
+        const siblings = currentEditor.parentId ? findNode(data, currentEditor.parentId)?.children : data
+        if (!siblings) { notify('The original parent is no longer available'); return }
+        const insertionIndex = siblings.findIndex((node) => node.id === ids[0])
+        const selectedBefore = siblings.slice(0, insertionIndex).filter((node) => ids.includes(node.id)).length
+        if (insertionIndex < 0 || ids.some((id) => {
+          const node = findNode(data, id)
+          return !!node && !!currentEditor.parentId && descendants(node).includes(currentEditor.parentId)
+        })) { notify('Cannot add a parent inside the selected entries'); return }
+        const depth = (id: string) => {
+          let result = 0
+          let parentId = flat.get(id)?.parentId
+          while (parentId) { result++; parentId = flat.get(parentId)?.parentId }
+          return result
+        }
+        for (const id of [...ids].sort((a, b) => depth(b) - depth(a))) removeNode(data, id)
+        const parent = makeNode(entries[0]!.value, entries[0]!.description)
+        parent.children = original.filter((node): node is TreeNode => !!node)
+        siblings.splice(Math.min(insertionIndex - selectedBefore, siblings.length), 0, parent)
+        editor.value = null
+        const version = createVersion(data, `Add parent ${parent.value}`, true)
+        if (version) setSelectedNodes([parent.id])
+        return
+      }
       const nodes = entries.map((entry) => makeNode(entry.value, entry.description))
       if (currentEditor.parentId) {
         const parent = findNode(data, currentEditor.parentId)
@@ -368,7 +412,7 @@ export function useHierarchyEditor(options: {
     return version
   }
   return { editor, setEntryValueInput, entryOperation, bulkDeleteMode, bulkDeleteDialog,
-    addEntry, commitEditor, renameEntry, addEditorEntryRow, removeEditorEntryRow, deleteEntry,
+    addEntry, addParent, commitEditor, renameEntry, addEditorEntryRow, removeEditorEntryRow, deleteEntry,
     deleteSelectedEntries, openBulkDelete, openMergeEntries, openSplitEntry, addSplitEntry,
     removeSplitEntry, commitEntryOperation, detachEntry, canAttach, attachEntry }
 }

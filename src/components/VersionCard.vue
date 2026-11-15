@@ -8,7 +8,7 @@ import TileLabel from './TileLabel.vue'
 import { displayVersionId } from '../utils/versions'
 
 const props = defineProps<{ version: Version; model: VersionCardModel }>()
-const { active, compareIds, compareMode, zoom, overNode, invalidNode, hoveredNode, selectedNodes, draggedSubtreeIds, draggedOriginalTile, windowDimensions, clientId, isReadOnly, versionTiles, duplicateValueLinks, displayCardPosition, cardHeight, rootLabelOffset, rootLabelX, versionAuthorColor, activeUsersFor, descendantsCount, isPreviewing, previewLabel, versionAction, cardData, mapViewport, mapTransform, tileStrokeColor, tileStrokeWidth, dragOverlayTiles, handleVersionClick, handleVersionDoubleClick, onVersionContext, onVersionMenu, startMapPan, zoomMap, startMapTileGesture, enterTile, moveTileTooltip, leaveTile, onTileClick, onTileDoubleClick, onTileContext } = toRefs(props.model)
+const { active, compareIds, compareMode, zoom, overNode, invalidNode, hoveredNode, selectedNodes, draggedSubtreeIds, draggedOriginalTile, selectionBox, windowDimensions, clientId, isReadOnly, versionTiles, duplicateValueLinks, displayCardPosition, cardHeight, rootLabelOffset, rootLabelX, versionAuthorColor, activeUsersFor, descendantsCount, isPreviewing, previewLabel, versionAction, cardData, mapViewport, mapTransform, tileStrokeColor, tileStrokeWidth, dragOverlayTiles, handleVersionClick, handleVersionDoubleClick, onVersionContext, onVersionMenu, startMapPan, zoomMap, startMapTileGesture, enterTile, moveTileTooltip, leaveTile, onTileClick, onTileDoubleClick, onTileContext } = toRefs(props.model)
 const overlayTiles = computed(() => dragOverlayTiles.value(props.version))
 const overlayIds = computed(() => new Set(overlayTiles.value.map((tile) => tile.id)))
 </script>
@@ -83,6 +83,8 @@ const overlayIds = computed(() => new Set(overlayTiles.value.map((tile) => tile.
         <span v-if="version.id === 'v0'" class="empty-set" aria-label="Empty set" :style="{ top: `${rootLabelOffset()}px`, left: `${rootLabelX()}px` }">∅</span>
         <template v-else><span class="empty-cross">+</span><span>Empty structure</span></template>
       </div>
+      <div v-if="selectionBox?.versionId === version.id" class="selection-box"
+        :style="{ left: `${selectionBox.left}%`, top: `${selectionBox.top}%`, width: `${selectionBox.width}%`, height: `${selectionBox.height}%` }"></div>
     </div>
   </article>
 </template>

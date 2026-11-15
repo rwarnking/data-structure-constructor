@@ -42,7 +42,7 @@ export type CollaborationMetadata = {
 }
 export type EntryDraft = { id: string; value: string; description: string }
 export type EditorState =
-  | { mode: 'create'; parentId: string | null; entries: EntryDraft[] }
+  | { mode: 'create'; parentId: string | null; entries: EntryDraft[]; parentOf?: string[] }
   | { mode: 'rename'; parentId: null; nodeId: string; value: string; description: string }
 export type SplitDraft = { id: string; value: string; description: string }
 export type EntryOperation =

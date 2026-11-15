@@ -18,6 +18,7 @@ const { useVersionComparison } = await vite.ssrLoadModule('/src/composables/useV
 const { reflowVersionLayout, allocateVersionNumber, assignMissingVersionNumbers, assignVersionSuffixes, displayVersionId, retireVersionNumbers } = await vite.ssrLoadModule('/src/utils/versions.ts')
 const { layoutTileLabel, tilesForForest, tilesFor } = await vite.ssrLoadModule('/src/utils/treemap.ts')
 const { useGraphCamera } = await vite.ssrLoadModule('/src/composables/useGraphCamera.ts')
+const { parseDataset } = await vite.ssrLoadModule('/src/services/dataset.ts')
 
 function node(id, children = []) {
   return { id, value: id, children }
@@ -26,6 +27,50 @@ function node(id, children = []) {
 function version(id, data, parentId = null, step = 0) {
   return { id, data, parentId, step, lane: 0, branch: id, change: id, createdAt: step }
 }
+
+test('adding one parent preserves selected entries and uses the first entry parent', () => {
+  const scope = effectScope()
+  scope.run(() => {
+    const state = ref({ versions: [version('v0', [node('p', [node('a'), node('b'), node('c')]), node('q', [node('d')])])], activeId: 'v0', nextNode: 1, nextVersion: 1, nextLane: 1, copyLinks: [] })
+    const active = computed(() => state.value.versions[0])
+    const selectedNodes = ref(['c', 'a', 'd'])
+    const messages = []
+    const editor = useHierarchyEditor({
+      clientId: 'test', state, active, selectedNodes, isReadOnly: computed(() => false),
+      setSelectedNodes: (ids) => { selectedNodes.value = ids },
+      notify: (message) => messages.push(message),
+      createVersion: (data) => { active.value.data = data; return active.value },
+    })
+    editor.addParent()
+    editor.editor.value.entries[0].value = 'New parent'
+    editor.commitEditor()
+    assert.deepEqual(active.value.data[0].children.map((item) => item.value), ['b', 'New parent'])
+    assert.deepEqual(active.value.data[0].children[1].children.map((item) => item.id), ['c', 'a', 'd'])
+    assert.deepEqual(active.value.data[1].children, [])
+    selectedNodes.value = ['c', 'p']
+    editor.addParent()
+    assert.equal(editor.editor.value, null)
+    assert.match(messages.at(-1), /Cannot add a parent/)
+  })
+  scope.stop()
+})
+
+test('dataset validation rejects invalid root entries, views and connectors', () => {
+  const root = version('v0', [node('a')])
+  const dataset = { format: 'canopy-dataset', version: 1, room: 'Room', state: {
+    versions: [root], activeId: 'v0', nextNode: 1, nextVersion: 1, nextLane: 1, copyLinks: [],
+  }, interactions: [] }
+  assert.deepEqual(parseDataset(dataset), dataset)
+  const invalid = structuredClone(dataset)
+  invalid.state.versions[0].data.push(node('a'))
+  assert.throws(() => parseDataset(invalid), /identifier/)
+  invalid.state.versions[0].data.pop()
+  invalid.state.versions[0].mapView = null
+  assert.throws(() => parseDataset(invalid), /map view/)
+  delete invalid.state.versions[0].mapView
+  invalid.state.copyLinks.push({ sourceVersionId: 'v0', sourceNodeId: 'missing', targetVersionId: 'v0', targetNodeId: 'a' })
+  assert.throws(() => parseDataset(invalid), /connector/)
+})
 
 test('splitting a parent preserves each child under its assigned result', () => {
   const scope = effectScope()
