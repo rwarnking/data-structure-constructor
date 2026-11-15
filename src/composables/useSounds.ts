@@ -1,6 +1,6 @@
 import { ref, watch } from 'vue'
 
-type Sound = 'entryClick' | 'entryAdded' | 'branch' | 'error' | 'off' | 'on' | 'moved'
+type Sound = 'entryClick' | 'entryAdded' | 'branch' | 'error' | 'off' | 'on' | 'moved' | 'focus' | 'room' | 'tick'
 const files: Record<Sound, string> = {
   entryClick: 'click-with-big-reverb-28848-01.mp3',
   entryAdded: 'bing-298405.mp3',
@@ -9,6 +9,9 @@ const files: Record<Sound, string> = {
   off: 'ui-sound-off-270300.mp3',
   on: 'ui-sound-on-270295.mp3',
   moved: 'droplets-in-a-cave-6785-01.mp3',
+  focus: 'intro-sound-1-269293.mp3',
+  room: 'intro-sound-2-269294.mp3',
+  tick: 'tick-single.mp3',
 }
 
 export function useSounds() {

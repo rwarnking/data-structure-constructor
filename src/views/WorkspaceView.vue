@@ -295,11 +295,29 @@ watch(() => active.value.data, (data) => {
 }, { deep: true })
 watch(darkMode, (enabled) => localStorage.setItem('canopy-theme', enabled ? 'dark' : 'light'))
 
+function changeVolume(value: number) {
+  if (value === volume.value) return
+  volume.value = value
+  playSound('entryAdded')
+}
+function toggleTheme() {
+  darkMode.value = !darkMode.value
+  playSound(darkMode.value ? 'off' : 'on')
+}
+function changeBranching(enabled: boolean) {
+  setBranching(enabled)
+  playSound(enabled ? 'on' : 'off')
+}
+function deleteBranch(id: string) {
+  if (pruneVersion(id)) playSound('moved')
+  menu.value = null
+}
+
 function focusCollaborator(userId: string) {
   const collaborator = connectedUsers.value.find((user) => user.id === userId)
   if (!collaborator?.activeVersionId) return
   const version = versions.value.find((item) => item.id === collaborator.activeVersionId)
-  if (version) focusVersion(version)
+  if (version) { playSound('focus'); focusVersion(version) }
 }
 
 function focusPingLocation(location: { x: number; y: number }) {
@@ -311,6 +329,7 @@ function focusPingLocation(location: { x: number; y: number }) {
 }
 
 function navigateInteraction(entry: InteractionEntry, kind: 'version' | 'node' | 'ping') {
+  playSound('tick')
   if (kind === 'ping' && entry.ping) {
     focusPingLocation(entry.ping)
     return
@@ -404,6 +423,7 @@ async function activateRoom(room: string, createEmpty = false) {
     notify(`Cannot open room "${name}": ${error.message}`, true)
     return
   }
+  playSound('room')
   peerRoom.send({ type: 'presence-leave', userId: CLIENT_ID })
   peerRoom.close()
   remoteUsers.value = {}
@@ -531,7 +551,10 @@ async function initializeCurrentRoom() {
   await nextTick(initializeMapViews)
   requestAnimationFrame(() => fitGraph())
   if (isLocalOnlyRoom(currentRoomName.value)) roomStatus.value = { state: 'idle', peers: 1, message: 'Local only' }
-  else await connectAutomatically(currentRoomName.value)
+  else {
+    await connectAutomatically(currentRoomName.value)
+    if (roomStatus.value.state === 'connected') playSound('room')
+  }
 }
 
 function notify(message: string, error = false) {
@@ -567,6 +590,7 @@ function selectVersion(version: Version) {
     chooseCompare(version.id)
     return
   }
+  if (state.value.activeId !== version.id) playSound('tick')
   state.value.activeId = version.id
   setSelectedNodes([])
   menu.value = null
@@ -599,6 +623,7 @@ function handleVersionClick(version: Version, event: MouseEvent) {
 function handleVersionDoubleClick(version: Version) {
   window.clearTimeout(versionClickTimer)
   pendingCompareVersion = null
+  playSound('focus')
   activateAndFocusVersion(version)
 }
 
@@ -620,6 +645,7 @@ function onTileClick(version: Version, nodeId: string, event: MouseEvent) {
   const sameVersion = version.id === active.value.id
   window.clearTimeout(tileClickTimer)
   tileClickTimer = window.setTimeout(() => {
+    if (state.value.activeId !== version.id) playSound('tick')
     state.value.activeId = version.id
     if (isReadOnly.value) {
       setSelectedNodes([])
@@ -670,6 +696,7 @@ const visibleLanes = computed(() => {
   }).filter((lane) => lane.height > 0)
 })
 function navigateLane(version: Version) {
+  playSound('tick')
   const position = cardPosition(version)
   animateCamera(zoom.value, {
     x: canvasSize.value.width / 2 - (position.x + windowDimensions.value.width / 2) * zoom.value,
@@ -1001,7 +1028,7 @@ function navigateVersion(direction: 'left' | 'right' | 'up' | 'down') {
           || left.step - right.step || left.createdAt - right.createdAt || left.id.localeCompare(right.id))[0]
     }
   }
-  if (destination) activateAndFocusVersion(destination)
+  if (destination) { playSound('tick'); activateAndFocusVersion(destination) }
 }
 function navigateBoundary(action: 'firstLane' | 'lastLane' | 'firstVersion' | 'lastVersion') {
   const nonRoot = versions.value.filter((version) => version.id !== 'v0')
@@ -1292,10 +1319,10 @@ const cardModel: VersionCardModel = reactive({
         :room-status="roomStatus" :local-only="isLocalOnlyRoom(currentRoomName)" :connected-users="connectedUsers" :client-id="CLIENT_ID" :versions="versions"
         :recent-interactions="recentInteractions" :branch-count="branchCount" :active="active" :color-for-user="colorForUser"
         :active-nodes="activeNodes" :active-children="activeChildren"
-        @toggle-sidebar="sidebarCollapsed = !sidebarCollapsed" @toggle-theme="darkMode = !darkMode"
-        @set-volume="volume = $event" @toggle-mute="toggleMute" @set-branching="setBranching"
+        @toggle-sidebar="sidebarCollapsed = !sidebarCollapsed" @toggle-theme="toggleTheme"
+        @set-volume="changeVolume" @toggle-mute="toggleMute" @set-branching="changeBranching"
         @change-room="roomDialogOpen = true" @copy-invite="copySessionInvite" @focus-collaborator="focusCollaborator"
-        @focus-ping="focusPingLocation" @navigate="navigateInteraction" @focus-active="focusActive"
+        @focus-ping="playSound('tick'); focusPingLocation($event)" @navigate="navigateInteraction" @focus-active="focusActive"
         @import-data="importData" @export-data="exportData" @show-tags="tagVersionId = null; tagsOpen = true" />
 
       <section class="canvas-region">
@@ -1358,7 +1385,8 @@ const cardModel: VersionCardModel = reactive({
     </div>
 
     <VersionComparison :model="comparisonModel" :versions="versions" :sidebar-collapsed="sidebarCollapsed"
-      :action-sidebar-collapsed="actionSidebarCollapsed" @confirm="confirmMerge" @entry-click="playSound('entryClick')" />
+      :action-sidebar-collapsed="actionSidebarCollapsed" @confirm="confirmMerge" @entry-click="playSound('entryClick')"
+      @pick="playSound('entryAdded')" @omit="playSound('entryClick')" />
 
     <div v-if="menu" ref="contextMenuElement" class="context-menu" :style="{ left: `${contextMenuPosition.x}px`, top: `${contextMenuPosition.y}px` }" @click.stop>
       <template v-if="menu.kind === 'version'">
@@ -1370,7 +1398,7 @@ const cardModel: VersionCardModel = reactive({
         <button v-if="!isReadOnly && versions.find((version) => version.id === menu!.versionId)?.data.length" @click="compactVersionTreemaps(menu.versionId!); menu = null"><CompactIcon :size="15" /> Compact Layout</button>
         <template v-if="menu.versionId !== 'v0'">
           <div class="context-divider"></div>
-          <button class="danger-action" @click="pruneVersion(menu.versionId!); menu = null"><Trash2 :size="15" /> Delete version and descendants</button>
+          <button class="danger-action" @click="deleteBranch(menu.versionId!)"><Trash2 :size="15" /> Delete version and descendants</button>
         </template>
       </template>
       <template v-else-if="menu.kind === 'entry' && menu.nodeId">
@@ -1422,7 +1450,7 @@ const cardModel: VersionCardModel = reactive({
       @close="entryOperation = null" @commit="commitEntryOperation" @add-split="addSplitEntry" @remove-split="removeSplitEntry" />
     <RoomManager v-if="roomDialogOpen" v-model="newRoomName" :local-rooms="localRooms" :current-room-name="currentRoomName"
       @close="roomDialogOpen = false" @activate="activateRoom" @delete="deleteLocalRoom" @create="createRoomFromDialog" @error="playSound('error')" />
-    <VersionSearch v-if="searchOpen" :versions="versions" @close="searchOpen = false"
+    <VersionSearch v-if="searchOpen" :versions="versions" :action-for-version="(version) => versionAction(version).label" @close="searchOpen = false"
       @focus="activateAndFocusVersion($event); searchOpen = false" />
     <VersionTags v-if="tagsOpen" :versions="versions" :editing="tagVersion"
       @close="tagsOpen = false; tagVersionId = null" @save="saveTag($event)" @remove="saveTag()"

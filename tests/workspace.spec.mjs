@@ -501,6 +501,71 @@ test('version search persists recent queries and focuses a result', async ({ pag
   await expect(dialog).toHaveCount(0)
 })
 
+test('search filters all entity types and remembers combined searches', async ({ page }) => {
+  const room = await openTreemapRoom(page, [
+    { id: 'parent', value: 'Parent', children: [{ id: 'child', value: 'Nested needle', description: 'Hidden description', children: [] }] },
+  ])
+  await page.keyboard.press('t')
+  await page.getByLabel('Title', { exact: true }).fill('Release tag')
+  await page.getByLabel('Description', { exact: true }).fill('Milestone description')
+  await page.getByRole('button', { name: 'Save tag' }).click()
+  await page.keyboard.press('Control+f')
+  const dialog = page.getByRole('dialog', { name: 'Search versions' })
+  await expect(dialog).toContainText('Search through')
+  const result = dialog.locator('.version-search-results button')
+  const all = dialog.getByLabel('All', { exact: true })
+  for (const text of ['nested needle', 'HIDDEN DESCRIPTION', 'release tag', 'milestone description', 'edit', 'add', '01.01']) {
+    await all.fill(text)
+    await expect(result).toHaveCount(1)
+  }
+  await all.fill('no matching entity')
+  await expect(result).toHaveCount(0)
+  await all.clear()
+  await dialog.getByLabel('Entries and description').fill('hidden description')
+  await expect(result).toHaveCount(1)
+  await dialog.getByLabel('Actions', { exact: true }).fill('edit')
+  await dialog.getByLabel('Tag text').fill('milestone')
+  await expect(result).toHaveCount(1)
+  await dialog.getByLabel('Actions', { exact: true }).fill('add')
+  await expect(result).toHaveCount(1)
+  await dialog.getByLabel('Actions', { exact: true }).fill('nonexistent')
+  await expect(result).toHaveCount(0)
+  await dialog.getByLabel('Actions', { exact: true }).fill('edit')
+  await dialog.getByRole('button', { name: 'Search', exact: true }).click()
+  await page.keyboard.press('Escape')
+  await page.keyboard.press('Control+f')
+  await dialog.getByRole('button', { name: /Actions: edit.*Entries: hidden description/ }).click()
+  await expect(dialog.getByLabel('Actions', { exact: true })).toHaveValue('edit')
+  await expect(result).toHaveCount(1)
+  await result.click()
+  await expect.poll(async () => (await state(page, room)).activeId).toBe('v1')
+  await page.reload()
+  await page.keyboard.press('Control+f')
+  await expect(dialog.getByRole('button', { name: /Actions: edit.*Entries: hidden description/ })).toBeVisible()
+})
+
+test('search retains recent searches saved in the previous format', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('canopy-recent-version-searches-v1', JSON.stringify([['01', '02', '003', 'old tag']])))
+  await openRoom(page)
+  await page.keyboard.press('Control+f')
+  const dialog = page.getByRole('dialog', { name: 'Search versions' })
+  await dialog.getByRole('button', { name: '01.02.003 · Tag: old tag' }).click()
+  await expect(dialog.getByLabel('Version step')).toHaveValue('01')
+  await expect(dialog.getByLabel('Tag text')).toHaveValue('old tag')
+})
+
+test('search remains usable in a short narrow viewport', async ({ page }) => {
+  await page.setViewportSize({ width: 400, height: 360 })
+  await openRoom(page)
+  await page.keyboard.press('Control+f')
+  const dialog = page.getByRole('dialog', { name: 'Search versions' })
+  const bounds = await dialog.boundingBox()
+  expect(bounds.y).toBeGreaterThanOrEqual(0)
+  expect(bounds.y + bounds.height).toBeLessThanOrEqual(360)
+  await dialog.getByLabel('Entries and description').fill('missing')
+  await expect(dialog.getByText('No matching versions')).toBeVisible()
+})
+
 test('camera presets fit the available canvas and refocus after resizing', async ({ page }) => {
   const room = await openRoom(page)
   await addEntries(page, ['Base'])
@@ -1378,8 +1443,8 @@ test('expanded sidebar exposes additional actions and search while collapsed sho
   await expect(page.getByRole('dialog', { name: 'Search versions' })).toBeVisible()
   await page.keyboard.press('Escape')
   await page.getByRole('button', { name: 'Expand action sidebar' }).click()
-  await expect(sidebar.getByRole('button', { name: 'Zoom in preset, +' })).toHaveCount(0)
-  await expect(sidebar.getByRole('button', { name: 'Zoom out preset, -' })).toHaveCount(0)
+  await expect(sidebar.getByRole('button', { name: 'Zoom in preset, +' })).toBeVisible()
+  await expect(sidebar.getByRole('button', { name: 'Zoom out preset, -' })).toBeVisible()
   await expect(sidebar.locator('section').first()).toHaveAttribute('aria-label', 'Communication actions')
   for (const name of expandedOnly) await expect(sidebar.locator(`[title^="${name} ·"]`)).toHaveCount(1)
   for (const [name, gesture, group] of [
@@ -1509,20 +1574,20 @@ test('sounds use the shared volume and branch sounds replace entry sounds', asyn
   const first = (await state(page, room)).activeId
   await addEntries(page, ['Second'])
   const sounds = await page.evaluate(() => window.recordedSounds)
-  expect(sounds.map((sound) => sound.url.split('/').pop())).toEqual(['happy-pop-2-185287.mp3', 'bing-298405.mp3'])
-  expect(sounds.map((sound) => sound.volume)).toEqual([0.4, 0.4])
+  expect(sounds.map((sound) => sound.url.split('/').pop())).toEqual(['bing-298405.mp3', 'happy-pop-2-185287.mp3', 'bing-298405.mp3'])
+  expect(sounds.map((sound) => sound.volume)).toEqual([0.4, 0.4, 0.4])
   await page.keyboard.press('4')
   await page.keyboard.press('Shift+c')
   await page.locator(`.version-card[data-version="${first}"]`).click()
   await page.getByRole('img', { name: 'Source treemap comparison' }).locator('.comparison-tile').first().click()
   expect((await page.evaluate(() => window.recordedSounds)).map((sound) => sound.url.split('/').pop()))
-    .toEqual(['happy-pop-2-185287.mp3', 'bing-298405.mp3', 'click-with-big-reverb-28848-01.mp3'])
+    .toEqual(['bing-298405.mp3', 'happy-pop-2-185287.mp3', 'bing-298405.mp3', 'click-with-big-reverb-28848-01.mp3'])
   await page.getByRole('button', { name: 'Abort and close' }).click()
   await focusActive(page)
   await page.getByRole('button', { name: 'Mute sound' }).click()
   await addEntries(page, ['Silent'])
   expect((await page.evaluate(() => window.recordedSounds)).map((sound) => sound.url.split('/').pop()))
-    .toEqual(['happy-pop-2-185287.mp3', 'bing-298405.mp3', 'click-with-big-reverb-28848-01.mp3', 'ui-sound-off-270300.mp3'])
+    .toEqual(['bing-298405.mp3', 'happy-pop-2-185287.mp3', 'bing-298405.mp3', 'click-with-big-reverb-28848-01.mp3', 'ui-sound-off-270300.mp3'])
   await page.getByRole('button', { name: 'Unmute sound' }).click()
   await expect.poll(async () => (await page.evaluate(() => window.recordedSounds)).at(-1).url)
     .toContain('ui-sound-on-270295.mp3')
@@ -1534,6 +1599,108 @@ test('sounds use the shared volume and branch sounds replace entry sounds', asyn
   await page.reload()
   await page.getByRole('button', { name: 'Settings' }).click()
   await expect(page.getByRole('slider', { name: 'Volume' })).toHaveValue('0.4')
+})
+
+test('settings, version navigation and interaction log play their assigned sounds', async ({ page }) => {
+  await page.addInitScript(() => {
+    window.recordedSounds = []
+    window.Audio = class {
+      constructor(url) { this.url = url; this.volume = 1 }
+      play() { window.recordedSounds.push(this.url.split('/').pop()); return Promise.resolve() }
+    }
+  })
+  const room = await openRoom(page)
+  await addEntries(page, ['First'])
+  const first = (await state(page, room)).activeId
+  await addEntries(page, ['Second'])
+  const second = (await state(page, room)).activeId
+  const takeSounds = () => page.evaluate(() => window.recordedSounds.splice(0))
+  await takeSounds()
+  await page.keyboard.press('ArrowLeft')
+  await expect.poll(async () => (await state(page, room)).activeId).toBe(first)
+  expect(await takeSounds()).toEqual(['tick-single.mp3'])
+  await page.keyboard.press('4')
+  await page.locator(`.version-card[data-version="${second}"] .version-card-head`).dblclick()
+  await expect.poll(async () => (await state(page, room)).activeId).toBe(second)
+  expect(await takeSounds()).toEqual(['intro-sound-1-269293.mp3'])
+  await page.keyboard.press('4')
+  await page.locator(`.version-card[data-version="${first}"] .version-card-head`).click()
+  await expect.poll(async () => (await state(page, room)).activeId).toBe(first)
+  expect(await takeSounds()).toEqual(['tick-single.mp3'])
+  await page.getByRole('button', { name: 'Settings' }).click()
+  await page.getByRole('button', { name: 'Dark mode' }).click()
+  await page.getByRole('button', { name: 'Light mode' }).click()
+  await page.getByRole('button', { name: 'Branching on' }).click()
+  await page.getByRole('button', { name: 'Branching off' }).click()
+  expect(await takeSounds()).toEqual(['ui-sound-off-270300.mp3', 'ui-sound-on-270295.mp3',
+    'ui-sound-off-270300.mp3', 'ui-sound-on-270295.mp3'])
+  await page.locator('.collaborator-list .collaborator').first().click()
+  expect(await takeSounds()).toEqual(['intro-sound-1-269293.mp3'])
+  await page.locator('.interaction-reference').first().click()
+  expect(await takeSounds()).toEqual(['tick-single.mp3'])
+  await page.getByRole('button', { name: 'Collapse sidebar', exact: true }).click()
+  await page.locator('.compact-user').first().click()
+  await page.locator('.compact-interaction').first().click()
+  expect(await takeSounds()).toEqual(['intro-sound-1-269293.mp3', 'tick-single.mp3'])
+  await page.getByRole('button', { name: /Go to end of lane/ }).first().click()
+  expect(await takeSounds()).toEqual(['tick-single.mp3'])
+})
+
+test('merge choices, branch deletion and changing rooms play their assigned sounds', async ({ page }) => {
+  await page.addInitScript(() => {
+    window.recordedSounds = []
+    window.Audio = class {
+      constructor(url) { this.url = url; this.volume = 1 }
+      play() { window.recordedSounds.push(this.url.split('/').pop()); return Promise.resolve() }
+    }
+  })
+  const room = await openRoom(page)
+  await addEntries(page, ['First'])
+  const first = (await state(page, room)).activeId
+  await addEntries(page, ['Second'])
+  const second = (await state(page, room)).activeId
+  const takeSounds = () => page.evaluate(() => window.recordedSounds.splice(0))
+  await takeSounds()
+  await page.keyboard.press('4')
+  await page.keyboard.press('Shift+m')
+  await page.locator(`.version-card[data-version="${first}"]`).click()
+  const row = page.locator('.merge-view-row').first()
+  await row.getByRole('button', { name: 'Omit' }).click()
+  await row.getByRole('button', { name: 'Pick' }).click()
+  expect(await takeSounds()).toEqual(['click-with-big-reverb-28848-01.mp3', 'bing-298405.mp3'])
+  await page.getByRole('button', { name: 'Abort and close' }).click()
+  await page.keyboard.press('1')
+  page.once('dialog', (dialog) => dialog.accept())
+  await page.locator(`.version-card[data-version="${second}"] .card-menu`).click()
+  await page.getByRole('button', { name: 'Delete version and descendants' }).click()
+  expect(await takeSounds()).toEqual(['droplets-in-a-cave-6785-01.mp3'])
+  await page.getByRole('button', { name: 'Change Room', exact: true }).click()
+  await page.getByPlaceholder('Room name', { exact: true }).fill(`new-${randomUUID()}`)
+  await page.getByRole('button', { name: 'Create room' }).click()
+  await expect.poll(async () => (await takeSounds())).toEqual(['intro-sound-2-269294.mp3'])
+})
+
+test('opening an invite for an existing room plays the joining sound', async ({ browser }) => {
+  const hostContext = await browser.newContext()
+  const guestContext = await browser.newContext()
+  try {
+    const host = await hostContext.newPage()
+    const room = await openRoom(host)
+    await guestContext.addInitScript(() => {
+      window.recordedSounds = []
+      window.Audio = class {
+        constructor(url) { this.url = url; this.volume = 1 }
+        play() { window.recordedSounds.push(this.url.split('/').pop()); return Promise.resolve() }
+      }
+    })
+    const guest = await guestContext.newPage()
+    await guest.goto(`/?room=${room}`)
+    await expect(guest.getByRole('status').first()).toHaveText('Connected')
+    await expect.poll(() => guest.evaluate(() => window.recordedSounds)).toEqual(['intro-sound-2-269294.mp3'])
+  } finally {
+    await hostContext.close()
+    await guestContext.close()
+  }
 })
 
 test('comparison treemaps zoom, pan and reset without changing source versions', async ({ page }) => {

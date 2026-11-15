@@ -18,11 +18,11 @@ Older merges that unnecessarily used a separate lane are reflowed where safe; th
 
 Use **1**, **2**, **3**, and **4** for focus, neighborhood, fit height, and fit all. Presets adjust to the available canvas. Arrow keys navigate adjacent versions or timelines; **Page Up/Down** select the first or last timeline, and **Home/End** select the first or last version in the active timeline. **Alt+click** sends a ping; the Ping control can also toggle Ping Mode, which **Esc** exits.
 
-Use **+** and **-** to step between the same zoom presets. The collapsed action sidebar provides preset zoom and search buttons. In compare and merge treemaps, **Shift+wheel** zooms, **Shift+drag** pans, and **Shift+A** resets the view.
+Use **+** and **-** to step between the same zoom presets. The action sidebar provides preset zoom and search buttons in both expanded and collapsed states. In compare and merge treemaps, **Shift+wheel** zooms, **Shift+drag** pans, and **Shift+A** resets the view.
 
 The collapsed left sidebar retains Change Room, collaborator navigation, and a compact clickable interaction log. Settings provide a local sound volume and mute control, plus a room-wide branching toggle. When branching is disabled, creating versions from non-tip versions is blocked; merges require both selected versions to be tips. Concurrent edits made before peers receive each other's changes can still produce branches.
 
-Press **Ctrl/⌘+F** outside a text field to search versions by identifier parts, tag title, or tag description. Select a result to activate and focus it. The three most recent submitted or selected queries are stored locally and are not shared. Press **Esc** to close search.
+Press **Ctrl/⌘+F** outside a text field to search across version identifiers, tags, actions, and entry names or descriptions. Use **All** to search every type, or combine individual fields to narrow the results. Select a result to activate and focus its version. The three most recent submitted or selected queries are stored locally and are not shared. Press **Esc** to close search.
 
 Press **Ctrl/⌘+Z** to remove the most recently created version and return to its parent, and **Ctrl/⌘+Y** to restore it. Only one undo/redo step is available; creating another version, switching rooms, or reloading clears redo. Undo and redo synchronize with collaborators, and a version referenced by another version cannot be undone. The expanded action sidebar also provides undo, redo, and search controls.
 

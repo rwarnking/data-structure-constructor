@@ -96,8 +96,11 @@ button.action-sidebar-item:hover:not(:disabled), .action-sidebar-item.selected {
 .volume-control input { min-width: 0; flex: 1; }
 .settings-section .theme-toggle + .theme-toggle { margin-top: 5px; }
 .search-scrim { z-index: 40; }
-.version-search { width: min(580px, calc(100vw - 32px)); }
-.version-search-fields { display: flex; align-items: center; gap: 7px; margin-top: 14px; }
+.entry-editor.version-search { width: min(580px, calc(100vw - 32px)); max-height: calc(100dvh - 36px); overflow-y: auto; }
+.version-search-fields { display: grid; gap: 7px; margin-top: 14px; }
+.version-search-row { display: grid; grid-template-columns: minmax(110px, 145px) minmax(0, 1fr); align-items: center; gap: 8px; color: var(--theme-text); font-size: 10px; }
+.version-search-number { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.version-search-fields > button { justify-self: end; }
 .version-search-fields input { min-width: 0; width: 100%; padding: 8px; border: 1px solid #dfe6e1; border-radius: 5px; font: 11px var(--mono); }
 .version-search-results { display: grid; gap: 5px; max-height: 45vh; overflow-y: auto; margin-top: 16px; }
 .version-search-results button { display: flex; gap: 10px; align-items: center; padding: 8px; border: 1px solid #dfe6e1; border-radius: 5px; background: transparent; text-align: left; cursor: pointer; }

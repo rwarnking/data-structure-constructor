@@ -3,7 +3,7 @@ import type { Component } from 'vue'
 import { actionIcons as icons } from '../config/icons'
 import { shortcutLabel, type ShortcutAction } from '../config/hotkeys'
 
-type Item = { name: string; icon: Component; action?: ShortcutAction; gesture?: string; testId?: string; expandedOnly?: boolean; collapsedOnly?: boolean }
+type Item = { name: string; icon: Component; action?: ShortcutAction; gesture?: string; testId?: string; expandedOnly?: boolean }
 defineProps<{
   collapsed: boolean
   disabled: (action: ShortcutAction) => boolean
@@ -46,8 +46,8 @@ const groups: { name: string; items: Item[] }[] = [
     { name: 'Pan version', icon: icons.localPan, gesture: 'Shift + drag', expandedOnly: true },
   ] },
   { name: 'Global viewport actions', items: [
-    { name: 'Zoom in preset', icon: icons.zoomIn, action: 'zoomIn', collapsedOnly: true },
-    { name: 'Zoom out preset', icon: icons.zoomOut, action: 'zoomOut', collapsedOnly: true },
+    { name: 'Zoom in preset', icon: icons.zoomIn, action: 'zoomIn' },
+    { name: 'Zoom out preset', icon: icons.zoomOut, action: 'zoomOut' },
     { name: 'Zoom graph', icon: icons.globalZoom, gesture: 'Mouse wheel', expandedOnly: true },
     { name: 'Pan graph', icon: icons.globalPan, gesture: 'Mouse drag', expandedOnly: true },
     { name: 'Focus version', icon: icons.clickFocusVersion, gesture: 'Double-click version', expandedOnly: true },
@@ -80,7 +80,7 @@ const groups: { name: string; items: Item[] }[] = [
     <div class="action-sidebar-list">
       <section v-for="group in groups" :key="group.name" :aria-label="group.name">
         <h2 v-if="!collapsed">{{ group.name }}</h2>
-        <template v-for="item in group.items.filter((item) => collapsed ? !item.expandedOnly : !item.collapsedOnly)" :key="item.name">
+        <template v-for="item in group.items.filter((item) => !collapsed || !item.expandedOnly)" :key="item.name">
           <button v-if="item.action" type="button" class="action-sidebar-item"
             :class="{ selected: selected(item.action) }"
             :data-action="item.testId" :disabled="disabled(item.action)"

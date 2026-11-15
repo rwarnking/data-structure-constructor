@@ -8,7 +8,7 @@ import TileLabel from './TileLabel.vue'
 import { displayVersionId } from '../utils/versions'
 
 const props = defineProps<{ model: UnwrapNestedRefs<ReturnType<typeof useVersionComparison>>; versions: Version[]; sidebarCollapsed: boolean; actionSidebarCollapsed: boolean }>()
-const emit = defineEmits<{ confirm: []; 'entry-click': [] }>()
+const emit = defineEmits<{ confirm: []; 'entry-click': []; pick: []; omit: [] }>()
 const { compareMode, mergeMode, showOverview, compareIds, chooseCompare, closeVersionSelection, resetMerge, mergePreviewTiles, mergeDraggedTiles, mergePreviewViewBox, moveMergeDrag, finishMergeDrag, cancelMergeDrag, mergeDropTarget, startMergeDrag, onMergeTileClick, mergeResult, mergeRows, setMergePicked, onMergeParentChange, mergeParentOptions, differentEntryCount, comparison, showDifferenceColors, comparisonPanels, comparisonViewBox, comparisonGhosts, comparisonSelectedNode, selectComparedNode, comparisonKinds } = toRefs(props.model)
 function versionLabel(id: string) {
   const version = props.versions.find((item) => item.id === id)
@@ -146,9 +146,9 @@ function clickedEntry(event: MouseEvent) { if (event.button === 0 && !event.shif
                   </div>
                   <div class="merge-result-cell">
                     <button type="button" :class="{ selected: !!row.resultEntry }"
-                      @click="setMergePicked(row.id, true)">Pick</button>
+                      @click="setMergePicked(row.id, true); emit('pick')">Pick</button>
                     <button type="button" :class="{ selected: !row.resultEntry }"
-                      @click="setMergePicked(row.id, false)">Omit</button>
+                      @click="setMergePicked(row.id, false); emit('omit')">Omit</button>
                     <select v-if="row.resultEntry" :value="row.resultEntry.parentId ?? ''"
                       :aria-label="`Parent for ${row.resultEntry.node.value} in merged result`"
                       @change="onMergeParentChange(row.id, $event)">

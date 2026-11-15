@@ -249,7 +249,7 @@ export function useVersionHistory(options: {
   }
 
   function pruneVersion(id: string) {
-    if (id === 'v0') return
+    if (id === 'v0') return false
     const removeIds = new Set<string>([id])
     let changed = true
     while (changed) {
@@ -264,12 +264,12 @@ export function useVersionHistory(options: {
     if (versions.value.some((version) => !removeIds.has(version.id)
       && version.mergeSourceId && removeIds.has(version.mergeSourceId))) {
       notify('Cannot prune a version referenced by a merge', true)
-      return
+      return false
     }
     const fallbackId = versions.value.find((version) => version.id === id)?.parentId ?? 'v0'
     const activeRemoved = removeIds.has(state.value.activeId)
     const wasCentered = activeRemoved && isVersionCentered(active.value)
-    if (!window.confirm(`Prune ${removeIds.size} version${removeIds.size === 1 ? '' : 's'} from this branch?`)) return
+    if (!window.confirm(`Prune ${removeIds.size} version${removeIds.size === 1 ? '' : 's'} from this branch?`)) return false
     for (const versionId of removeIds) {
       const timer = mapViewTimers.get(versionId)
       if (timer !== undefined) window.clearTimeout(timer)
@@ -290,6 +290,7 @@ export function useVersionHistory(options: {
     }
     compareIds.value = compareIds.value.filter((versionId) => !removeIds.has(versionId))
     notify('Branch pruned')
+    return true
   }
 
   return { createVersion, confirmMerge, pruneVersion, canUndo, canRedo, undoVersion, redoVersion }
