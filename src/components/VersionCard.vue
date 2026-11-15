@@ -8,7 +8,7 @@ import TileLabel from './TileLabel.vue'
 import { displayVersionId } from '../utils/versions'
 
 const props = defineProps<{ version: Version; model: VersionCardModel }>()
-const { active, compareIds, compareMode, zoom, overNode, invalidNode, hoveredNode, selectedNodes, draggedSubtreeIds, draggedOriginalTile, windowDimensions, clientId, isReadOnly, versionTiles, duplicateValueLinks, displayCardPosition, cardHeight, versionAuthorColor, activeUsersFor, descendantsCount, isPreviewing, previewLabel, versionAction, cardData, mapViewport, mapTransform, tileStrokeColor, tileStrokeWidth, dragOverlayTiles, handleVersionClick, handleVersionDoubleClick, onVersionContext, onVersionMenu, startMapPan, zoomMap, startMapTileGesture, enterTile, moveTileTooltip, leaveTile, onTileClick, onTileDoubleClick, onTileContext } = toRefs(props.model)
+const { active, compareIds, compareMode, zoom, overNode, invalidNode, hoveredNode, selectedNodes, draggedSubtreeIds, draggedOriginalTile, windowDimensions, clientId, isReadOnly, versionTiles, duplicateValueLinks, displayCardPosition, cardHeight, rootLabelOffset, rootLabelX, versionAuthorColor, activeUsersFor, descendantsCount, isPreviewing, previewLabel, versionAction, cardData, mapViewport, mapTransform, tileStrokeColor, tileStrokeWidth, dragOverlayTiles, handleVersionClick, handleVersionDoubleClick, onVersionContext, onVersionMenu, startMapPan, zoomMap, startMapTileGesture, enterTile, moveTileTooltip, leaveTile, onTileClick, onTileDoubleClick, onTileContext } = toRefs(props.model)
 const overlayTiles = computed(() => dragOverlayTiles.value(props.version))
 const overlayIds = computed(() => new Set(overlayTiles.value.map((tile) => tile.id)))
 </script>
@@ -21,13 +21,14 @@ const overlayIds = computed(() => new Set(overlayTiles.value.map((tile) => tile.
       class="version-user-outline" :style="{ borderColor: user.color, inset: `${-2 - index * 3}px` }"></span>
     <div v-if="version.id !== 'v0'" class="version-card-head">
       <span class="branch-mark" :style="{ background: versionColor(version) }"></span>
-      <span class="version-header-id">{{ version.branch }} | {{ displayVersionId(version.id).replace(/^v/, 'V') }} | S{{ version.step }} |</span>
+      <span class="version-header-id" :title="displayVersionId(version)">{{ displayVersionId(version) }}</span>
       <strong class="version-action">{{ version.change }}</strong>
       <span class="version-count">({{ descendantsCount(version.data) }} Entries)</span>
       <button class="card-menu quiet-icon" title="Version actions" @click.stop="onVersionMenu(version, $event)" @dblclick.stop><MoreHorizontal :size="17" /></button>
     </div>
     <div v-if="isPreviewing(version)" class="preview-badge">{{ previewLabel() }}</div>
     <div v-if="isReadOnly" class="overview-map">
+      <div :class="{ 'root-overview-label': version.id === 'v0' }" :style="version.id === 'v0' ? { top: `${rootLabelOffset()}px`, left: `${rootLabelX()}px` } : undefined">
       <div class="overview-action">
         <span class="overview-action-symbol">{{ versionAction(version).symbol }}</span>
         <strong>{{ versionAction(version).label }}</strong>
@@ -36,6 +37,7 @@ const overlayIds = computed(() => new Set(overlayTiles.value.map((tile) => tile.
       <div class="overview-stats">
         <span><b>{{ descendantsCount(version.data) }}</b> entries</span>
         <span><b>{{ version.data.length }}</b> treemaps</span>
+      </div>
       </div>
     </div>
     <div v-else class="mini-map" :class="{ empty: !cardData(version).length, 'root-map': version.id === 'v0' }"
@@ -78,7 +80,7 @@ const overlayIds = computed(() => new Set(overlayTiles.value.map((tile) => tile.
         </svg>
       </template>
       <div v-else class="empty-map" :class="{ 'root-empty': version.id === 'v0' }">
-        <span v-if="version.id === 'v0'" class="empty-set" aria-label="Empty set">∅</span>
+        <span v-if="version.id === 'v0'" class="empty-set" aria-label="Empty set" :style="{ top: `${rootLabelOffset()}px`, left: `${rootLabelX()}px` }">∅</span>
         <template v-else><span class="empty-cross">+</span><span>Empty structure</span></template>
       </div>
     </div>

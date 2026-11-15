@@ -491,6 +491,363 @@ test('double-clicking in comparison selection activates and focuses without sele
   await expect(page.locator(`.version-card[data-version="${second}"]`)).not.toHaveClass(/compared/)
 })
 
+test('multi-selection copy and cut preserve subtrees and create separate destination and source versions', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['Parent', 'Other'])
+  const destination = (await state(page, room)).activeId
+  await contextAction(page, room, 'Parent', 'Add child')
+  await fillEntries(page, ['Child'])
+  const source = (await state(page, room)).activeId
+  await focusActive(page)
+  await page.keyboard.press('Control+a')
+  await expect(page.locator('.version-card.active .tree-tile.is-selected')).toHaveCount(3)
+  await page.keyboard.press('Control+c')
+  await page.keyboard.press('Control+v')
+  await expect.poll(async () => (await activeData(page, room)).filter((item) => item.value === 'Parent').length).toBe(2)
+  let saved = await state(page, room)
+  expect(saved.copyLinks.filter((link) => link.sourceVersionId === source)).toHaveLength(2)
+  expect((await activeData(page, room)).filter((item) => item.value === 'Parent').every((item) => item.children[0]?.value === 'Child')).toBe(true)
+
+  await page.keyboard.press('ArrowLeft')
+  await expect.poll(async () => (await state(page, room)).activeId).toBe(source)
+  await page.keyboard.press('Control+a')
+  await page.keyboard.press('Control+x')
+  const before = (await state(page, room)).versions.length
+  await page.keyboard.press('Control+v')
+  await expect(page.getByText('Choose another version before pasting cut entries')).toBeVisible()
+  expect((await state(page, room)).versions.length).toBe(before)
+  await page.keyboard.press('ArrowLeft')
+  await expect.poll(async () => (await state(page, room)).activeId).toBe(destination)
+  await page.keyboard.press('Control+v')
+  await expect.poll(async () => (await state(page, room)).versions.length).toBe(before + 2)
+  saved = await state(page, room)
+  const pasted = saved.versions.find((item) => item.id === saved.activeId)
+  const removed = saved.versions.find((item) => item.parentId === source && item.change.startsWith('Cut '))
+  expect(pasted.parentId).toBe(destination)
+  expect(pasted.data.filter((item) => item.value === 'Parent')).toHaveLength(2)
+  expect(pasted.data.find((item) => item.value === 'Parent' && item.children.length).children[0].value).toBe('Child')
+  expect(removed.data).toEqual([])
+  expect(saved.versions.find((item) => item.id === source).data).toHaveLength(2)
+  expect(saved.copyLinks.filter((link) => link.targetVersionId === pasted.id)).toHaveLength(2)
+})
+
+test('new shortcuts preserve editable text and focus the active version', async ({ page }) => {
+  const room = await openRoom(page)
+  await page.keyboard.press('Control+n')
+  const input = page.getByPlaceholder('Entry name').first()
+  await expect(input).toBeFocused()
+  await input.fill('Editing text')
+  await page.keyboard.press('Control+a')
+  expect(await input.evaluate((element) => element.value.slice(element.selectionStart, element.selectionEnd))).toBe('Editing text')
+  const prevented = await input.evaluate((element) => !element.dispatchEvent(new KeyboardEvent('keydown', {
+    key: 'n', ctrlKey: true, bubbles: true, cancelable: true,
+  })))
+  expect(prevented).toBe(false)
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await addEntries(page, ['First'])
+  const active = (await state(page, room)).activeId
+  await page.keyboard.press('Shift+a')
+  await page.waitForTimeout(500)
+  await page.keyboard.press('Control+o')
+  await expectCentered(page, active)
+})
+
+test('lane buttons stay attached to the viewport and navigate without changing the active version', async ({ page }) => {
+  const room = await openRoom(page)
+  for (let index = 0; index < 4; index++) await addEntries(page, [`Lane ${index}`])
+  const saved = await state(page, room)
+  const laneVersions = saved.versions.filter((item) => item.id !== 'v0' && item.lane === 0).sort((a, b) => a.step - b.step)
+  const active = saved.activeId
+  await page.keyboard.press('Shift+a')
+  await page.waitForTimeout(500)
+  const left = page.locator('.lane-navigation-left[data-lane="0"]')
+  const right = page.locator('.lane-navigation-right[data-lane="0"]')
+  const before = await left.boundingBox()
+  const canvas = await page.locator('.graph-canvas').boundingBox()
+  expect(before.x).toBeCloseTo(canvas.x, 0)
+  await page.getByRole('button', { name: 'Collapse sidebar' }).click()
+  await expect.poll(async () => Math.abs((await left.boundingBox()).x - (await page.locator('.graph-canvas').boundingBox()).x)).toBeLessThan(1)
+  await page.waitForTimeout(300)
+  await left.click()
+  await expect.poll(async () => {
+    const card = await page.locator(`.version-card[data-version="${laneVersions[0].id}"]`).boundingBox()
+    const viewport = await page.locator('.graph-canvas').boundingBox()
+    return Math.abs(card.x + card.width / 2 - viewport.x - viewport.width / 2)
+  }).toBeLessThan(2)
+  expect((await state(page, room)).activeId).toBe(active)
+  await right.click()
+  await expect.poll(async () => {
+    const card = await page.locator(`.version-card[data-version="${laneVersions.at(-1).id}"]`).boundingBox()
+    const viewport = await page.locator('.graph-canvas').boundingBox()
+    return Math.abs(card.x + card.width / 2 - viewport.x - viewport.width / 2)
+  }).toBeLessThan(2)
+  await page.getByRole('button', { name: 'Zoom in, plus' }).click()
+  const after = await left.boundingBox()
+  expect(after.width).toBeCloseTo(before.width, 1)
+  expect(after.height).toBeGreaterThan(before.height)
+})
+
+test('lane buttons navigate to both endpoints at a densely zoomed-out scale', async ({ page }) => {
+  const room = `test-${randomUUID()}`
+  const versions = [{ id: 'v0', parentId: null, step: 0, lane: 0, branch: 'ROOT', change: 'Empty structure', data: [], createdAt: 0 }]
+  for (let lane = 0; lane < 40; lane++) {
+    for (let step = 1; step <= 6; step++) {
+      versions.push({
+        id: `v${lane}-${step}`, parentId: step === 1 ? 'v0' : `v${lane}-${step - 1}`,
+        step, lane, branch: `B${lane + 1}`, change: `Version ${step}`, data: [], createdAt: lane * 10 + step,
+      })
+    }
+  }
+  await page.addInitScript(({ room, versions }) => {
+    localStorage.setItem(`canopy-room-data-v1-${encodeURIComponent(room)}`, JSON.stringify({
+      versions, activeId: 'v0', nextNode: 1, nextVersion: 241, nextLane: 40, copyLinks: [],
+    }))
+  }, { room, versions })
+  await openRoom(page, room)
+  await page.keyboard.press('Shift+a')
+  await page.waitForTimeout(500)
+  const saved = await state(page, room)
+  const lane = 10
+  const laneVersions = saved.versions.filter((item) => item.id !== 'v0' && item.lane === lane).sort((a, b) => a.step - b.step)
+  const left = page.locator(`.lane-navigation-left[data-lane="${lane}"]`)
+  const right = page.locator(`.lane-navigation-right[data-lane="${lane}"]`)
+  expect((await left.boundingBox()).height).toBeLessThan(28)
+  const world = page.locator('.graph-world')
+  const before = await world.evaluate((element) => new DOMMatrix(getComputedStyle(element).transform).m41)
+  for (const [button, target] of [[right, laneVersions.at(-1)], [left, laneVersions[0]]]) {
+    await button.click()
+    await expect.poll(async () => {
+      const card = await page.locator(`.version-card[data-version="${target.id}"]`).boundingBox()
+      const canvas = await page.locator('.graph-canvas').boundingBox()
+      return Math.abs(card.x + card.width / 2 - canvas.x - canvas.width / 2)
+    }).toBeLessThan(2)
+  }
+  const after = await world.evaluate((element) => new DOMMatrix(getComputedStyle(element).transform).m41)
+  expect(Math.abs(after - before)).toBeGreaterThan(5)
+  expect((await state(page, room)).activeId).toBe(saved.activeId)
+})
+
+test('root covers the visible graph and keeps its label vertically centered while panning and resizing', async ({ page }) => {
+  await openRoom(page)
+  const root = page.locator('.root-version')
+  const label = root.locator('.empty-set')
+  async function checkRoot() {
+    await expect.poll(async () => {
+      const bounds = await root.boundingBox()
+      const canvas = await page.locator('.graph-canvas').boundingBox()
+      const text = await label.boundingBox()
+      return Math.max(bounds.y - canvas.y, canvas.y + canvas.height - bounds.y - bounds.height,
+        Math.abs(text.y + text.height / 2 - canvas.y - canvas.height / 2) - 2)
+    }).toBeLessThan(1)
+  }
+  await checkRoot()
+  await page.getByRole('button', { name: 'Focus active version, F' }).click()
+  await page.waitForTimeout(500)
+  const point = await emptyMapPoint(root.locator('.mini-map'))
+  await page.mouse.move(point.x, point.y)
+  await page.mouse.down()
+  await page.mouse.move(point.x, point.y + 130, { steps: 5 })
+  await page.mouse.up()
+  await checkRoot()
+  await page.keyboard.press('f')
+  await page.waitForTimeout(500)
+  const rootBounds = await root.boundingBox()
+  const canvasBounds = await page.locator('.graph-canvas').boundingBox()
+  const start = { x: rootBounds.x + rootBounds.width * 0.8, y: canvasBounds.y + canvasBounds.height * 0.25 }
+  await page.mouse.move(start.x, start.y)
+  await page.mouse.down()
+  await page.mouse.move(start.x - (rootBounds.x - canvasBounds.x + rootBounds.width * 0.65), start.y, { steps: 10 })
+  await page.mouse.up()
+  await checkRoot()
+  const shifted = await root.boundingBox()
+  const shiftedLabel = await label.boundingBox()
+  const visibleLeft = Math.max(canvasBounds.x, shifted.x)
+  const visibleRight = Math.min(canvasBounds.x + canvasBounds.width, shifted.x + shifted.width)
+  expect(Math.abs(shiftedLabel.x + shiftedLabel.width / 2 - (visibleLeft + visibleRight) / 2)).toBeLessThan(3)
+  await page.setViewportSize({ width: 1200, height: 900 })
+  await checkRoot()
+  await page.getByRole('button', { name: 'Zoom out, minus' }).click()
+  await page.waitForTimeout(500)
+  await checkRoot()
+})
+
+test('dense lane controls follow visible lane bounds and colors without extra columns', async ({ page }) => {
+  const room = `test-${randomUUID()}`
+  const versions = [{ id: 'v0', parentId: null, step: 0, lane: 0, branch: 'ROOT', change: 'Empty structure', data: [], createdAt: 0 }]
+  for (let index = 1; index <= 40; index++) versions.push({
+    id: `v${index}`, parentId: 'v0', step: 1, lane: index - 1, branch: `B${index}`, change: `Branch ${index}`, data: [], createdAt: index,
+  })
+  await page.addInitScript(({ room, versions }) => {
+    localStorage.setItem(`canopy-room-data-v1-${encodeURIComponent(room)}`, JSON.stringify({
+      versions, activeId: 'v0', nextNode: 1, nextVersion: 41, nextLane: 40, copyLinks: [],
+    }))
+  }, { room, versions })
+  await openRoom(page, room)
+  await page.keyboard.press('Shift+a')
+  await expect(page.locator('.root-overview-label')).toBeVisible()
+  await page.waitForTimeout(500)
+  const canvas = await page.locator('.graph-canvas').boundingBox()
+  const label = await page.locator('.root-overview-label').boundingBox()
+  expect(Math.abs(label.y + label.height / 2 - canvas.y - canvas.height / 2)).toBeLessThan(3)
+  async function checkLanes() {
+    const buttons = await page.locator('.lane-navigation').evaluateAll((elements) => elements.map((element) => {
+      const bounds = element.getBoundingClientRect()
+      const canvas = element.closest('.graph-canvas').getBoundingClientRect()
+      const card = document.querySelector(`.version-card[data-version="v${Number(element.dataset.lane) + 1}"]`)
+      const lane = card.getBoundingClientRect()
+      return {
+        left: bounds.left, right: bounds.right, top: bounds.top, bottom: bounds.bottom, width: bounds.width, height: bounds.height,
+        canvasLeft: canvas.left, canvasRight: canvas.right, expectedTop: Math.max(canvas.top, lane.top),
+        expectedBottom: Math.min(canvas.bottom, lane.bottom),
+        partial: lane.top < canvas.top || lane.bottom > canvas.bottom,
+        side: element.classList.contains('lane-navigation-left') ? 'left' : 'right',
+        color: getComputedStyle(element).backgroundColor,
+        laneColor: getComputedStyle(card.querySelector('.branch-mark')).backgroundColor,
+      }
+    }))
+    for (const button of buttons) {
+      expect(button.width).toBeCloseTo(28, 1)
+      expect(button.side === 'left' ? button.left - button.canvasLeft : button.right - button.canvasRight).toBeCloseTo(0, 1)
+      expect(button.top - button.expectedTop).toBeCloseTo(0, 0)
+      expect(button.bottom - button.expectedBottom).toBeCloseTo(0, 0)
+      expect(button.color).toBe(button.laneColor)
+    }
+    return buttons
+  }
+  const fitted = await checkLanes()
+  expect(fitted).toHaveLength(80)
+  expect(fitted.some((button) => button.height < 28)).toBe(true)
+  let partial = []
+  for (let attempt = 0; attempt < 6 && !partial.some((button) => button.partial); attempt++) {
+    await page.locator('.graph-canvas').dispatchEvent('wheel', { deltaY: -180, bubbles: true, cancelable: true })
+    await page.waitForTimeout(100)
+    partial = await checkLanes()
+  }
+  expect(partial.some((button) => button.partial)).toBe(true)
+})
+
+test('version numbers are shown consistently and remain stable on reload', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['One'])
+  await addEntries(page, ['Two'])
+  const saved = await state(page, room)
+  const labels = await page.locator('.version-card:not(.root-version) .version-header-id').allTextContents()
+  expect(labels).toHaveLength(2)
+  expect(new Set(labels).size).toBe(2)
+  expect(labels.every((label) => /^\d{2,}\.\d{2,}\.\d{3,}$/.test(label))).toBe(true)
+  const currentLabel = await page.locator('.version-card.active .version-header-id').innerText()
+  await expect(page.locator('.active-version-card')).toContainText(currentLabel)
+  expect(saved.versions[2].number.step).toBe(saved.versions[1].number.step + 1)
+  expect(saved.versions[1].number.subbranch).toBe(1)
+  expect(saved.versions[2].number.subbranch).toBe(1)
+  expect(saved.versions[2].number.origin).toBe(saved.versions[1].number.origin)
+  expect(await page.locator('.version-card.active .version-header-id').evaluate((element) =>
+    element.scrollWidth <= element.clientWidth && element.scrollHeight <= element.parentElement.clientHeight)).toBe(true)
+  await page.reload()
+  await expect(page.locator('.version-card.active .version-header-id')).toHaveText(currentLabel)
+  await addEntries(page, ['After reload'])
+  const continued = await state(page, room)
+  const next = continued.versions.find((item) => item.id === continued.activeId)
+  expect(next.number.subbranch).toBe(1)
+  expect(next.number.origin).not.toBe(saved.versions[2].number.origin)
+})
+
+test('a pruned continuation does not cause its displayed version number to be reused', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['Parent'])
+  const parent = (await state(page, room)).activeId
+  await addEntries(page, ['Discarded'])
+  let saved = await state(page, room)
+  const before = saved.versions.find((item) => item.id === saved.activeId)
+  const label = await page.locator('.version-card.active .version-header-id').innerText()
+  await focusActive(page)
+  await page.locator('.version-card.active .version-card-head').click({ button: 'right' })
+  page.once('dialog', (dialog) => dialog.accept())
+  await page.getByRole('button', { name: 'Delete version and descendants' }).click()
+  await expect.poll(async () => (await state(page, room)).activeId).toBe(parent)
+  await addEntries(page, ['Replacement'])
+  saved = await state(page, room)
+  const replacement = saved.versions.find((item) => item.id === saved.activeId)
+  expect(replacement.number.origin).not.toBe(before.number.origin)
+  expect(replacement.number.subbranch).toBe(before.number.subbranch)
+  await expect(page.locator('.version-card.active .version-header-id')).not.toHaveText(label)
+  await expect(page.locator('.version-card.active .version-header-id')).toHaveText(`${label}.1`)
+  await page.reload()
+  await expect(page.locator('.version-card.active .version-header-id')).toHaveText(`${label}.1`)
+})
+
+test('retired numbers synchronize to connected and newly joined peers', async ({ page, browser }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['Parent'])
+  const parent = (await state(page, room)).activeId
+  await addEntries(page, ['Discarded'])
+  const discarded = (await state(page, room)).activeId
+  const oldLabel = await page.locator('.version-card.active .version-header-id').innerText()
+  const contexts = await Promise.all([browser.newContext(), browser.newContext()])
+  try {
+    const guest = await contexts[0].newPage()
+    await guest.goto(`/?room=${room}`)
+    await expect(guest.getByRole('status').first()).toHaveText('Connected', { timeout: 20000 })
+    await expect.poll(async () => (await state(guest, room)).versions.some((item) => item.id === discarded)).toBe(true)
+    await focusActive(page)
+    await page.locator('.version-card.active .version-card-head').click({ button: 'right' })
+    page.once('dialog', (dialog) => dialog.accept())
+    await page.getByRole('button', { name: 'Delete version and descendants' }).click()
+    await expect.poll(async () => (await state(guest, room)).retiredVersionNumbers?.some((item) => item.id === discarded)).toBe(true)
+    await expect.poll(async () => (await state(page, room)).activeId).toBe(parent)
+    await addEntries(page, ['Replacement'])
+    const replacement = (await state(page, room)).activeId
+    await expect(page.locator('.version-card.active .version-header-id')).toHaveText(`${oldLabel}.1`)
+    await expect.poll(async () => (await state(guest, room)).versions.find((item) => item.id === replacement)?.numberSuffix).toBe(1)
+    const laterGuest = await contexts[1].newPage()
+    await laterGuest.goto(`/?room=${room}`)
+    await expect(laterGuest.getByRole('status').first()).toHaveText('Connected', { timeout: 20000 })
+    await expect.poll(async () => (await state(laterGuest, room)).versions.find((item) => item.id === replacement)?.numberSuffix).toBe(1)
+    expect((await state(laterGuest, room)).retiredVersionNumbers.some((item) => item.id === discarded)).toBe(true)
+  } finally {
+    await Promise.all(contexts.map((context) => context.close()))
+  }
+})
+
+test('existing room numbering migrates once and synchronizes to peers', async ({ page, browser }) => {
+  const room = `test-${randomUUID()}`
+  const base = (id, parentId, step, branch, number) => ({
+    id, parentId, step, lane: 0, branch, number, change: id, data: [], createdAt: step,
+  })
+  const old = (step, subbranch, origin, owner) => ({ step, branch: 1, subbranch, origin, owner })
+  const versions = [
+    base('v0', null, 0, 'ROOT'),
+    base('v1', 'v0', 1, 'B1', old(1, 0, 'v1', 'a')),
+    base('v2', 'v1', 2, 'B1', old(2, 1, 'v2', 'b')),
+    base('v3', 'v1', 2, 'B1.1', old(2, 2, 'v3', 'a')),
+  ]
+  await page.addInitScript(({ room, versions }) => {
+    const key = `canopy-room-data-v1-${encodeURIComponent(room)}`
+    if (!localStorage.getItem(key)) localStorage.setItem(key, JSON.stringify({
+      versions, activeId: 'v2', nextNode: 1, nextVersion: 4, nextLane: 2, copyLinks: [],
+    }))
+  }, { room, versions })
+  await openRoom(page, room)
+  const migrated = (await state(page, room)).versions.filter((item) => item.id !== 'v0')
+    .map(({ id, number }) => [id, number]).sort()
+  expect(migrated.map(([, number]) => number.subbranch)).toEqual([1, 1, 2])
+  expect(migrated.every(([, number]) => number.scheme === 2)).toBe(true)
+  await expect(page.locator('.version-card[data-version="v2"] .version-header-id')).toHaveText('02.01.001')
+  await page.reload()
+  expect((await state(page, room)).versions.filter((item) => item.id !== 'v0')
+    .map(({ id, number }) => [id, number]).sort()).toEqual(migrated)
+  const context = await browser.newContext()
+  try {
+    const guest = await context.newPage()
+    await guest.goto(`/?room=${room}`)
+    await expect(guest.getByRole('status').first()).toHaveText('Connected', { timeout: 20000 })
+    await expect.poll(async () => (await state(guest, room)).versions.filter((item) => item.id !== 'v0')
+      .map(({ id, number }) => [id, number]).sort()).toEqual(migrated)
+  } finally {
+    await context.close()
+  }
+})
+
 test('creator indicator tracks the card header and long entry labels wrap within the tile', async ({ page }) => {
   const room = await openRoom(page)
   const label = 'A long entry label that should wrap inside its available area'
@@ -566,6 +923,60 @@ test('peers follow new children only when viewing their parent', async ({ browse
   } finally {
     await hostContext.close()
     await guestContext.close()
+  }
+})
+
+test('simultaneous peer edits keep distinct stable version numbers', async ({ browser }) => {
+  const contexts = await Promise.all([browser.newContext(), browser.newContext()])
+  for (const context of contexts) {
+    await context.addInitScript(() => {
+      const send = RTCDataChannel.prototype.send
+      const pending = []
+      RTCDataChannel.prototype.send = function (data) {
+        if (window.holdPeerMessages) pending.push([this, data])
+        else send.call(this, data)
+      }
+      window.releasePeerMessages = () => {
+        window.holdPeerMessages = false
+        for (const [channel, data] of pending.splice(0)) send.call(channel, data)
+      }
+    })
+  }
+  const [host, guest] = await Promise.all(contexts.map((context) => context.newPage()))
+  try {
+    const room = await openRoom(host)
+    await guest.goto(`/?room=${room}`)
+    await expect(guest.getByRole('status').first()).toHaveText('Connected', { timeout: 20000 })
+    await addEntries(host, ['Base'])
+    await expect.poll(async () => (await state(guest, room)).activeId).toBe((await state(host, room)).activeId)
+    const parent = (await state(host, room)).activeId
+    for (const [page, label] of [[host, 'Concurrent host'], [guest, 'Concurrent guest']]) {
+      await page.getByRole('button', { name: 'New free entry, N' }).click()
+      await page.getByPlaceholder('Entry name').fill(label)
+      await page.evaluate(() => { window.holdPeerMessages = true })
+    }
+    await Promise.all([host, guest].map((page) => page.getByRole('button', { name: 'Add 1 entry' }).click()))
+    for (const page of [host, guest]) await page.evaluate(() => window.releasePeerMessages())
+    await expect.poll(async () => (await state(host, room)).versions.filter((item) => item.parentId === parent).length, { timeout: 20000 }).toBe(2)
+    await expect.poll(async () => (await state(guest, room)).versions.filter((item) => item.parentId === parent).length, { timeout: 20000 }).toBe(2)
+    const hostChildren = (await state(host, room)).versions.filter((item) => item.parentId === parent)
+    const guestChildren = (await state(guest, room)).versions.filter((item) => item.parentId === parent)
+    expect(new Set(hostChildren.map((item) => item.number.origin)).size).toBe(2)
+    expect(hostChildren.map((item) => item.number.subbranch)).toEqual([1, 1])
+    expect(hostChildren.map((item) => [item.id, item.number]).sort()).toEqual(guestChildren.map((item) => [item.id, item.number]).sort())
+    await host.keyboard.press('Shift+a')
+    await guest.keyboard.press('Shift+a')
+    const labels = await host.locator('.version-card:not(.root-version) .version-header-id').allTextContents()
+    expect(new Set(labels).size).toBe(labels.length)
+    const labelsByVersion = async (page) => page.locator('.version-card:not(.root-version)').evaluateAll((cards) =>
+      Object.fromEntries(cards.map((card) => [card.dataset.version, card.querySelector('.version-header-id').textContent])))
+    await expect.poll(async () => labelsByVersion(guest)).toEqual(await labelsByVersion(host))
+    const childLabels = hostChildren.map((item) => item.id)
+    const displayed = await labelsByVersion(host)
+    const pair = childLabels.map((id) => displayed[id]).sort()
+    expect(pair[1]).toBe(`${pair[0]}.1`)
+  } finally {
+    await Promise.all(contexts.map((context) => context.close()))
   }
 })
 

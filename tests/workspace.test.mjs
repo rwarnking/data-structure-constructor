@@ -15,7 +15,7 @@ after(() => vite.close())
 
 const { useHierarchyEditor } = await vite.ssrLoadModule('/src/composables/useHierarchyEditor.ts')
 const { useVersionComparison } = await vite.ssrLoadModule('/src/composables/useVersionComparison.ts')
-const { reflowVersionLayout } = await vite.ssrLoadModule('/src/utils/versions.ts')
+const { reflowVersionLayout, allocateVersionNumber, assignMissingVersionNumbers, assignVersionSuffixes, displayVersionId, retireVersionNumbers } = await vite.ssrLoadModule('/src/utils/versions.ts')
 const { layoutTileLabel, tilesForForest, tilesFor } = await vite.ssrLoadModule('/src/utils/treemap.ts')
 const { useGraphCamera } = await vite.ssrLoadModule('/src/composables/useGraphCamera.ts')
 
@@ -114,6 +114,104 @@ test('merge reflow compacts unused lanes and remains stable on subsequent reflow
   const firstLayout = state.versions.map(({ id, lane }) => [id, lane])
   reflowVersionLayout(state)
   assert.deepEqual(state.versions.map(({ id, lane }) => [id, lane]), firstLayout)
+})
+
+test('version numbering remains unique and stable across forks, concurrent writers, merges and reflow', () => {
+  const root = version('v0', [])
+  const graph = [root]
+  function add(id, parent, owner, newBranch = false, mergeSource) {
+    const item = { ...version(id, [], parent.id, Math.max(parent.step, mergeSource?.step ?? 0) + 1),
+      branch: newBranch ? `${parent.branch}.${id}` : parent.branch, ...(mergeSource ? { mergeSourceId: mergeSource.id } : {}) }
+    item.number = allocateVersionNumber(graph, parent, id, owner, newBranch)
+    graph.push(item)
+    return item
+  }
+  const a = add('v1-aaaaaaaaaaaa', root, 'writer-a')
+  const a2 = add('v2-aaaaaaaaaaaa', a, 'writer-a')
+  const fork = add('v3-aaaaaaaaaaaa', a, 'writer-a', true)
+  const fork2 = add('v4-aaaaaaaaaaaa', fork, 'writer-a')
+  const nested = add('v5-aaaaaaaaaaaa', fork, 'writer-a', true)
+  const otherFork = add('v6-aaaaaaaaaaaa', a, 'writer-a', true)
+  const merge = add('v7-aaaaaaaaaaaa', a2, 'writer-a', false, fork2)
+  const laterFork = add('v8-aaaaaaaaaaaa', a2, 'writer-a', true, nested)
+  const concurrentA = { ...version('v9-aaaaaaaaaaaa', [], merge.id, merge.step + 1), branch: merge.branch }
+  const concurrentB = { ...version('v9-bbbbbbbbbbbb', [], merge.id, merge.step + 1), branch: merge.branch }
+  concurrentA.number = allocateVersionNumber(graph, merge, concurrentA.id, 'writer-a', false)
+  concurrentB.number = allocateVersionNumber(graph, merge, concurrentB.id, 'writer-b', false)
+  graph.push(concurrentA, concurrentB)
+  assert.equal(a2.number.step, a.number.step + 1)
+  assert.equal(a.number.subbranch, 1)
+  assert.equal(a2.number.subbranch, 1)
+  assert.equal(fork.number.subbranch, 2)
+  assert.equal(fork2.number.subbranch, 2)
+  assert.equal(nested.number.subbranch, 3)
+  assert.equal(otherFork.number.subbranch, 4)
+  assert.equal(merge.number.subbranch, 1)
+  assert.equal(concurrentB.number.subbranch, merge.number.subbranch)
+  assert.equal(fork2.number.step, fork.number.step + 1)
+  assert.equal(merge.number.step, a2.number.step + 1)
+  assert.notEqual(fork.number.origin, otherFork.number.origin)
+  assert.notEqual(concurrentA.number.origin, concurrentB.number.origin)
+  assert.ok(laterFork.number.step > 0)
+  assignVersionSuffixes(graph)
+  const before = graph.map((item) => [item.id, displayVersionId(item)])
+  assert.equal(new Set(before.map(([, label]) => label)).size, graph.length)
+  assert.ok(before.every(([, label]) => /^\d{2,}\.\d{2,}\.\d{3,}(?:\.\d+)?$/.test(label)))
+  reflowVersionLayout({ versions: graph, activeId: merge.id, nextNode: 1, nextVersion: 10, nextLane: 1, copyLinks: [] })
+  assert.deepEqual(new Map(graph.map((item) => [item.id, displayVersionId(item)])), new Map(before))
+  const saved = structuredClone(graph)
+  assignMissingVersionNumbers(saved)
+  assert.deepEqual(new Map(saved.map((item) => [item.id, displayVersionId(item)])), new Map(before))
+
+  const legacy = [version('v0', []), { ...version('v1-aaaaaaaaaaaa', [], 'v0', 1), branch: 'B1', createdBy: 'aaaaaaaaaaaa' },
+    { ...version('v2-aaaaaaaaaaaa', [], 'v1-aaaaaaaaaaaa', 2), branch: 'B1', createdBy: 'aaaaaaaaaaaa' }]
+  assignMissingVersionNumbers(legacy)
+  assert.equal(legacy[2].number.step, legacy[1].number.step + 1)
+  assert.equal(legacy[2].number.origin, legacy[1].number.origin)
+})
+
+test('colliding numbers receive deterministic short suffixes and retired numbers stay reserved', () => {
+  const number = { step: 2, branch: 1, subbranch: 1, origin: 'first', owner: 'writer', scheme: 2 }
+  const first = { ...version('v1', [], 'v0', 2), createdAt: 1, number }
+  const second = { ...version('v2', [], 'v0', 2), createdAt: 2, number: { ...number, origin: 'second' } }
+  const third = { ...version('v3', [], 'v0', 2), createdAt: 3, number: { ...number, origin: 'third' } }
+  const graph = [third, first, second]
+  assignVersionSuffixes(graph)
+  assert.deepEqual([first, second, third].map(displayVersionId), ['02.01.001', '02.01.001.1', '02.01.001.2'])
+  const state = { versions: graph, activeId: first.id, nextNode: 1, nextVersion: 4, nextLane: 1, copyLinks: [] }
+  retireVersionNumbers(state, [second])
+  state.versions = [first, third]
+  assignVersionSuffixes(state.versions, state.retiredVersionNumbers)
+  assert.deepEqual([first, third].map(displayVersionId), ['02.01.001', '02.01.001.2'])
+  retireVersionNumbers(state, [first])
+  state.versions = [third]
+  assignVersionSuffixes(state.versions, state.retiredVersionNumbers)
+  assert.equal(displayVersionId(third), '02.01.001.2')
+  const replacement = { ...version('v4', [], 'v0', 2), createdAt: 4, number: { ...number, origin: 'replacement' } }
+  assignVersionSuffixes([replacement, third], state.retiredVersionNumbers)
+  assert.equal(displayVersionId(replacement), '02.01.001.3')
+  assert.equal(displayVersionId(third), '02.01.001.2')
+  const peer = structuredClone([replacement, third])
+  assignVersionSuffixes(peer.reverse(), [...state.retiredVersionNumbers].reverse())
+  assert.deepEqual(new Map(peer.map((item) => [item.id, displayVersionId(item)])),
+    new Map([third, replacement].map((item) => [item.id, displayVersionId(item)])))
+})
+
+test('legacy numbering migrates session changes without treating them as forks', () => {
+  const root = version('v0', [])
+  const oldNumber = (step, subbranch, origin, owner) => ({ step, branch: 3, subbranch, origin, owner })
+  const first = { ...version('v1', [], 'v0', 1), branch: 'B3', number: oldNumber(1, 0, 'v1', 'a') }
+  const second = { ...version('v2', [], 'v1', 2), branch: 'B3', number: oldNumber(2, 1, 'v2', 'b') }
+  const fork = { ...version('v3', [], 'v1', 2), branch: 'B3.1', number: oldNumber(2, 2, 'v3', 'a') }
+  const nested = { ...version('v4', [], 'v3', 3), branch: 'B3.1.1', number: oldNumber(3, 3, 'v4', 'a') }
+  const graph = [root, first, second, fork, nested]
+  assignMissingVersionNumbers(graph)
+  assert.deepEqual(graph.slice(1).map((item) => item.number.subbranch), [1, 1, 2, 3])
+  assert.deepEqual(graph.slice(1).map((item) => item.number.branch), [3, 3, 3, 3])
+  assert.deepEqual(graph.slice(1).map((item) => item.number.origin), ['v1', 'v2', 'v3', 'v4'])
+  const migrated = structuredClone(graph)
+  assignMissingVersionNumbers(graph)
+  assert.deepEqual(graph, migrated)
 })
 
 test('entry labels wrap within the available size, including long unbroken words', () => {

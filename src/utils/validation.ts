@@ -1,4 +1,4 @@
-import type { CollaborationMetadata, CopyLink, Revision, StoredState, TreeNode, Version } from '../types/workspace'
+import type { CollaborationMetadata, CopyLink, RetiredVersionNumber, Revision, StoredState, TreeNode, Version, VersionNumber } from '../types/workspace'
 
 export function isRevision(value: unknown): value is Revision {
   if (!value || typeof value !== 'object') return false
@@ -26,6 +26,26 @@ function isTreeNode(value: unknown): value is TreeNode {
   return true
 }
 
+function isVersionNumber(value: unknown): value is VersionNumber {
+  return isRecord(value)
+    && typeof value.step === 'number' && Number.isSafeInteger(value.step) && value.step >= 1
+    && typeof value.branch === 'number' && Number.isSafeInteger(value.branch) && value.branch >= 1
+    && typeof value.subbranch === 'number' && Number.isSafeInteger(value.subbranch) && value.subbranch >= 0
+    && typeof value.origin === 'string' && !!value.origin
+    && typeof value.owner === 'string' && !!value.owner
+    && (value.scheme === undefined || value.scheme === 2)
+}
+
+function isSuffix(value: unknown) {
+  return value === undefined || (typeof value === 'number' && Number.isSafeInteger(value) && value > 0)
+}
+
+export function isRetiredVersionNumber(value: unknown): value is RetiredVersionNumber {
+  return isRecord(value) && typeof value.id === 'string' && !!value.id
+    && isVersionNumber(value.number) && typeof value.createdAt === 'number' && Number.isFinite(value.createdAt)
+    && isSuffix(value.suffix)
+}
+
 export function isVersion(value: unknown): value is Version {
   if (!isRecord(value) || typeof value.id !== 'string'
     || !(typeof value.parentId === 'string' || value.parentId === null)
@@ -38,6 +58,7 @@ export function isVersion(value: unknown): value is Version {
   if (value.positions !== undefined
     && (!isRecord(value.positions) || !Object.values(value.positions).every((position) =>
       isRecord(position) && Number.isFinite(position.x) && Number.isFinite(position.y)))) return false
+  if ((value.number !== undefined && !isVersionNumber(value.number)) || !isSuffix(value.numberSuffix)) return false
   return true
 }
 
@@ -65,14 +86,23 @@ export function isStoredState(value: unknown): value is StoredState {
   if (!isRecord(value) || !Array.isArray(value.versions) || !value.versions.every(isVersion)
     || typeof value.activeId !== 'string' || !Number.isInteger(value.nextNode)
     || !Number.isInteger(value.nextVersion) || !Number.isInteger(value.nextLane)
-    || !Array.isArray(value.copyLinks) || !value.copyLinks.every(isCopyLink)) return false
+    || !Array.isArray(value.copyLinks) || !value.copyLinks.every(isCopyLink)
+    || (value.retiredVersionNumbers !== undefined && (!Array.isArray(value.retiredVersionNumbers)
+      || !value.retiredVersionNumbers.every(isRetiredVersionNumber)
+      || new Set(value.retiredVersionNumbers.map((item) => JSON.stringify([item.id, item.suffix ?? 0]))).size !== value.retiredVersionNumbers.length))) return false
   const versions = value.versions
   const byId = new Map(versions.map((version) => [version.id, version]))
   if (byId.size !== versions.length || !byId.has('v0') || !byId.has(value.activeId)) return false
   const root = byId.get('v0')!
   if (root.parentId !== null || root.step !== 0) return false
+  const numbers = new Set<string>()
   for (const version of versions) {
     if (version.id === 'v0') continue
+    if (version.number) {
+      const key = JSON.stringify([version.number.origin, version.number.step])
+      if (numbers.has(key)) return false
+      numbers.add(key)
+    }
     const parent = version.parentId ? byId.get(version.parentId) : undefined
     const mergeSource = version.mergeSourceId ? byId.get(version.mergeSourceId) : undefined
     if (!parent || !hasValidVersionStep(version, parent, mergeSource)) return false

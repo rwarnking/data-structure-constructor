@@ -18,6 +18,8 @@ export type VersionCardModel = {
   duplicateValueLinks: Map<string, { id: string; path: string }[]>
   displayCardPosition: (version: Version) => { x: number; y: number }
   cardHeight: (version: Version) => number
+  rootLabelOffset: () => number
+  rootLabelX: () => number
   versionAuthorColor: (version: Version) => string
   activeUsersFor: (id: string) => { id: string; color: string }[]
   descendantsCount: (nodes: TreeNode[]) => number

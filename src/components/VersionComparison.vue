@@ -2,12 +2,17 @@
 import { toRefs, type UnwrapNestedRefs } from 'vue'
 import { Check, RotateCcw, Search, X } from '@lucide/vue'
 import type { useVersionComparison } from '../composables/useVersionComparison'
+import type { Version } from '../types/workspace'
 import TileLabel from './TileLabel.vue'
 import { displayVersionId } from '../utils/versions'
 
-const props = defineProps<{ model: UnwrapNestedRefs<ReturnType<typeof useVersionComparison>> }>()
+const props = defineProps<{ model: UnwrapNestedRefs<ReturnType<typeof useVersionComparison>>; versions: Version[] }>()
 const emit = defineEmits<{ confirm: [] }>()
 const { compareMode, mergeMode, showOverview, compareIds, closeVersionSelection, resetMerge, mergePreviewTiles, mergePreviewViewBox, moveMergeDrag, finishMergeDrag, cancelMergeDrag, mergeDropTarget, startMergeDrag, onMergeTileClick, mergeResult, mergeRows, setMergePicked, onMergeParentChange, mergeParentOptions, differentEntryCount, comparison, showDifferenceColors, comparisonPanels, comparisonViewBox, comparisonGhosts, comparisonSelectedNode, selectComparedNode, comparisonKinds } = toRefs(props.model)
+function versionLabel(id: string) {
+  const version = props.versions.find((item) => item.id === id)
+  return version ? displayVersionId(version) : id
+}
 </script>
 
 <template>
@@ -23,7 +28,7 @@ const { compareMode, mergeMode, showOverview, compareIds, closeVersionSelection,
       <div>
         <span class="section-label">{{ mergeMode ? 'BRANCH MERGE' : 'VERSION COMPARISON' }}</span>
         <strong>{{ compareIds.length === 2
-          ? `${displayVersionId(compareIds[0]!)} ${mergeMode ? '→' : '↔'} ${displayVersionId(compareIds[1]!)}`
+          ? `${versionLabel(compareIds[0]!)} ${mergeMode ? '→' : '↔'} ${versionLabel(compareIds[1]!)}`
           : mergeMode ? 'Choose source, then target' : 'Choose two versions' }}</strong>
         </div>
       <button class="quiet-icon" title="Close comparison" aria-label="Abort and close" @click="closeVersionSelection"><X :size="17" /></button>
@@ -52,9 +57,9 @@ const { compareMode, mergeMode, showOverview, compareIds, closeVersionSelection,
             <section class="merge-entry-list">
               <header><strong>Entry selection</strong><span>Pick entries and choose their result parent</span></header>
               <div class="merge-list-head">
-                <strong>{{ mergeResult?.source.branch }} source</strong>
+                <strong>{{ mergeResult && displayVersionId(mergeResult.source) }} source</strong>
                 <strong>Result</strong>
-                <strong>{{ mergeResult?.target.branch }} target</strong>
+                <strong>{{ mergeResult && displayVersionId(mergeResult.target) }} target</strong>
               </div>
               <div class="merge-list-body">
                 <div v-for="row in mergeRows" :key="row.id" class="merge-view-row"
@@ -117,7 +122,7 @@ const { compareMode, mergeMode, showOverview, compareIds, closeVersionSelection,
           </div>
           <div class="comparison-panels">
             <section v-for="(panel, panelIndex) in comparisonPanels" :key="panel.id" class="comparison-panel">
-              <header><span>{{ panel.label }}</span><strong>{{ panel.version.branch }} · S{{ panel.version.step }}</strong></header>
+              <header><span>{{ panel.label }}</span><strong>{{ displayVersionId(panel.version) }}</strong></header>
               <svg :viewBox="comparisonViewBox" role="img" :aria-label="`${panel.label} treemap comparison`">
                 <rect v-for="ghost in comparisonGhosts(panelIndex)" :key="`ghost-${ghost.id}`"
                   :x="ghost.x" :y="ghost.y" :width="ghost.width" :height="ghost.height"

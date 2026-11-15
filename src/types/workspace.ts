@@ -13,6 +13,8 @@ export type SpatialPreview = {
   view: MapView
 }
 export type CopyLink = { sourceVersionId: string; sourceNodeId: string; targetVersionId: string; targetNodeId: string }
+export type VersionNumber = { step: number; branch: number; subbranch: number; origin: string; owner: string; scheme?: 2 }
+export type RetiredVersionNumber = { id: string; number: VersionNumber; createdAt: number; suffix?: number }
 export type Version = {
   id: string
   parentId: string | null
@@ -23,11 +25,13 @@ export type Version = {
   change: string
   data: TreeNode[]
   createdBy?: string
+  number?: VersionNumber
+  numberSuffix?: number
   positions?: Record<string, { x: number; y: number }>
   mapView?: MapView
   createdAt: number
 }
-export type StoredState = { versions: Version[]; activeId: string; nextNode: number; nextVersion: number; nextLane: number; copyLinks: CopyLink[] }
+export type StoredState = { versions: Version[]; activeId: string; nextNode: number; nextVersion: number; nextLane: number; copyLinks: CopyLink[]; retiredVersionNumbers?: RetiredVersionNumber[] }
 export type Revision = { clock: number; actor: string }
 export type CollaborationMetadata = {
   clock: number

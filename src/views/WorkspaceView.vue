@@ -20,15 +20,15 @@ import EntryEditor from '../components/EntryEditor.vue'
 import EntryOperationDialog from '../components/EntryOperationDialog.vue'
 import RoomManager from '../components/RoomManager.vue'
 import type { CopyLink, StoredState, Tile, TreeNode, Version } from '../types/workspace'
-import { countNodes, findNode, findParent, flattenNodes, nodeParentIds } from '../utils/tree'
+import { countNodes, findNode, findParent, flattenNodes, nodeParentIds, removeNode } from '../utils/tree'
 import { compareCopyLinks, displayVersionId, reflowVersionLayout } from '../utils/versions'
 import { CARD_WIDTH, TREE_MAP_HEIGHT, tilesForForest, tileForNode } from '../utils/treemap'
 import {
-  GitBranch, GitCompareArrows, Plus, Maximize, Copy, Trash2,
+  GitBranch, GitCompareArrows, Plus, Maximize, Copy, Trash2, ChevronLeft, ChevronRight,
   Pencil, Unlink, X, Layers3, ClipboardPaste, ZoomIn, ZoomOut, Radio,
 } from '@lucide/vue'
 
-type ClipboardEntry = { sourceVersionId: string; node: TreeNode }
+type ClipboardEntry = { sourceVersionId: string; nodes: TreeNode[]; cut: boolean }
 const CLIENT_ID = getClientId()
 const GRAPH_GAP_X = 300
 const TERMINAL_TAIL_LENGTH = GRAPH_GAP_X
@@ -115,7 +115,7 @@ watch([compareMode, mergeMode], () => {
 
 const graphCamera = useGraphCamera({ versions, active, state, compareIds, draggedVersionId: () => treeDrag.value?.versionId,
   zoom, pan, canvasSize, windowDimensions, suppressClicks: suppressGraphClicks })
-const { cardPosition, cardHeight, displayCardPosition, graphBounds,
+const { cardPosition, cardHeight, rootLabelOffset, rootLabelX, displayCardPosition, graphBounds,
   visibleVersions, visibleConnectionVersions, visibleMergeConnectionVersions, zoomIn, zoomOut, fitGraph,
   startCanvasPan, moveCanvasPan, endCanvasPan, onWheel, focusVersion, focusActive, animateCamera,
   stopGraphAnimations,
@@ -382,12 +382,13 @@ function clipboardStorageKey(room: string) {
 
 function readClipboard(room: string): ClipboardEntry | null {
   try {
-    const stored = JSON.parse(sessionStorage.getItem(clipboardStorageKey(room)) ?? 'null') as ClipboardEntry | TreeNode | null
+    const stored = JSON.parse(sessionStorage.getItem(clipboardStorageKey(room)) ?? 'null') as ClipboardEntry | { sourceVersionId: string; node: TreeNode } | TreeNode | null
     if (!stored) return null
-    if ('node' in stored) return stored
-    return { sourceVersionId: state.value.activeId, node: stored }
+    if ('nodes' in stored) return stored
+    if ('node' in stored) return { sourceVersionId: stored.sourceVersionId, nodes: [stored.node], cut: false }
+    return { sourceVersionId: state.value.activeId, nodes: [stored], cut: false }
   }
-  catch { return null }
+  catch { console.warn(`Could not load clipboard for room "${room}"`); return null }
 }
 function reflowLayout() { reflowVersionLayout(state.value) }
 
@@ -480,6 +481,30 @@ function onCanvasClick(event: MouseEvent) {
 const activeNodes = computed(() => countNodes(active.value.data))
 const branchCount = computed(() => new Set(versions.value.filter((version) => version.id !== 'v0').map((version) => version.branch.split('.')[0])).size)
 const activeChildren = computed(() => versions.value.filter((version) => version.parentId === active.value.id).length)
+const visibleLanes = computed(() => {
+  const lanes = new Map<number, Version[]>()
+  for (const version of versions.value) {
+    if (version.id === 'v0') continue
+    const lane = lanes.get(version.lane) ?? []
+    lane.push(version)
+    lanes.set(version.lane, lane)
+  }
+  return [...lanes].map(([lane, items]) => {
+    items.sort((a, b) => a.step - b.step || a.createdAt - b.createdAt || a.id.localeCompare(b.id))
+    const top = pan.value.y + cardPosition(items[0]!).y * zoom.value
+    const bottom = top + windowDimensions.value.height * zoom.value
+    const visibleTop = Math.max(0, top)
+    const visibleBottom = Math.min(canvasSize.value.height, bottom)
+    return { lane, first: items[0]!, last: items[items.length - 1]!, top: visibleTop, height: visibleBottom - visibleTop }
+  }).filter((lane) => lane.height > 0)
+})
+function navigateLane(version: Version) {
+  const position = cardPosition(version)
+  animateCamera(zoom.value, {
+    x: canvasSize.value.width / 2 - (position.x + windowDimensions.value.width / 2) * zoom.value,
+    y: pan.value.y,
+  })
+}
 
 function connectionPath(version: Version) {
   const parent = version.parentId ? versionsById.value.get(version.parentId) : undefined
@@ -882,7 +907,9 @@ function onKeydown(event: KeyboardEvent) {
     }
     return
   }
-  if ((event.target as HTMLElement).matches('input, textarea, select')) return
+  const target = event.target
+  if (target instanceof Element && (target.closest('input, textarea, select, [role="textbox"]')
+    || target instanceof HTMLElement && target.isContentEditable)) return
   const key = event.key.toLowerCase()
   const modified = event.ctrlKey || event.metaKey
   if (!modified && !event.altKey && !event.shiftKey && key === 'p' && !event.repeat) {
@@ -899,7 +926,7 @@ function onKeydown(event: KeyboardEvent) {
     event.preventDefault()
     navigateVersion(key.slice(5) as 'left' | 'right' | 'up' | 'down')
   }
-  if (!modified && key === 'n') { event.preventDefault(); createFreeEntry() }
+  if (!event.altKey && !event.shiftKey && key === 'n') { event.preventDefault(); createFreeEntry() }
   if (modified && event.key === 'Enter' && selectedNode.value) { event.preventDefault(); addEntry(selectedNode.value) }
   if (!modified && event.shiftKey && key === 'd' && selectedNode.value) { event.preventDefault(); detachEntry(selectedNode.value) }
   if (!modified && event.shiftKey && key === 'c') {
@@ -908,14 +935,19 @@ function onKeydown(event: KeyboardEvent) {
     else startVersionSelection('compare')
   }
   if (!modified && !event.altKey && !event.shiftKey && key === 'f') { event.preventDefault(); focusActive() }
+  if (modified && !event.altKey && !event.shiftKey && key === 'o') { event.preventDefault(); focusActive() }
   if (!modified && event.shiftKey && key === 'a') { event.preventDefault(); fitGraph() }
   if (!modified && (event.key === '+' || event.key === '=')) { event.preventDefault(); zoomIn() }
   if (!modified && event.key === '-') { event.preventDefault(); zoomOut() }
-  if (modified && key === 'c' && selectedNode.value) {
+  if (modified && !event.altKey && !event.shiftKey && key === 'a') {
     event.preventDefault()
-    copyEntry(selectedNode.value)
+    setSelectedNodes([...flattenNodes(active.value.data).keys()])
   }
-  if (modified && key === 'v') {
+  if (modified && !event.altKey && !event.shiftKey && (key === 'c' || key === 'x') && selectedNodes.value.length) {
+    event.preventDefault()
+    copyEntries(selectedNodes.value, key === 'x')
+  }
+  if (modified && !event.altKey && !event.shiftKey && key === 'v') {
     event.preventDefault()
     pasteEntry()
   }
@@ -963,28 +995,68 @@ function addEntryToVersion(versionId?: string) {
   addEntry()
 }
 function copyEntry(nodeId: string) {
-  const node = findNode(active.value.data, nodeId)
-  if (!node) return
-  clipboard.value = { sourceVersionId: active.value.id, node: clone(node) }
+  copyEntries([nodeId], false)
+}
+function copyEntries(nodeIds: string[], cut: boolean) {
+  const flat = flattenNodes(active.value.data)
+  const selected = new Set(nodeIds.filter((id) => flat.has(id)))
+  const nodes = [...flat].filter(([id, item]) => {
+    if (!selected.has(id)) return false
+    let parentId = item.parentId
+    while (parentId) {
+      if (selected.has(parentId)) return false
+      parentId = flat.get(parentId)?.parentId ?? null
+    }
+    return true
+  }).map(([, item]) => clone(item.node))
+  if (!nodes.length) return
+  clipboard.value = { sourceVersionId: active.value.id, nodes, cut }
   sessionStorage.setItem(clipboardStorageKey(currentRoomName.value), JSON.stringify(clipboard.value))
-  logInteraction(`Copied ${node.value}`, { versionId: active.value.id, nodeId, nodeLabel: node.value })
-  notify(`Copied ${node.value}`)
+  const label = nodes.length === 1 ? nodes[0]!.value : `${nodes.length} entry subtrees`
+  logInteraction(`${cut ? 'Cut' : 'Copied'} ${label}`, { versionId: active.value.id, nodeId: nodes[0]!.id, nodeLabel: nodes[0]!.value })
+  notify(`${cut ? 'Cut' : 'Copied'} ${label}`)
 }
 function pasteEntry() {
-  if (isReadOnly.value || !clipboard.value) return
+  if (!clipboard.value) return
+  if (isReadOnly.value) {
+    notify('Zoom in to paste entries')
+    return
+  }
   const copied = clone(clipboard.value)
+  const source = versionsById.value.get(copied.sourceVersionId)
+  if (copied.cut && (!source || copied.nodes.some((node) => !findNode(source.data, node.id)))) {
+    notify('Cannot cut: the source version or entry is no longer available')
+    return
+  }
+  if (copied.cut && source?.id === active.value.id) {
+    notify('Choose another version before pasting cut entries')
+    return
+  }
   const rekey = (node: TreeNode): TreeNode => ({ ...node, id: `n${state.value.nextNode++}-${CLIENT_ID}`, children: node.children.map(rekey) })
-  const newNode = rekey(copied.node)
-  const version = createVersion([...clone(active.value.data), newNode], `Paste ${newNode.value}`, true)
+  const newNodes = copied.nodes.map(rekey)
+  const label = newNodes.length === 1 ? newNodes[0]!.value : `${newNodes.length} entries`
+  const version = createVersion([...clone(active.value.data), ...newNodes], `Paste ${label}`, true)
   if (!version) return
-  const source = versions.value.find((item) => item.id === copied.sourceVersionId)
   if (source) {
-    const targetNode = version.data.find((node) => node.id === newNode.id)
-    if (!targetNode) return
-    state.value.copyLinks = [...state.value.copyLinks, {
-      sourceVersionId: source.id, sourceNodeId: copied.node.id,
-      targetVersionId: version.id, targetNodeId: targetNode.id,
-    }].sort(compareCopyLinks)
+    state.value.copyLinks = [...state.value.copyLinks, ...copied.nodes.map((node, index) => ({
+      sourceVersionId: source.id, sourceNodeId: node.id,
+      targetVersionId: version.id, targetNodeId: newNodes[index]!.id,
+    }))].sort(compareCopyLinks)
+  }
+  if (copied.cut && source) {
+    const sourceData = clone(source.data)
+    for (const node of copied.nodes) removeNode(sourceData, node.id)
+    state.value.activeId = source.id
+    const removal = createVersion(sourceData, `Cut ${label}`, true)
+    if (!removal) {
+      state.value.activeId = version.id
+      notify('Copied entries, but could not create the cut source version')
+      return
+    }
+    state.value.activeId = version.id
+    graphCamera.panToVersion(version, false)
+    clipboard.value = null
+    sessionStorage.removeItem(clipboardStorageKey(currentRoomName.value))
   }
 }
 function pasteEntryToVersion(versionId?: string) {
@@ -1014,6 +1086,8 @@ const cardModel: VersionCardModel = reactive({
   duplicateValueLinks,
   displayCardPosition,
   cardHeight,
+  rootLabelOffset,
+  rootLabelX,
   versionAuthorColor,
   activeUsersFor,
   descendantsCount,
@@ -1076,7 +1150,7 @@ const cardModel: VersionCardModel = reactive({
                 <path :d="path" class="copy-link-hit" fill="none" stroke="transparent"
                   stroke-width="8" vector-effect="non-scaling-stroke" pointer-events="stroke"
                   role="button" tabindex="0"
-                  :aria-label="`Copied entry connection from ${displayVersionId(link.sourceVersionId)} to ${displayVersionId(link.targetVersionId)}. Click to switch versions.`"
+                  :aria-label="`Copied entry connection from ${displayVersionId(versionsById.get(link.sourceVersionId)!)} to ${displayVersionId(versionsById.get(link.targetVersionId)!)}. Click to switch versions.`"
                   @click.stop="activateCopyLink(link, $event)"
                   @keydown.enter.prevent.stop="activateCopyLink(link)"
                   @keydown.space.prevent.stop="activateCopyLink(link)">
@@ -1090,6 +1164,17 @@ const cardModel: VersionCardModel = reactive({
                 :style="{ animationDelay: `${(pulse - 1) * 180}ms` }"></span>
             </span>
           </div>
+
+          <template v-for="lane in visibleLanes" :key="lane.lane">
+            <button type="button" class="lane-navigation lane-navigation-left" :data-lane="lane.lane"
+              :aria-label="`Go to beginning of lane ${lane.lane + 1}`" title="Go to beginning of lane"
+              :style="{ top: `${lane.top}px`, height: `${lane.height}px`, '--lane-color': versionColor(lane.first) }"
+              @pointerdown.stop @click.stop="navigateLane(lane.first)"><ChevronLeft :size="Math.min(18, lane.height)" /></button>
+            <button type="button" class="lane-navigation lane-navigation-right" :data-lane="lane.lane"
+              :aria-label="`Go to end of lane ${lane.lane + 1}`" title="Go to end of lane"
+              :style="{ top: `${lane.top}px`, height: `${lane.height}px`, '--lane-color': versionColor(lane.last) }"
+              @pointerdown.stop @click.stop="navigateLane(lane.last)"><ChevronRight :size="Math.min(18, lane.height)" /></button>
+          </template>
 
           <div class="canvas-controls" @pointerdown.stop @click.stop>
             <div v-if="pingMode" class="ping-mode-banner" role="status">PING MODE · Click to place a ping · Press P or Esc to exit</div>
@@ -1111,7 +1196,7 @@ const cardModel: VersionCardModel = reactive({
       </section>
     </div>
 
-    <VersionComparison :model="comparisonModel" @confirm="confirmMerge" />
+    <VersionComparison :model="comparisonModel" :versions="versions" @confirm="confirmMerge" />
 
     <div v-if="menu" ref="contextMenuElement" class="context-menu" :style="{ left: `${contextMenuPosition.x}px`, top: `${contextMenuPosition.y}px` }" @click.stop>
       <template v-if="menu.kind === 'version'">

@@ -7,12 +7,16 @@ import { userColor, versionColor } from '../utils/colors'
 import { findNode } from '../utils/tree'
 import { displayVersionId } from '../utils/versions'
 
-defineProps<{
+const props = defineProps<{
   sidebarCollapsed: boolean; darkMode: boolean; currentRoomName: string; roomStatus: RoomStatus
   connectedUsers: { id: string; name: string; activeVersionId: string | null }[]
   clientId: string; versions: Version[]; recentInteractions: InteractionEntry[]
   branchCount: number; active: Version; activeNodes: number; activeChildren: number
 }>()
+function versionLabel(id: string) {
+  const version = props.versions.find((item) => item.id === id)
+  return version ? displayVersionId(version) : id
+}
 const emit = defineEmits<{
   'toggle-sidebar': []; 'toggle-theme': []; 'change-room': []; 'copy-invite': []
   'focus-collaborator': [id: string]; 'focus-ping': [location: { x: number; y: number }]
@@ -51,14 +55,14 @@ const emit = defineEmits<{
       <div class="collaborator-list">
         <button v-for="user in connectedUsers" :key="user.id" type="button" class="collaborator"
           :disabled="!user.activeVersionId || !versions.some((version) => version.id === user.activeVersionId)"
-          :title="`${user.name} · ${user.activeVersionId ? displayVersionId(user.activeVersionId) : 'No active version'}`"
+          :title="`${user.name} · ${user.activeVersionId ? versionLabel(user.activeVersionId) : 'No active version'}`"
           @click="emit('focus-collaborator', user.id)">
           <span class="collaborator-avatar" :style="{ '--collaborator-color': userColor(user.id) }" aria-hidden="true">
             <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4" /><path d="M4.5 21a7.5 7.5 0 0 1 15 0" /></svg>
           </span>
           <span class="collaborator-info"><strong>{{ user.name }}<span v-if="user.id === clientId"> (you)</span></strong>
             <small>{{ user.activeVersionId && versions.some((version) => version.id === user.activeVersionId)
-              ? displayVersionId(user.activeVersionId)
+              ? versionLabel(user.activeVersionId)
               : 'No active version' }}</small>
           </span>
         </button>
@@ -80,7 +84,7 @@ const emit = defineEmits<{
           </button>
           <button v-if="entry.versionId && versions.some((version) => version.id === entry.versionId)"
             class="interaction-reference" type="button" @click="emit('navigate', entry, 'version')">
-            {{ displayVersionId(entry.versionId) }}
+            {{ versionLabel(entry.versionId) }}
           </button>
           <span class="interaction-time">{{ new Date(entry.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</span>
         </li>
@@ -95,10 +99,10 @@ const emit = defineEmits<{
     <section class="side-section active-section">
       <div class="section-label">YOUR ACTIVE VERSION</div>
       <button type="button" class="active-version-card" title="Focus active version · F" @click="emit('focus-active')">
-        <div class="active-version-top"><span class="version-pip" :style="{ background: versionColor(active) }"></span><span> Branch {{ active.branch }} | {{ displayVersionId(active.id) }} | Step {{ active.step }}</span></div>
+        <div class="active-version-top"><span class="version-pip" :style="{ background: versionColor(active) }"></span><span :title="displayVersionId(active)">{{ displayVersionId(active) }}</span></div>
         <strong>{{ active.change }}</strong>
         <div class="active-meta"><span>Entries</span><strong>{{ activeNodes }}</strong></div>
-        <div class="active-meta"><span>Current step</span><strong>{{ String(active.step).padStart(2, '0') }}</strong></div>
+        <div class="active-meta"><span>Current step</span><strong>{{ String(active.number?.step ?? 0).padStart(2, '0') }}</strong></div>
         <div class="active-meta"><span>Paths from here</span><strong>{{ activeChildren }}</strong></div>
       </button>
     </section>

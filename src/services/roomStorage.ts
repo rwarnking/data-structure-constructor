@@ -1,7 +1,7 @@
 import type { StoredState } from '../types/workspace'
 import { findNode } from '../utils/tree'
 import { defaultPositions, MAP_ZOOM_MAX, MAP_ZOOM_MIN, positionsAfterMove } from '../utils/treemap'
-import { compareCopyLinks } from '../utils/versions'
+import { assignMissingVersionNumbers, assignVersionSuffixes, compareCopyLinks } from '../utils/versions'
 import { isStoredState } from '../utils/validation'
 
 const STORAGE_KEY = 'canopy-data-structure-v1'
@@ -110,6 +110,8 @@ export function createRoomStorage() {
       }
     })
     const versionsById = new Map(normalizedVersions.map((version) => [version.id, version]))
+    assignMissingVersionNumbers(normalizedVersions)
+    assignVersionSuffixes(normalizedVersions, value.retiredVersionNumbers)
     return {
       ...clone(seed), ...value,
       versions: normalizedVersions,

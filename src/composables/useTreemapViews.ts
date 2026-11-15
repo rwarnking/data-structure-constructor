@@ -36,6 +36,7 @@ export function useTreemapViews(options: {
   const mapGeometries = computed(() => {
     const geometries = new Map<string, ReturnType<typeof mapGeometry>>()
     for (const version of versions.value) {
+      if (!cardData(version).length) continue
       const viewport = mapViewport(version)
       geometries.set(version.id, mapGeometry(cardData(version), cardPositions(version), viewport.width, viewport.height))
     }
@@ -57,8 +58,8 @@ export function useTreemapViews(options: {
     const transient = transientMapViews.value[version.id]
     if (transient) return transient
     if (version.mapView && (version.id !== 'v0' || version.mapView.manual)) return version.mapView
-    const geometry = mapGeometries.value.get(version.id) ?? mapGeometry(version.data, version.positions)
     const viewport = mapViewport(version)
+    const geometry = mapGeometries.value.get(version.id) ?? mapGeometry(version.data, version.positions, viewport.width, viewport.height)
     const fit = Math.min(1, (viewport.width - MAP_PADDING * 2) / geometry.width, (viewport.height - MAP_PADDING * 2) / geometry.height)
     const scale = Math.max(MAP_ZOOM_MIN, fit)
     return {

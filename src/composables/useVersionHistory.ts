@@ -4,7 +4,7 @@ import type { useVersionComparison } from './useVersionComparison'
 import type { useGraphCamera } from './useGraphCamera'
 import type { useTreemapViews } from './useTreemapViews'
 import { findNode, flattenPaths } from '../utils/tree'
-import { displayVersionId, structureSignature } from '../utils/versions'
+import { allocateVersionNumber, assignVersionSuffixes, displayVersionId, retireVersionNumbers, structureSignature } from '../utils/versions'
 import { fitMapViewToLayout, positionsForData } from '../utils/treemap'
 
 export function useVersionHistory(options: {
@@ -27,6 +27,15 @@ export function useVersionHistory(options: {
   const { isVersionCentered, cardPosition, cardHeight, startVersionArrival, panToVersion } = options.camera
   const { mapViewport, mapViewFor, centerVersionTreemaps, compactVersionTreemaps, mapViewTimers, transientMapViews } = options.treemaps
   const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
+  const numberingWriter = crypto.randomUUID()
+  const continuedParents = new Set<string>()
+  function numberVersion(version: Version, parent: Version, newBranch: boolean) {
+    version.number = allocateVersionNumber(versions.value, parent, version.id, numberingWriter, newBranch)
+    if (!newBranch && parent.id !== 'v0') {
+      if (continuedParents.has(parent.id)) version.number.origin = version.id
+      continuedParents.add(parent.id)
+    }
+  }
   function createVersion(data: TreeNode[], change: string, forceNew = false) {
     const parent = active.value
     const wasCentered = isVersionCentered(parent)
@@ -47,7 +56,7 @@ export function useVersionHistory(options: {
     if (duplicate) {
       state.value.activeId = duplicate.id
       selectedNode.value = null
-      notify(`Reopened existing ${duplicate.id}`)
+      notify(`Reopened existing ${displayVersionId(duplicate)}`)
       panToVersion(duplicate, wasCentered)
       return duplicate
     }
@@ -69,12 +78,14 @@ export function useVersionHistory(options: {
     const positions = positionsForData(parent.data, data, parent.positions, currentMapView, viewport)
     const fittedMapView = fitMapViewToLayout(data, positions, currentMapView)
     const version: Version = {
-      id: `v${state.value.nextVersion++}-${CLIENT_ID}`, parentId: parent.id, step: parent.step + 1,
+      id: `v${state.value.nextVersion++}-${CLIENT_ID}-${crypto.randomUUID().replace(/-/g, '')}`, parentId: parent.id, step: parent.step + 1,
       lane, branch, change, data, createdBy: CLIENT_ID, positions,
       ...(currentMapView.manual ? { mapView: clone(fittedMapView) } : {}),
       createdAt: Date.now(),
     }
+    numberVersion(version, parent, branch !== parent.branch)
     state.value.versions.push(version)
+    assignVersionSuffixes(state.value.versions, state.value.retiredVersionNumbers)
     reflowLayout()
     startVersionArrival(version, arrivalFrom)
     state.value.activeId = version.id
@@ -90,14 +101,14 @@ export function useVersionHistory(options: {
     const movedNodeId = [...nextNodes].find(([nodeId, item]) =>
       previousNodes.has(nodeId) && previousNodes.get(nodeId)?.parentId !== item.parentId)?.[0]
     const referenceNodeId = addedNodeId ?? removedNodeId ?? changedNodeId ?? movedNodeId
-    logInteraction(`Created ${branch} · ${change}`, {
+    logInteraction(`Created ${displayVersionId(version)} · ${change}`, {
       versionId: version.id,
       nodeId: referenceNodeId,
       nodeLabel: referenceNodeId
         ? findNode(version.data, referenceNodeId)?.value ?? findNode(parent.data, referenceNodeId)?.value
         : undefined,
     })
-    notify(`Created ${version.id} · ${change}`)
+    notify(`Created ${displayVersionId(version)} · ${change}`)
     panToVersion(version, wasCentered)
     return version
   }
@@ -124,20 +135,22 @@ export function useVersionHistory(options: {
     const needsMergeLane = !sourceIsLatest && !targetIsLatest
     const branch = needsMergeLane ? `${result.target.branch}.M${nextVersionNumber}` : laneParent.branch
     const version: Version = {
-      id: `v${nextVersionNumber}-${CLIENT_ID}`,
+      id: `v${nextVersionNumber}-${CLIENT_ID}-${crypto.randomUUID().replace(/-/g, '')}`,
       parentId: laneParent.id,
       mergeSourceId: mergeSource.id,
       step: Math.max(result.source.step, result.target.step) + 1,
       lane: laneParent.lane,
       branch,
-      change: `Merge ${result.source.branch} into ${result.target.branch}`,
+      change: `Merge ${displayVersionId(result.source)} into ${displayVersionId(result.target)}`,
       data: clone(result.data),
       positions: clone(result.positions),
       createdBy: CLIENT_ID,
       createdAt: Date.now(),
     }
+    numberVersion(version, laneParent, needsMergeLane)
     const wasCentered = isVersionCentered(result.target)
     state.value.versions.push(version)
+    assignVersionSuffixes(state.value.versions, state.value.retiredVersionNumbers)
     compactVersionTreemaps(version.id, false)
     reflowLayout()
     startVersionArrival(version, arrivalFrom)
@@ -150,8 +163,8 @@ export function useVersionHistory(options: {
     mergeDecisions.value = {}
     mergeParentOverrides.value = {}
     mergePositionOverrides.value = {}
-    notify(`Created merge ${displayVersionId(version.id)}`)
-    logInteraction(`Merged ${result.source.branch} into ${result.target.branch}`, { versionId: version.id })
+    notify(`Created merge ${displayVersionId(version)}`)
+    logInteraction(`Merged ${displayVersionId(result.source)} into ${displayVersionId(result.target)}`, { versionId: version.id })
     panToVersion(version, wasCentered)
   }
 
@@ -183,7 +196,9 @@ export function useVersionHistory(options: {
     }
     state.value.copyLinks = state.value.copyLinks.filter((link) =>
       !removeIds.has(link.sourceVersionId) && !removeIds.has(link.targetVersionId))
+    retireVersionNumbers(state.value, versions.value.filter((version) => removeIds.has(version.id)))
     state.value.versions = versions.value.filter((version) => !removeIds.has(version.id))
+    assignVersionSuffixes(state.value.versions, state.value.retiredVersionNumbers)
     reflowLayout()
     if (removeIds.has(state.value.activeId)) state.value.activeId = fallbackId
     compareIds.value = compareIds.value.filter((versionId) => !removeIds.has(versionId))

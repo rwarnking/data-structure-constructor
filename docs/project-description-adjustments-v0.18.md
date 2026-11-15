@@ -1,4 +1,4 @@
-# Zooming, Interaction Fixes, and Performance
+# Zooming, Interaction, and Versions
 
 # Zooming and Navigation
 
@@ -160,17 +160,8 @@ For example, test cases should include:
 
 If a duplicate is possible, resolve the numbering scheme before implementing it rather than adding a separate hidden identifier while displaying a potentially ambiguous version number.
 
+# Adjustment
 
-----
+When zooming to far out the Lane Buttons are not reduced in size anymore, leading to two columns. Depending on the zoom level there is also sometimes one showing fully while there lane is only visible partially. Also color the buttons according to the lane color.
 
-- group entries feature, auto add to a new entry as parent
-- import export data
-- allow to box select
-- allow to move the selection
-
-- version focus should update on canvas resize
-
-- recipes
-- rollercoaster
-- jobs
-- farytales
+The version numbering also does not seem to be totally correct. the third number (subbranch number) should start with 001 and should only increase when a new branch was created from the original branch (second number). also explain what the fourth number is for and in which case that is needed.

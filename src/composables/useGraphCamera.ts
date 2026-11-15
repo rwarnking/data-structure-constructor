@@ -30,11 +30,21 @@ export function useGraphCamera(options: {
   function cardPosition(version: Version) {
     const { width, height } = windowDimensions.value
     const mainRow = canvasSize.value.height / 2 - height / 2
-    if (version.id === 'v0') return { x: 0, y: 0 }
+    if (version.id === 'v0') return { x: 0, y: Math.min(0, -pan.value.y / zoom.value) }
     return { x: version.step * (width + GRAPH_GAP_X), y: mainRow + version.lane * (height + GRAPH_GAP_Y) }
   }
   function cardHeight(version: Version) {
-    return version.id === 'v0' ? graphBounds.value.height : windowDimensions.value.height
+    return version.id === 'v0'
+      ? Math.max(graphBounds.value.height, (canvasSize.value.height - pan.value.y) / zoom.value) - cardPosition(version).y
+      : windowDimensions.value.height
+  }
+  function rootLabelOffset() {
+    return (canvasSize.value.height / 2 - pan.value.y) / zoom.value - cardPosition(versionsById.value.get('v0')!).y
+  }
+  function rootLabelX() {
+    const left = Math.max(0, -pan.value.x / zoom.value)
+    const right = Math.min(windowDimensions.value.width, (canvasSize.value.width - pan.value.x) / zoom.value)
+    return left < right ? (left + right) / 2 : windowDimensions.value.width / 2
   }
   function displayCardPosition(version: Version) {
     const arrival = versionArrival.value
@@ -266,7 +276,7 @@ export function useGraphCamera(options: {
     if (versionArrivalFrame) cancelAnimationFrame(versionArrivalFrame)
   }
 
-  return { focusedVersionId, cardPosition, cardHeight, displayCardPosition, startVersionArrival, graphBounds,
+  return { focusedVersionId, cardPosition, cardHeight, rootLabelOffset, rootLabelX, displayCardPosition, startVersionArrival, graphBounds,
     visibleVersions, visibleConnectionVersions, visibleMergeConnectionVersions, intersectsViewport, zoomAt, zoomIn, zoomOut, fitGraph,
     startCanvasPan, moveCanvasPan, endCanvasPan, onWheel, focusVersion, focusActive, animateCamera,
     isVersionCentered, panToVersion, stopGraphAnimations }

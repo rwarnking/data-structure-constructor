@@ -14,6 +14,12 @@ Open a version's **three-dots** menu to focus the version, center and fit all of
 
 Use **F** to focus the active version, and the **arrow keys** to move to the previous or next version on the current history path, or to the closest version on the branch above or below. **Ping** (or **P**) toggles Ping Mode; click the canvas to place a ping, and press **P** or **Esc** to exit. Canvas drags continue to pan without placing a ping.
 
+Lane-edge arrows pan to the first or last non-root version in that lane without changing the active version. Their color matches the destination version; their width stays fixed and their height follows the visible portion of the lane.
+
+Use **Ctrl/⌘+A** to select all entries in the active version, **Ctrl/⌘+C** to copy selected subtrees, and **Ctrl/⌘+V** to paste them. **Ctrl/⌘+X** prepares selected subtrees for cutting: paste into a different version to create a copy there and a separate deletion version from the original source. Selected descendants of another selected entry are included once. Text fields retain their normal shortcuts. **Ctrl/⌘+O** also focuses the active version, and **Ctrl/⌘+N** opens the new-entry editor.
+
+Version numbers normally have the form `step.branch.subbranch`. Each original branch starts at subbranch `001`; only a new fork increases it. If numbers collide, for example after simultaneous edits or reuse of a deleted version's step, a fourth part counts from `1` to distinguish them. Independently created versions can temporarily have the same number, and displayed suffixes may change as peers synchronize. Numbers deleted after this update remain reserved. Numbers are independent of visual lanes, and existing rooms are migrated when loaded.
+
 ## Rooms and shared sessions
 
 At startup, Canopy opens the last locally saved room, or creates one if needed, and automatically hosts or joins it. **Change Room** lets you switch between saved rooms, create an empty room, or delete an inactive room after confirmation. **Copy Invite** copies a link that opens the same room for collaborators. Each room keeps its own versions, entries, interaction log, collaboration metadata, and copied-entry clipboard in browser storage. The current user appears in the Collaborators list and local actions are recorded in the Interaction Log even when no other users are connected.

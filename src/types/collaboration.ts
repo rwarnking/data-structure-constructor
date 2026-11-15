@@ -1,4 +1,4 @@
-import type { CopyLink, Revision, StoredState, Version } from './workspace'
+import type { CopyLink, RetiredVersionNumber, Revision, StoredState, Version } from './workspace'
 
 export type VersionChange = { version: Version; revision: Revision }
 export type VersionRemoval = { id: string; revision: Revision }
@@ -6,6 +6,7 @@ export type SyncDelta = {
   type: 'sync-delta'
   versions: VersionChange[]
   removed: VersionRemoval[]
+  retiredVersionNumbers?: RetiredVersionNumber[]
   active?: { id: string; revision: Revision }
   copyLinks?: { links: CopyLink[]; revision: Revision }
   nextNode: number

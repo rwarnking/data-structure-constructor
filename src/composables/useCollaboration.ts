@@ -2,9 +2,9 @@ import { computed, nextTick, ref, watch, type ComputedRef, type Ref } from 'vue'
 import { PeerRoom, type RoomStatus } from '../collaboration'
 import type { CollaborationMetadata, Revision, StoredState, Version } from '../types/workspace'
 import type { InteractionEntry, Ping, RemoteUser, SyncDelta, SyncSnapshot, VersionChange, VersionRemoval } from '../types/collaboration'
-import { hasValidVersionStep, isCollaborationMetadata, isCopyLink, isRecord, isRevision, isStoredState, isVersion } from '../utils/validation'
+import { hasValidVersionStep, isCollaborationMetadata, isCopyLink, isRecord, isRetiredVersionNumber, isRevision, isStoredState, isVersion } from '../utils/validation'
 import { findNode } from '../utils/tree'
-import { compareCopyLinks } from '../utils/versions'
+import { assignMissingVersionNumbers, assignVersionSuffixes, compareCopyLinks, retireVersionNumbers } from '../utils/versions'
 
 export function useCollaboration(options: {
   clientId: string
@@ -182,7 +182,9 @@ export function useCollaboration(options: {
     const changed: VersionChange[] = []
     const removed: VersionRemoval[] = []
     for (const version of value.versions) {
-      if (JSON.stringify(previousVersions.get(version.id)) === JSON.stringify(version)) continue
+      const previousVersion = previousVersions.get(version.id)
+      if (previousVersion && JSON.stringify({ ...previousVersion, numberSuffix: undefined })
+        === JSON.stringify({ ...version, numberSuffix: undefined })) continue
       collaborationMetadata.versions[version.id] = revision
       delete collaborationMetadata.removed[version.id]
       changed.push({ version, revision })
@@ -196,8 +198,11 @@ export function useCollaboration(options: {
     const copyLinks = JSON.stringify(previous.copyLinks) !== JSON.stringify(value.copyLinks)
       ? (collaborationMetadata.copyLinks = revision, { links: value.copyLinks, revision })
       : undefined
+    const retiredKeys = new Set((previous.retiredVersionNumbers ?? []).map((item) => JSON.stringify([item.id, item.suffix ?? 0])))
+    const retiredVersionNumbers = (value.retiredVersionNumbers ?? [])
+      .filter((item) => !retiredKeys.has(JSON.stringify([item.id, item.suffix ?? 0])))
     const delta: SyncDelta = {
-      type: 'sync-delta', versions: changed, removed, copyLinks,
+      type: 'sync-delta', versions: changed, removed, copyLinks, retiredVersionNumbers,
       nextNode: value.nextNode, nextVersion: value.nextVersion, nextLane: value.nextLane,
     }
     persistCollaborationMetadata()
@@ -255,6 +260,8 @@ export function useCollaboration(options: {
 
   function applySyncDelta(message: SyncDelta) {
     if (!collaborationMetadata || !Array.isArray(message.versions) || !Array.isArray(message.removed)
+      || (message.retiredVersionNumbers !== undefined && (!Array.isArray(message.retiredVersionNumbers)
+        || !message.retiredVersionNumbers.every(isRetiredVersionNumber)))
       || !Number.isInteger(message.nextNode) || !Number.isInteger(message.nextVersion)
       || !Number.isInteger(message.nextLane)) {
       notify('Ignored an invalid shared-state update')
@@ -263,6 +270,29 @@ export function useCollaboration(options: {
     const versionsById = new Map(state.value.versions.map((version) => [version.id, version]))
     const newVersions: Version[] = []
     let changed = false
+    const retired = state.value.retiredVersionNumbers ?? []
+    const retiredById = new Map(retired.map((item) => [item.id, item]))
+    for (const item of message.retiredVersionNumbers ?? []) {
+      const previous = retiredById.get(item.id)
+      if (previous && (previous.createdAt !== item.createdAt
+        || previous.number.step !== item.number.step || previous.number.branch !== item.number.branch
+        || previous.number.subbranch !== item.number.subbranch || previous.number.origin !== item.number.origin
+        || previous.number.owner !== item.number.owner || previous.number.scheme !== item.number.scheme)) {
+        notify('Ignored a shared update with conflicting retired version numbers')
+        return
+      }
+      retiredById.set(item.id, item)
+    }
+    const retiredKeys = new Set(retired.map((item) => JSON.stringify([item.id, item.suffix ?? 0])))
+    for (const item of message.retiredVersionNumbers ?? []) {
+      const key = JSON.stringify([item.id, item.suffix ?? 0])
+      if (retiredKeys.has(key)) continue
+      retired.push(item)
+      retiredKeys.add(key)
+      changed = true
+    }
+    if (retired.length) state.value.retiredVersionNumbers = retired
+    const receivedRetiredKeys = new Set(retiredKeys)
     for (const change of message.versions) {
       if (change && isRevision(change.revision)) collaborationMetadata.clock = Math.max(collaborationMetadata.clock, change.revision.clock)
     }
@@ -275,6 +305,8 @@ export function useCollaboration(options: {
       collaborationMetadata.removed[removal.id] = removal.revision
       const currentRevision = collaborationMetadata.versions[removal.id]
       if (revisionIsNewer(removal.revision, currentRevision)) {
+        const version = versionsById.get(removal.id)
+        if (version) retireVersionNumbers(state.value, [version])
         versionsById.delete(removal.id)
         delete collaborationMetadata.versions[removal.id]
         changed = true
@@ -299,6 +331,22 @@ export function useCollaboration(options: {
       const currentRevision = collaborationMetadata.versions[change.version.id]
       const removedRevision = collaborationMetadata.removed[change.version.id]
       if (!revisionIsNewer(change.revision, currentRevision) || revisionIsNewer(removedRevision, change.revision)) continue
+      const existing = versionsById.get(change.version.id)
+      if (existing?.number) {
+        if (change.version.number && JSON.stringify(change.version.number) !== JSON.stringify(existing.number)) {
+          notify('Ignored a shared update that changed a version number')
+          continue
+        }
+        change.version.number = existing.number
+      } else if (change.version.id !== 'v0' && change.version.number?.scheme !== 2) {
+        assignMissingVersionNumbers([...versionsById.values(), change.version])
+      }
+      if (change.version.number && [...versionsById.values()].some((version) =>
+        version.id !== change.version.id && version.number?.origin === change.version.number!.origin
+        && version.number.step === change.version.number!.step)) {
+        notify('Ignored a shared version with a duplicate version number')
+        continue
+      }
       if (!versionsById.has(change.version.id) && change.revision.actor !== CLIENT_ID) newVersions.push(change.version)
       collaborationMetadata.versions[change.version.id] = change.revision
       delete collaborationMetadata.removed[change.version.id]
@@ -314,6 +362,7 @@ export function useCollaboration(options: {
         const parentRemoval = collaborationMetadata.removed[version.parentId]
         const removalRevision = revisionIsNewer(currentRevision, parentRemoval) ? currentRevision : parentRemoval
         if (removalRevision) collaborationMetadata.removed[id] = removalRevision
+        retireVersionNumbers(state.value, [version])
         delete collaborationMetadata.versions[id]
         versionsById.delete(id)
         changed = true
@@ -357,6 +406,8 @@ export function useCollaboration(options: {
     }
     state.value.versions = [...versionsById.values()].sort((left, right) =>
       left.step - right.step || left.id.localeCompare(right.id))
+    assignMissingVersionNumbers(state.value.versions)
+    assignVersionSuffixes(state.value.versions, state.value.retiredVersionNumbers)
     reflowLayout()
     let followId = state.value.activeId
     while (true) {
@@ -370,6 +421,13 @@ export function useCollaboration(options: {
     applyingRemoteState = true
     persistCollaborationMetadata()
     localStorage.setItem(roomDataKey(currentRoomName.value), lastObservedState)
+    const extraRetired = (state.value.retiredVersionNumbers ?? [])
+      .filter((item) => !receivedRetiredKeys.has(JSON.stringify([item.id, item.suffix ?? 0])))
+    // Another peer may have seen a different suffix before the same version was removed.
+    if (extraRetired.length) peerRoom.send({
+      type: 'sync-delta', versions: [], removed: [], retiredVersionNumbers: extraRetired,
+      nextNode: state.value.nextNode, nextVersion: state.value.nextVersion, nextLane: state.value.nextLane,
+    } satisfies SyncDelta)
     void nextTick(() => { applyingRemoteState = false })
   }
 
