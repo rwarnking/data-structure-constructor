@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { Trash2, X } from '@lucide/vue'
+import { actionIcons } from '../config/icons'
+const { delete: Trash2, close: X } = actionIcons
 
 defineProps<{ localRooms: string[]; currentRoomName: string }>()
 const newRoomName = defineModel<string>({ required: true })

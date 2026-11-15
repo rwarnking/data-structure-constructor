@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { GitBranch, Layers3, Plus, X } from '@lucide/vue'
+import { actionIcons } from '../config/icons'
+const { hierarchy: GitBranch, layers: Layers3, add: Plus, close: X } = actionIcons
 import type { EntryOperation, TreeNode } from '../types/workspace'
 import { findNode } from '../utils/tree'
 

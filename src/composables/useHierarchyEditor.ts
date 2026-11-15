@@ -36,6 +36,13 @@ export function useHierarchyEditor(options: {
     editor.value = { mode: 'create', parentId, entries: [newEntryDraft()] }
   }
 
+  function addChildren() {
+    if (isReadOnly.value) return
+    const ids = selectedNodes.value.filter((id) => !!findNode(active.value.data, id))
+    if (!ids.length) return
+    editor.value = { mode: 'create', parentId: ids[0]!, childOf: ids, entries: [newEntryDraft()] }
+  }
+
   function addParent() {
     if (isReadOnly.value || !selectedNodes.value.length) return
     const ids = selectedNodes.value.filter((id) => !!findNode(active.value.data, id))
@@ -61,6 +68,16 @@ export function useHierarchyEditor(options: {
       }))
       if (!entries.length || entries.some((entry) => !entry.value)) return
       const data = clone(active.value.data)
+      if (currentEditor.childOf) {
+        const parents = currentEditor.childOf.map((id) => findNode(data, id))
+        if (parents.some((parent) => !parent)) { notify('Selected entries are no longer available'); return }
+        for (const parent of parents) {
+          parent!.children.push(...entries.map((entry) => makeNode(entry.value, entry.description)))
+        }
+        editor.value = null
+        createVersion(data, `Add ${entries.length} child ${entries.length === 1 ? 'entry' : 'entries'} to ${parents.length} selected ${parents.length === 1 ? 'entry' : 'entries'}`, parents.length > 1 || entries.length > 1)
+        return
+      }
       if (currentEditor.parentOf) {
         const ids = currentEditor.parentOf
         const flat = flattenNodes(data)
@@ -412,7 +429,7 @@ export function useHierarchyEditor(options: {
     return version
   }
   return { editor, setEntryValueInput, entryOperation, bulkDeleteMode, bulkDeleteDialog,
-    addEntry, addParent, commitEditor, renameEntry, addEditorEntryRow, removeEditorEntryRow, deleteEntry,
+    addEntry, addChildren, addParent, commitEditor, renameEntry, addEditorEntryRow, removeEditorEntryRow, deleteEntry,
     deleteSelectedEntries, openBulkDelete, openMergeEntries, openSplitEntry, addSplitEntry,
     removeSplitEntry, commitEntryOperation, detachEntry, canAttach, attachEntry }
 }

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { ChevronDown, Download, Layers3, Moon, Settings, Sun, Upload } from '@lucide/vue'
+import { actionIcons } from '../config/icons'
+import { shortcutLabel } from '../config/hotkeys'
 import type { RoomStatus } from '../collaboration'
 import type { InteractionEntry } from '../types/collaboration'
 import type { Version } from '../types/workspace'
@@ -14,6 +15,8 @@ const props = defineProps<{
   clientId: string; versions: Version[]; recentInteractions: InteractionEntry[]
   branchCount: number; active: Version; activeNodes: number; activeChildren: number
 }>()
+const { expand: ChevronDown, export: Download, layers: Layers3, darkMode: Moon,
+  settings: Settings, lightMode: Sun, import: Upload, tag: TagIcon } = actionIcons
 const settingsOpen = ref(false)
 const importInput = ref<HTMLInputElement | null>(null)
 function importFile(event: Event) {
@@ -31,7 +34,7 @@ const emit = defineEmits<{
   'toggle-sidebar': []; 'toggle-theme': []; 'change-room': []; 'copy-invite': []
   'focus-collaborator': [id: string]; 'focus-ping': [location: { x: number; y: number }]
   navigate: [entry: InteractionEntry, kind: 'node' | 'version']; 'focus-active': []
-  'import-data': [file: File]; 'export-data': []
+  'import-data': [file: File]; 'export-data': []; 'show-tags': []
 }>()
 </script>
 
@@ -53,6 +56,7 @@ const emit = defineEmits<{
       </button>
       <button type="button" class="theme-toggle" @click="importInput?.click()"><Upload :size="15" /><span>Import data</span></button>
       <button type="button" class="theme-toggle" @click="emit('export-data'); settingsOpen = false"><Download :size="15" /><span>Export data</span></button>
+      <button type="button" class="theme-toggle" @click="emit('show-tags'); settingsOpen = false"><TagIcon :size="15" /><span>All tags</span></button>
       <input ref="importInput" type="file" accept=".json,application/json" hidden @change="importFile" />
     </section>
     <section class="side-section session-section">
@@ -115,7 +119,7 @@ const emit = defineEmits<{
     </section>
     <section class="side-section active-section">
       <div class="section-label">YOUR ACTIVE VERSION</div>
-      <button type="button" class="active-version-card" title="Focus active version · F" @click="emit('focus-active')">
+      <button type="button" class="active-version-card" :title="`Focus active version · ${shortcutLabel('focus')}`" @click="emit('focus-active')">
         <div class="active-version-top"><span class="version-pip" :style="{ background: versionColor(active) }"></span><span :title="displayVersionId(active)">{{ displayVersionId(active) }}</span></div>
         <strong>{{ active.change }}</strong>
         <div class="active-meta"><span>Entries</span><strong>{{ activeNodes }}</strong></div>

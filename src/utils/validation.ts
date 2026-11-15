@@ -71,6 +71,9 @@ export function isVersion(value: unknown): value is Version {
     && (!isRecord(value.positions) || !Object.values(value.positions).every((position) =>
       isRecord(position) && Number.isFinite(position.x) && Number.isFinite(position.y)))) return false
   if ((value.number !== undefined && !isVersionNumber(value.number)) || !isSuffix(value.numberSuffix)) return false
+  if (value.tag !== undefined && (!isRecord(value.tag) || typeof value.tag.title !== 'string'
+    || !value.tag.title.trim() || value.tag.title.length > 120 || typeof value.tag.description !== 'string'
+    || value.tag.description.length > 2000)) return false
   return true
 }
 

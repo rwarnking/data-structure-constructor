@@ -15,6 +15,7 @@ export type SpatialPreview = {
 export type CopyLink = { sourceVersionId: string; sourceNodeId: string; targetVersionId: string; targetNodeId: string }
 export type VersionNumber = { step: number; branch: number; subbranch: number; origin: string; owner: string; scheme?: 2 }
 export type RetiredVersionNumber = { id: string; number: VersionNumber; createdAt: number; suffix?: number }
+export type VersionTag = { title: string; description: string }
 export type Version = {
   id: string
   parentId: string | null
@@ -23,6 +24,7 @@ export type Version = {
   lane: number
   branch: string
   change: string
+  tag?: VersionTag
   data: TreeNode[]
   createdBy?: string
   number?: VersionNumber
@@ -42,7 +44,7 @@ export type CollaborationMetadata = {
 }
 export type EntryDraft = { id: string; value: string; description: string }
 export type EditorState =
-  | { mode: 'create'; parentId: string | null; entries: EntryDraft[]; parentOf?: string[] }
+  | { mode: 'create'; parentId: string | null; entries: EntryDraft[]; parentOf?: string[]; childOf?: string[] }
   | { mode: 'rename'; parentId: null; nodeId: string; value: string; description: string }
 export type SplitDraft = { id: string; value: string; description: string }
 export type EntryOperation =

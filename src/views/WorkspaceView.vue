@@ -21,14 +21,19 @@ import EntryEditor from '../components/EntryEditor.vue'
 import EntryOperationDialog from '../components/EntryOperationDialog.vue'
 import RoomManager from '../components/RoomManager.vue'
 import VersionSearch from '../components/VersionSearch.vue'
-import type { CopyLink, StoredState, Tile, TreeNode, Version } from '../types/workspace'
+import VersionTags from '../components/VersionTags.vue'
+import StoryGuide from '../components/StoryGuide.vue'
+import tutorial from '../content/tutorial.json'
+import type { CopyLink, StoredState, Tile, TreeNode, Version, VersionTag } from '../types/workspace'
 import { countNodes, findNode, findParent, flattenNodes, nodeParentIds, removeNode } from '../utils/tree'
 import { compareCopyLinks, displayVersionId, reflowVersionLayout } from '../utils/versions'
 import { CARD_WIDTH, TREE_MAP_HEIGHT, tilesForForest, tileForNode } from '../utils/treemap'
-import {
-  GitBranch, GitCompareArrows, Plus, Maximize, Copy, Trash2, ChevronLeft, ChevronRight,
-  Pencil, Unlink, X, Layers3, ClipboardPaste, ZoomIn, ZoomOut, Radio,
-} from '@lucide/vue'
+import { shortcutAction, shortcutLabel } from '../config/hotkeys'
+import { actionIcons, actionSymbols } from '../config/icons'
+const { hierarchy: GitBranch, compare: GitCompareArrows, add: Plus, focus: Maximize,
+  copy: Copy, delete: Trash2, previous: ChevronLeft, next: ChevronRight, edit: Pencil,
+  detach: Unlink, close: X, layers: Layers3, paste: ClipboardPaste,
+  zoomIn: ZoomIn, zoomOut: ZoomOut, ping: Radio, tutorial: TutorialIcon, tag: TagIcon } = actionIcons
 
 type ClipboardEntry = { sourceVersionId: string; nodes: TreeNode[]; cut: boolean }
 const CLIENT_ID = getClientId()
@@ -104,6 +109,25 @@ const clipboard = ref<ClipboardEntry | null>(readClipboard(currentRoomName.value
 const toast = ref('')
 const roomDialogOpen = ref(false)
 const searchOpen = ref(false)
+const tutorialOpen = ref(false)
+const tagsOpen = ref(false)
+const tagVersionId = ref<string | null>(null)
+const tagVersion = computed(() => tagVersionId.value ? versionsById.value.get(tagVersionId.value) : undefined)
+function editTag(versionId?: string) {
+  if (!versionId || !versionsById.value.has(versionId)) return
+  tagVersionId.value = versionId
+  tagsOpen.value = true
+  menu.value = null
+}
+function saveTag(tag?: VersionTag) {
+  const version = tagVersion.value
+  if (!version) { notify('Version is no longer available'); tagsOpen.value = false; return }
+  if (tag) version.tag = tag
+  else delete version.tag
+  logInteraction(tag ? `Tagged ${displayVersionId(version)}` : `Removed tag from ${displayVersionId(version)}`, { versionId: version.id })
+  tagsOpen.value = false
+  tagVersionId.value = null
+}
 const newRoomName = ref('')
 let toastTimer = 0
 let presenceTimer = 0
@@ -124,8 +148,7 @@ const { cardPosition, cardHeight, rootLabelOffset, rootLabelX, displayCardPositi
   stopGraphAnimations,
 } = graphCamera
 
-const treemapViews = useTreemapViews({ state, versions, windowDimensions, zoom, cardHeight,
-  focusedVersionId: graphCamera.focusedVersionId, notify, suppressClicks: suppressGraphClicks })
+const treemapViews = useTreemapViews({ state, versions, windowDimensions, zoom, cardHeight, notify, suppressClicks: suppressGraphClicks })
 const { mapViewTimers, cardData, cardPositions, mapViewport, mapViewFor,
   centerVersionTreemaps, compactVersionTreemaps, commitMapView, clearTransientMapViews, initializeMapViews,
   zoomMap, startMapPan, moveMapPan, endMapPan,
@@ -202,7 +225,7 @@ const { createVersion, confirmMerge, pruneVersion } = useVersionHistory({
 })
 
 const { editor, setEntryValueInput, entryOperation, bulkDeleteMode, bulkDeleteDialog,
-  addEntry, addParent, commitEditor, renameEntry, addEditorEntryRow, removeEditorEntryRow, deleteEntry,
+  addEntry, addChildren, addParent, commitEditor, renameEntry, addEditorEntryRow, removeEditorEntryRow, deleteEntry,
   deleteSelectedEntries, openBulkDelete, openMergeEntries, openSplitEntry, addSplitEntry,
   removeSplitEntry, commitEntryOperation, detachEntry, canAttach, attachEntry,
 } = useHierarchyEditor({ clientId: CLIENT_ID, state, active, selectedNodes, isReadOnly, createVersion, setSelectedNodes, notify })
@@ -547,12 +570,13 @@ function onTileClick(version: Version, nodeId: string, event: MouseEvent) {
     return
   }
   const additive = event.shiftKey
+  const sameVersion = version.id === active.value.id
   window.clearTimeout(tileClickTimer)
   tileClickTimer = window.setTimeout(() => {
     state.value.activeId = version.id
     if (isReadOnly.value) {
       setSelectedNodes([])
-    } else if (additive || selectedNodes.value.includes(nodeId)) {
+    } else if (sameVersion && (additive || selectedNodes.value.includes(nodeId))) {
       const selection = selectedNodes.value.includes(nodeId)
         ? selectedNodes.value.filter((id) => id !== nodeId)
         : [...selectedNodes.value, nodeId]
@@ -616,7 +640,8 @@ function connectorLabelPosition(source: Version, destination: Version) {
   const to = displayCardPosition(destination)
   return {
     x: (from.x + windowDimensions.value.width + to.x) / 2,
-    y: (from.y + cardHeight(source) / 2 + to.y + cardHeight(destination) / 2) / 2,
+    y: source.id === 'v0' ? to.y + cardHeight(destination) / 2
+      : (from.y + cardHeight(source) / 2 + to.y + cardHeight(destination) / 2) / 2,
   }
 }
 function versionConnectionPath(source: Version, destination: Version, endOffsetY = 0) {
@@ -703,12 +728,12 @@ function tileStrokeWidth(versionId: string, nodeId: string) {
 function descendantsCount(nodes: TreeNode[]) { return countNodes(nodes) }
 function versionAction(version: Version) {
   const previous = version.parentId ? versionsById.value.get(version.parentId) : undefined
-  if (!previous) return { label: 'root', symbol: '•' }
+  if (!previous) return { label: 'root', symbol: actionSymbols.root }
   if (version.mergeSourceId || /^Merge \d+ entries into /.test(version.change)) {
-    return { label: 'merge', symbol: '⋈' }
+    return { label: 'merge', symbol: actionSymbols.merge }
   }
   if (/^Split .+ into \d+ entries$/.test(version.change)) {
-    return { label: 'split', symbol: 'Y' }
+    return { label: 'split', symbol: actionSymbols.split }
   }
   const before = flattenNodes(previous.data)
   const after = flattenNodes(version.data)
@@ -723,19 +748,19 @@ function versionAction(version: Version) {
     if ((old.node.description ?? '') !== (item.node.description ?? '')) modified += 1
   }
   const moved = [...after].filter(([id, item]) => before.has(id) && before.get(id)!.parentId !== item.parentId)
-  if (added && !removed && !renamed && !modified) return { label: 'add', symbol: '+' }
-  if (removed && !added && !renamed && !modified) return { label: 'delete', symbol: '−' }
+  if (added && !removed && !renamed && !modified) return { label: 'add', symbol: actionSymbols.add }
+  if (removed && !added && !renamed && !modified) return { label: 'delete', symbol: actionSymbols.delete }
   if (moved.length && !added && !removed && !renamed && !modified) {
     const item = moved[0]!
     const oldParent = before.get(item[0])!.parentId
-    if (oldParent === null) return { label: 'attach', symbol: '↳' }
-    if (item[1].parentId === null) return { label: 'detach', symbol: '↗' }
-    return { label: 'move', symbol: '↔' }
+    if (oldParent === null) return { label: 'attach', symbol: actionSymbols.attach }
+    if (item[1].parentId === null) return { label: 'detach', symbol: actionSymbols.detach }
+    return { label: 'move', symbol: actionSymbols.move }
   }
   if ((renamed || modified) && !added && !removed && !moved.length) {
-    return renamed === 1 && modified === 0 ? { label: 'rename', symbol: '✎' } : { label: 'modify', symbol: '~' }
+    return renamed === 1 && modified === 0 ? { label: 'rename', symbol: actionSymbols.rename } : { label: 'modify', symbol: actionSymbols.modify }
   }
-  return { label: 'modify', symbol: '~' }
+  return { label: 'modify', symbol: actionSymbols.modify }
 }
 function mapTransform(version: Version) {
   const layout = version.id === active.value.id ? previewLayout.value : null
@@ -1000,7 +1025,7 @@ function navigateVersion(direction: 'left' | 'right' | 'up' | 'down') {
 }
 function onKeydown(event: KeyboardEvent) {
   if (mergeMode.value && compareIds.value.length === 2) {
-    if (event.key === 'Escape') {
+    if (shortcutAction(event) === 'dismiss') {
       event.preventDefault()
       closeVersionSelection()
     }
@@ -1009,53 +1034,32 @@ function onKeydown(event: KeyboardEvent) {
   const target = event.target
   if (target instanceof Element && (target.closest('input, textarea, select, [role="textbox"]')
     || target instanceof HTMLElement && target.isContentEditable)) return
-  const key = event.key.toLowerCase()
-  const modified = event.ctrlKey || event.metaKey
-  if (modified && !event.altKey && !event.shiftKey && key === 'f') {
-    event.preventDefault()
-    searchOpen.value = true
-    return
+  const action = shortcutAction(event)
+  if (!action) return
+  if ((action === 'addChild' || action === 'detach') && !selectedNode.value) return
+  if ((action === 'copy' || action === 'cut') && !selectedNodes.value.length) return
+  event.preventDefault()
+  switch (action) {
+    case 'search': searchOpen.value = true; break
+    case 'ping': pingMode.value = !pingMode.value; break
+    case 'merge': if (mergeMode.value) closeVersionSelection(); else startVersionSelection('merge'); break
+    case 'previous': navigateVersion('left'); break
+    case 'next': navigateVersion('right'); break
+    case 'up': navigateVersion('up'); break
+    case 'down': navigateVersion('down'); break
+    case 'newEntry': createFreeEntry(); break
+    case 'addChild': addChildren(); break
+    case 'detach': if (selectedNode.value) detachEntry(selectedNode.value); break
+    case 'compare': if (compareMode.value) closeVersionSelection(); else startVersionSelection('compare'); break
+    case 'focus': focusActive(); break
+    case 'fitAll': fitGraph(); break
+    case 'zoomIn': zoomIn(); break
+    case 'zoomOut': zoomOut(); break
+    case 'selectAll': setSelectedNodes([...flattenNodes(active.value.data).keys()]); break
+    case 'copy': case 'cut': copyEntries(selectedNodes.value, action === 'cut'); break
+    case 'paste': pasteEntry(); break
+    case 'dismiss': searchOpen.value = false; menu.value = null; closeVersionSelection(); pingMode.value = false; break
   }
-  if (!modified && !event.altKey && !event.shiftKey && key === 'p' && !event.repeat) {
-    event.preventDefault()
-    pingMode.value = !pingMode.value
-  }
-  if (!modified && !event.altKey && !event.shiftKey && key === 'm' && !event.repeat) {
-    event.preventDefault()
-    if (mergeMode.value) closeVersionSelection()
-    else startVersionSelection('merge')
-  }
-  if (!modified && !event.altKey && !event.shiftKey
-    && ['arrowleft', 'arrowright', 'arrowup', 'arrowdown'].includes(key)) {
-    event.preventDefault()
-    navigateVersion(key.slice(5) as 'left' | 'right' | 'up' | 'down')
-  }
-  if (!event.altKey && !event.shiftKey && key === 'n') { event.preventDefault(); createFreeEntry() }
-  if (modified && event.key === 'Enter' && selectedNode.value) { event.preventDefault(); addEntry(selectedNode.value) }
-  if (!modified && event.shiftKey && key === 'd' && selectedNode.value) { event.preventDefault(); detachEntry(selectedNode.value) }
-  if (!modified && event.shiftKey && key === 'c') {
-    event.preventDefault()
-    if (compareMode.value) closeVersionSelection()
-    else startVersionSelection('compare')
-  }
-  if (!modified && !event.altKey && !event.shiftKey && key === 'f') { event.preventDefault(); focusActive() }
-  if (modified && !event.altKey && !event.shiftKey && key === 'o') { event.preventDefault(); focusActive() }
-  if (!modified && event.shiftKey && key === 'a') { event.preventDefault(); fitGraph() }
-  if (!modified && (event.key === '+' || event.key === '=')) { event.preventDefault(); zoomIn() }
-  if (!modified && event.key === '-') { event.preventDefault(); zoomOut() }
-  if (modified && !event.altKey && !event.shiftKey && key === 'a') {
-    event.preventDefault()
-    setSelectedNodes([...flattenNodes(active.value.data).keys()])
-  }
-  if (modified && !event.altKey && !event.shiftKey && (key === 'c' || key === 'x') && selectedNodes.value.length) {
-    event.preventDefault()
-    copyEntries(selectedNodes.value, key === 'x')
-  }
-  if (modified && !event.altKey && !event.shiftKey && key === 'v') {
-    event.preventDefault()
-    pasteEntry()
-  }
-  if (event.key === 'Escape') { searchOpen.value = false; menu.value = null; closeVersionSelection(); pingMode.value = false }
 }
 function measureCanvas() {
   browserViewport.value = { width: window.innerWidth, height: window.innerHeight }
@@ -1229,7 +1233,7 @@ const cardModel: VersionCardModel = reactive({
 </script>
 
 <template>
-  <main class="app-shell" :class="{ dark: darkMode }" @click.capture="handleAppClickCapture" @wheel="onWheel">
+  <main class="app-shell" :class="{ dark: darkMode }" @click.capture="handleAppClickCapture">
     <div class="workspace" :inert="mergeMode && compareIds.length === 2">
       <WorkspaceSidebar :sidebar-collapsed="sidebarCollapsed" :dark-mode="darkMode" :current-room-name="currentRoomName"
         :room-status="roomStatus" :local-only="isLocalOnlyRoom(currentRoomName)" :connected-users="connectedUsers" :client-id="CLIENT_ID" :versions="versions"
@@ -1238,11 +1242,13 @@ const cardModel: VersionCardModel = reactive({
         @toggle-sidebar="sidebarCollapsed = !sidebarCollapsed" @toggle-theme="darkMode = !darkMode"
         @change-room="roomDialogOpen = true" @copy-invite="copySessionInvite" @focus-collaborator="focusCollaborator"
         @focus-ping="focusPingLocation" @navigate="navigateInteraction" @focus-active="focusActive"
-        @import-data="importData" @export-data="exportData" />
+        @import-data="importData" @export-data="exportData" @show-tags="tagVersionId = null; tagsOpen = true" />
 
       <section class="canvas-region">
-        <div ref="graphCanvas" class="graph-canvas" :class="{ 'ping-mode': pingMode }" @contextmenu="onCanvasContext" @pointerdown.capture="handlePingPointer" @pointermove.capture="trackPingPointerMove" @pointerup.capture="clearPingPointer" @pointercancel.capture="clearPingPointer" @click.capture="handlePingClick" @click="onCanvasClick" @pointerdown="startCanvasPan" @pointermove="moveCanvasPan" @pointerup="endCanvasPan" @pointercancel="endCanvasPan">
+        <div ref="graphCanvas" class="graph-canvas" :class="{ 'ping-mode': pingMode }" @wheel="onWheel" @contextmenu="onCanvasContext" @pointerdown.capture="handlePingPointer" @pointermove.capture="trackPingPointerMove" @pointerup.capture="clearPingPointer" @pointercancel.capture="clearPingPointer" @click.capture="handlePingClick" @click="onCanvasClick" @pointerdown="startCanvasPan" @pointermove="moveCanvasPan" @pointerup="endCanvasPan" @pointercancel="endCanvasPan">
           <div class="canvas-grid"></div>
+          <button type="button" class="tutorial-button quiet-icon" aria-label="Open tutorial" title="Open tutorial"
+            @pointerdown.stop @click.stop="tutorialOpen = true"><TutorialIcon :size="21" /></button>
           <div class="graph-world" :style="{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }">
             <VersionConnections :graph-bounds="graphBounds" :window-dimensions="windowDimensions" :versions="versions"
               :visible-versions="visibleVersions" :visible-connection-versions="visibleConnectionVersions"
@@ -1288,22 +1294,22 @@ const cardModel: VersionCardModel = reactive({
               @pointerdown.stop @click.stop="navigateLane(lane.last)"><ChevronRight :size="Math.min(18, lane.height)" /></button>
           </template>
 
-          <div class="canvas-controls" @pointerdown.stop @click.stop>
-            <div v-if="pingMode" class="ping-mode-banner" role="status">PING MODE · Click to place a ping · Press P or Esc to exit</div>
+          <div class="canvas-controls" @pointerdown.stop @click.stop @wheel.stop>
+            <div v-if="pingMode" class="ping-mode-banner" role="status">PING MODE · Click to place a ping · Press {{ shortcutLabel('ping') }} or {{ shortcutLabel('dismiss') }} to exit</div>
             <div class="canvas-hotbar" role="toolbar" aria-label="Quick actions">
-            <button title="Create a free entry · N" aria-label="New free entry, N" @click="createFreeEntry"><Plus :size="16" /><span>New entry</span><kbd>N</kbd></button>
-            <button title="Add a child to the selected entry · Ctrl/⌘+Enter" aria-label="Add child, Ctrl or Command+Enter" :disabled="isReadOnly || !selectedNode" @click="selectedNode && addEntry(selectedNode)"><GitBranch :size="16" /><span>Add child</span><kbd>Ctrl/⌘+↵</kbd></button>
-            <button title="Detach the selected entry · Shift+D" aria-label="Detach selected, Shift+D" :disabled="isReadOnly || !selectedNode" @click="selectedNode && detachEntry(selectedNode)"><Unlink :size="16" /><span>Detach</span><kbd>Shift+D</kbd></button>
-            <button title="Compare two versions · Shift+C" aria-label="Compare versions, Shift+C" :class="{ selected: compareMode }" @click="compareMode ? closeVersionSelection() : startVersionSelection('compare')"><GitCompareArrows :size="16" /><span>Compare</span><kbd>Shift+C</kbd></button>
-            <button title="Merge two versions · M" aria-label="Merge versions, M" :class="{ selected: mergeMode }" @click="mergeMode ? closeVersionSelection() : startVersionSelection('merge')"><GitCompareArrows :size="16" /><span>Merge</span><kbd>M</kbd></button>
-            <button title="Focus the active version · F" aria-label="Focus active version, F" @click="focusActive"><Maximize :size="16" /><span>Focus</span><kbd>F</kbd></button>
+            <button data-action="new-entry" :title="`Create a free entry · ${shortcutLabel('newEntry')}`" :aria-label="`New free entry, ${shortcutLabel('newEntry', true)}`" @click="createFreeEntry"><Plus :size="16" /><span>New entry</span><kbd>{{ shortcutLabel('newEntry') }}</kbd></button>
+            <button :title="`Add a child to selected entries · ${shortcutLabel('addChild')}`" :aria-label="`Add child, ${shortcutLabel('addChild', true)}`" :disabled="isReadOnly || !selectedNode" @click="addChildren"><GitBranch :size="16" /><span>Add child</span><kbd>{{ shortcutLabel('addChild') }}</kbd></button>
+            <button :title="`Detach the selected entry · ${shortcutLabel('detach')}`" :aria-label="`Detach selected, ${shortcutLabel('detach', true)}`" :disabled="isReadOnly || !selectedNode" @click="selectedNode && detachEntry(selectedNode)"><Unlink :size="16" /><span>Detach</span><kbd>{{ shortcutLabel('detach') }}</kbd></button>
+            <button :title="`Compare two versions · ${shortcutLabel('compare')}`" :aria-label="`Compare versions, ${shortcutLabel('compare', true)}`" :class="{ selected: compareMode }" @click="compareMode ? closeVersionSelection() : startVersionSelection('compare')"><GitCompareArrows :size="16" /><span>Compare</span><kbd>{{ shortcutLabel('compare') }}</kbd></button>
+            <button :title="`Merge two versions · ${shortcutLabel('merge')}`" :aria-label="`Merge versions, ${shortcutLabel('merge', true)}`" :class="{ selected: mergeMode }" @click="mergeMode ? closeVersionSelection() : startVersionSelection('merge')"><GitCompareArrows :size="16" /><span>Merge</span><kbd>{{ shortcutLabel('merge') }}</kbd></button>
+            <button :title="`Focus the active version · ${shortcutLabel('focus')}`" :aria-label="`Focus active version, ${shortcutLabel('focus', true)}`" @click="focusActive"><Maximize :size="16" /><span>Focus</span><kbd>{{ shortcutLabel('focus') }}</kbd></button>
             <button title="Focus the active version and its neighbors" aria-label="Focus neighborhood" @click="focusNeighborhood()"><GitBranch :size="16" /><span>Neighborhood</span></button>
             <button title="Fit all lanes vertically" aria-label="Fit height" @click="fitHeight()"><Maximize :size="16" /><span>Fit height</span></button>
-            <button title="Fit all versions in view · Shift+A" aria-label="Fit all versions, Shift+A" @click="fitGraph()"><Layers3 :size="16" /><span>Fit all</span><kbd>Shift+A</kbd></button>
-            <button title="Toggle Ping Mode · P" aria-label="Toggle Ping Mode, P" :aria-pressed="pingMode" :class="{ selected: pingMode }" @click="pingMode = !pingMode"><Radio :size="16" /><span>{{ pingMode ? 'Ping mode on' : 'Ping' }}</span><kbd>P</kbd></button>
+            <button :title="`Fit all versions in view · ${shortcutLabel('fitAll')}`" :aria-label="`Fit all versions, ${shortcutLabel('fitAll', true)}`" @click="fitGraph()"><Layers3 :size="16" /><span>Fit all</span><kbd>{{ shortcutLabel('fitAll') }}</kbd></button>
+            <button :title="`Toggle Ping Mode · ${shortcutLabel('ping')}`" :aria-label="`Toggle Ping Mode, ${shortcutLabel('ping', true)}`" :aria-pressed="pingMode" :class="{ selected: pingMode }" @click="pingMode = !pingMode"><Radio :size="16" /><span>{{ pingMode ? 'Ping mode on' : 'Ping' }}</span><kbd>{{ shortcutLabel('ping') }}</kbd></button>
             <span class="hotbar-divider" aria-hidden="true"></span>
-            <button title="Zoom out · -" aria-label="Zoom out, minus" @click="zoomOut"><ZoomOut :size="16" /><kbd>−</kbd></button>
-            <button title="Zoom in · +" aria-label="Zoom in, plus" @click="zoomIn"><ZoomIn :size="16" /><kbd>+</kbd></button>
+            <button :title="`Zoom out · ${shortcutLabel('zoomOut')}`" :aria-label="`Zoom out, ${shortcutLabel('zoomOut') === '-' ? 'minus' : shortcutLabel('zoomOut', true)}`" @click="zoomOut"><ZoomOut :size="16" /><kbd>{{ shortcutLabel('zoomOut') }}</kbd></button>
+            <button :title="`Zoom in · ${shortcutLabel('zoomIn')}`" :aria-label="`Zoom in, ${shortcutLabel('zoomIn') === '+' ? 'plus' : shortcutLabel('zoomIn', true)}`" @click="zoomIn"><ZoomIn :size="16" /><kbd>{{ shortcutLabel('zoomIn') }}</kbd></button>
             </div>
           </div>
         </div>
@@ -1316,6 +1322,7 @@ const cardModel: VersionCardModel = reactive({
       <template v-if="menu.kind === 'version'">
         <div class="context-title">{{ menu.versionId === 'v0' ? 'ROOT ACTIONS' : 'VERSION ACTIONS' }}</div>
         <button @click="addEntryToVersion(menu.versionId); menu = null"><Plus :size="15" /> Add Entry</button>
+        <button @click="editTag(menu.versionId)"><TagIcon :size="15" /> {{ versionsById.get(menu.versionId!)?.tag ? 'Edit tag' : 'Add tag' }}</button>
         <button @click="focusActive(); menu = null"><Maximize :size="15" /> Focus active version</button>
         <button v-if="versions.find((version) => version.id === menu!.versionId)?.data.length" @click="centerVersionTreemaps(menu.versionId!); menu = null"><Maximize :size="15" /> Center all elements</button>
         <button v-if="!isReadOnly && versions.find((version) => version.id === menu!.versionId)?.data.length" @click="compactVersionTreemaps(menu.versionId!); menu = null"><Layers3 :size="15" /> Compact Layout</button>
@@ -1327,7 +1334,7 @@ const cardModel: VersionCardModel = reactive({
       <template v-else-if="menu.kind === 'entry' && menu.nodeId">
         <div class="context-title">ENTRY ACTIONS</div>
         <template v-if="!isReadOnly">
-          <button @click="addEntry(menu.nodeId); menu = null"><Plus :size="15" /> Add child</button>
+          <button @click="addChildren(); menu = null"><Plus :size="15" /> Add child</button>
           <button @click="addParent(); menu = null"><GitBranch :size="15" /> Add parent</button>
           <button @click="renameEntry(menu.nodeId!); menu = null"><Pencil :size="15" /> Change value</button>
           <button v-if="selectedNodes.length >= 2" @click="openMergeEntries(); menu = null"><Layers3 :size="15" /> Merge selected entries</button>
@@ -1375,6 +1382,10 @@ const cardModel: VersionCardModel = reactive({
       @close="roomDialogOpen = false" @activate="activateRoom" @delete="deleteLocalRoom" @create="createRoomFromDialog" />
     <VersionSearch v-if="searchOpen" :versions="versions" @close="searchOpen = false"
       @focus="activateAndFocusVersion($event); searchOpen = false" />
+    <VersionTags v-if="tagsOpen" :versions="versions" :editing="tagVersion"
+      @close="tagsOpen = false; tagVersionId = null" @save="saveTag($event)" @remove="saveTag()"
+      @focus="activateAndFocusVersion($event); tagsOpen = false" />
+    <StoryGuide v-if="tutorialOpen" :story="tutorial" @close="tutorialOpen = false" />
     <div v-if="entryTooltip" class="entry-tooltip" role="tooltip"
       :style="{ left: `${Math.min(entryTooltip.x + 14, window.innerWidth - 300)}px`, top: `${Math.min(entryTooltip.y + 16, window.innerHeight - 100)}px` }">
       {{ entryTooltip.description }}

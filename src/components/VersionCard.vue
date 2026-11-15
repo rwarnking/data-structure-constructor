@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, toRefs } from 'vue'
-import { MoreHorizontal } from '@lucide/vue'
+import { actionIcons } from '../config/icons'
 import type { Version } from '../types/workspace'
 import type { VersionCardModel } from '../types/graph'
 import { userColor, versionColor } from '../utils/colors'
@@ -8,6 +8,7 @@ import TileLabel from './TileLabel.vue'
 import { displayVersionId } from '../utils/versions'
 
 const props = defineProps<{ version: Version; model: VersionCardModel }>()
+const { menu: MoreHorizontal, tag: TagIcon } = actionIcons
 const { active, compareIds, compareMode, zoom, overNode, invalidNode, hoveredNode, selectedNodes, draggedSubtreeIds, draggedOriginalTile, selectionBox, windowDimensions, clientId, isReadOnly, versionTiles, duplicateValueLinks, displayCardPosition, cardHeight, rootLabelOffset, rootLabelX, versionAuthorColor, activeUsersFor, descendantsCount, isPreviewing, previewLabel, versionAction, cardData, mapViewport, mapTransform, tileStrokeColor, tileStrokeWidth, dragOverlayTiles, handleVersionClick, handleVersionDoubleClick, onVersionContext, onVersionMenu, startMapPan, zoomMap, startMapTileGesture, enterTile, moveTileTooltip, leaveTile, onTileClick, onTileDoubleClick, onTileContext } = toRefs(props.model)
 const overlayTiles = computed(() => dragOverlayTiles.value(props.version))
 const overlayIds = computed(() => new Set(overlayTiles.value.map((tile) => tile.id)))
@@ -19,9 +20,14 @@ const overlayIds = computed(() => new Set(overlayTiles.value.map((tile) => tile.
     @click="handleVersionClick(version, $event)" @dblclick.stop="handleVersionDoubleClick(version)" @contextmenu="onVersionContext(version, $event)" :data-over="overNode === version.id">
     <span v-for="(user, index) in activeUsersFor(version.id)" :key="`active-${user.id}`"
       class="version-user-outline" :style="{ borderColor: user.color, inset: `${-2 - index * 3}px` }"></span>
+    <span v-if="version.id === 'v0' && version.tag" class="version-tag-indicator" :title="`${version.tag.title}\n${version.tag.description}`"
+      :style="{ transform: `scale(${1 / zoom})`, top: `${rootLabelOffset() - 42}px`, left: `${rootLabelX()}px` }"
+      :aria-label="`Tag: ${version.tag.title}. ${version.tag.description}`" role="img"><TagIcon :size="18" /></span>
     <div v-if="version.id !== 'v0'" class="version-card-head">
       <span class="branch-mark" :style="{ background: versionColor(version) }"></span>
       <span class="version-header-id" :title="displayVersionId(version)">{{ displayVersionId(version) }}</span>
+      <span v-if="version.tag" class="version-tag-indicator" :title="`${version.tag.title}\n${version.tag.description}`"
+        :aria-label="`Tag: ${version.tag.title}. ${version.tag.description}`" role="img"><TagIcon :size="14" /></span>
       <strong class="version-action">{{ version.change }}</strong>
       <span class="version-count">({{ descendantsCount(version.data) }} Entries)</span>
       <button class="card-menu quiet-icon" title="Version actions" @click.stop="onVersionMenu(version, $event)" @dblclick.stop><MoreHorizontal :size="17" /></button>

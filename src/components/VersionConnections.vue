@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import type { Version } from '../types/workspace'
 import { versionColor } from '../utils/colors'
+import { actionSymbols } from '../config/icons'
 
 const props = defineProps<{
   graphBounds: { width: number; height: number }
@@ -80,13 +81,14 @@ const straightGroups = computed(() => {
     </template>
     <text v-for="version in visibleConnectionVersions.filter((item) => item.parentId)" :key="`connector-symbol-${version.id}`"
       class="connector-symbol" aria-hidden="true" text-anchor="middle" dominant-baseline="central"
+      :data-connector-symbol="version.id"
       :x="connectorLabelPosition(versionsById.get(version.parentId!)!, version).x"
       :y="connectorLabelPosition(versionsById.get(version.parentId!)!, version).y">
       {{ versionAction(version).symbol }}
     </text>
     <text v-for="version in visibleMergeConnectionVersions" :key="`merge-symbol-${version.id}`"
       class="connector-symbol" aria-hidden="true" text-anchor="middle" dominant-baseline="central"
-      :x="mergeConnectorLabelPosition(version).x" :y="mergeConnectorLabelPosition(version).y">⋈</text>
+      :x="mergeConnectorLabelPosition(version).x" :y="mergeConnectorLabelPosition(version).y">{{ actionSymbols.merge }}</text>
   </svg>
 
 </template>

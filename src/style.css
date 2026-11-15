@@ -182,6 +182,14 @@ h1 { margin: 7px 0 0; font-size: 21px; line-height: 1.25; font-weight: 700; lett
 .connection-outline { filter: drop-shadow(0 3px 3px #23332f47); }
 .version-card { position: absolute; padding: 0; display: flex; flex-direction: column; border: 1px solid #d9e2dc; border-radius: 7px; background: #fcfdfb; box-shadow: 0 5px 16px #2c443511; cursor: pointer; transition: box-shadow .18s, border-color .18s; user-select: none; overflow: visible; }
 .version-card.root-version { border-radius: 0; }
+.version-tag-indicator { flex: 0 0 auto; color: #aa5a1a; line-height: 0; cursor: help; }
+.root-version > .version-tag-indicator { position: absolute; z-index: 7; transform-origin: right bottom; }
+.tutorial-button { position: absolute; z-index: 9; top: 12px; right: 12px; }
+.story-guide { position: fixed; z-index: 100; top: 48px; right: 16px; width: min(390px, calc(100vw - 32px)); max-height: calc(100vh - 64px); overflow-y: auto; }
+.story-guide h2 { font-size: 18px; margin: 12px 0; }
+.story-guide p, .story-guide li { font-size: 13px; line-height: 1.5; }
+.story-image { width: 100%; max-height: 110px; object-fit: contain; }
+.story-highlight { position: fixed; z-index: 99; outline: 3px solid #e8a43d; outline-offset: 3px; border-radius: 5px; pointer-events: none; }
 .version-card.root-version .mini-map { margin: 0; border-radius: 0; overflow: hidden; }
 .version-card.root-version .empty-map { background: #f5f7f5; }
 .version-card.root-version .overview-map { position: relative; margin: 0; border-radius: 0; }

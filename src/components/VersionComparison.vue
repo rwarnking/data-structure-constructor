@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { toRefs, type UnwrapNestedRefs } from 'vue'
-import { Check, RotateCcw, Search, X } from '@lucide/vue'
+import { actionIcons } from '../config/icons'
+const { confirm: Check, reset: RotateCcw, search: Search, close: X } = actionIcons
 import type { useVersionComparison } from '../composables/useVersionComparison'
 import type { Version } from '../types/workspace'
 import TileLabel from './TileLabel.vue'
@@ -122,7 +123,7 @@ function versionLabel(id: string) {
           </div>
           <div class="comparison-panels">
             <section v-for="(panel, panelIndex) in comparisonPanels" :key="panel.id" class="comparison-panel">
-              <header><span>{{ panel.label }}</span><strong>{{ displayVersionId(panel.version) }}</strong></header>
+              <header><span>{{ panel.label }}</span><strong>{{ displayVersionId(panel.version) }}<template v-if="panel.version.tag"> · {{ panel.version.tag.title }}</template></strong></header>
               <svg :viewBox="comparisonViewBox" role="img" :aria-label="`${panel.label} treemap comparison`">
                 <rect v-for="ghost in comparisonGhosts(panelIndex)" :key="`ghost-${ghost.id}`"
                   :x="ghost.x" :y="ghost.y" :width="ghost.width" :height="ghost.height"

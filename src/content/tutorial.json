@@ -1,0 +1,30 @@
+{
+  "title": "Welcome to Canopy",
+  "steps": [
+    {
+      "title": "Explore the version graph",
+      "text": "Each window is a version of your hierarchy. Click a version to activate it, or double-click to focus it.",
+      "image": "tutorial-graph.svg",
+      "imageAlt": "Three connected version windows",
+      "list": { "ordered": false, "items": ["Drag empty graph space to pan.", "Scroll to zoom the graph.", "Use arrow keys to navigate versions."] }
+    },
+    {
+      "title": "Create an entry",
+      "text": "Select the New entry button to open the editor. You can cancel the editor or create an entry.",
+      "highlight": "[data-action='new-entry']",
+      "instruction": "Click New entry to continue.",
+      "completion": { "event": "click", "selector": "[data-action='new-entry']" }
+    },
+    {
+      "title": "Work with entries",
+      "text": "Click entries to select them, then use the context menu or toolbar to edit the hierarchy.",
+      "list": { "ordered": true, "items": ["Shift-click to select multiple entries.", "Use Add child or Add parent to build a hierarchy.", "Drag an entry onto another to attach it."] }
+    },
+    {
+      "title": "Find and share your work",
+      "text": "Search versions with Ctrl/⌘+F. Use Settings to export data, import a local copy, or list version tags.",
+      "highlight": "[aria-label='Settings']",
+      "instruction": "You can restart this tutorial from the help button at any time."
+    }
+  ]
+}

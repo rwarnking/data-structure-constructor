@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { Check, Plus, X } from '@lucide/vue'
+import { actionIcons } from '../config/icons'
 import type { EditorState } from '../types/workspace'
 
 defineProps<{ editor: EditorState; setEntryValueInput: (element: unknown) => void }>()
+const { confirm: Check, add: Plus, close: X } = actionIcons
 const emit = defineEmits<{ close: []; commit: []; 'add-row': []; 'remove-row': [id: string] }>()
 </script>
 

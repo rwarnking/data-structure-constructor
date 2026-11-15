@@ -19,6 +19,8 @@ const { reflowVersionLayout, allocateVersionNumber, assignMissingVersionNumbers,
 const { layoutTileLabel, tilesForForest, tilesFor } = await vite.ssrLoadModule('/src/utils/treemap.ts')
 const { useGraphCamera } = await vite.ssrLoadModule('/src/composables/useGraphCamera.ts')
 const { parseDataset } = await vite.ssrLoadModule('/src/services/dataset.ts')
+const { shortcutAction, shortcuts } = await vite.ssrLoadModule('/src/config/hotkeys.ts')
+const { actionIcons, actionSymbols } = await vite.ssrLoadModule('/src/config/icons.ts')
 
 function node(id, children = []) {
   return { id, value: id, children }
@@ -27,6 +29,40 @@ function node(id, children = []) {
 function version(id, data, parentId = null, step = 0) {
   return { id, data, parentId, step, lane: 0, branch: id, change: id, createdAt: step }
 }
+
+test('action configuration resolves editable shortcut mappings and icons', () => {
+  const event = { key: 'f', ctrlKey: true, metaKey: false, altKey: false, shiftKey: false, repeat: false }
+  assert.equal(shortcutAction(event), 'search')
+  assert.equal(shortcutAction(event, { search: [{ key: 'k', mod: true }] }), undefined)
+  assert.equal(shortcutAction({ ...event, key: 'k', metaKey: true, ctrlKey: false }, { search: [{ key: 'k', mod: true }] }), 'search')
+  assert.ok(shortcuts.addChild.length)
+  assert.ok(actionIcons.add)
+  assert.equal(actionSymbols.merge, '⋈')
+})
+
+test('adding children applies one independent entry per selected parent', () => {
+  const scope = effectScope()
+  scope.run(() => {
+    const state = ref({ versions: [version('v0', [node('a', [node('nested')]), node('b')])], activeId: 'v0', nextNode: 1, nextVersion: 1, nextLane: 1, copyLinks: [] })
+    const active = computed(() => state.value.versions[0])
+    const selectedNodes = ref(['a', 'nested', 'b'])
+    let commits = 0
+    const editor = useHierarchyEditor({
+      clientId: 'test', state, active, selectedNodes, isReadOnly: computed(() => false),
+      setSelectedNodes: () => {}, notify: () => {},
+      createVersion: (data) => { commits++; active.value.data = data; return active.value },
+    })
+    editor.addChildren()
+    editor.editor.value.entries[0].value = 'Child'
+    editor.commitEditor()
+    const a = active.value.data[0]
+    const children = [a.children[1], a.children[0].children[0], active.value.data[1].children[0]]
+    assert.deepEqual(children.map((child) => child.value), ['Child', 'Child', 'Child'])
+    assert.equal(new Set(children.map((child) => child.id)).size, 3)
+    assert.equal(commits, 1)
+  })
+  scope.stop()
+})
 
 test('adding one parent preserves selected entries and uses the first entry parent', () => {
   const scope = effectScope()
