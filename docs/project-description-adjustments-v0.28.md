@@ -1,0 +1,16 @@
+- add an export interaction logs to the settings menu
+- the interaction logs should save any user input that is done: basically all actions, zooming, section, panning, etc
+- with timestamp
+- add an replay interaction log button to the settings menu
+- the replay mode should allow to apply all interactions after each other to an empty room
+- when doing this automatically create an empty room
+- add a playback speed at which the actions are applyied
+- account for different users,
+- cursor movement to not need to be tracked, they should just be interpolated between one interaction and the next
+- save whether a hotkey was used or a button was pressed.
+- track the input time and the change time.
+- track strg+z, strg+y
+- the viewer of the interaction logs in the sidebar should only show some times of actions, and should be limited to the last 10 actions
+- save the interactionlog until the browserwindow is closed, do not save it to local storage, only the room data should be stored there
+
+- Make font properties globally configurable so that individual UI elements can use centralized font settings. This should include properties such as the **treemap font size**.

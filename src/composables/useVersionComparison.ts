@@ -237,9 +237,10 @@ export function useVersionComparison(
   function onMergeTileClick(nodeId: string) {
     if (suppressMergeClick) {
       suppressMergeClick = false
-      return
+      return false
     }
     toggleMergeEntry(nodeId)
+    return true
   }
   function onMergeParentChange(nodeId: string, event: Event) {
     setMergeParent(nodeId, (event.target as HTMLSelectElement).value)

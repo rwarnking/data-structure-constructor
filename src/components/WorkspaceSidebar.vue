@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { actionIcons } from '../config/icons'
+import { actionIcons, actionSymbols } from '../config/icons'
 import { shortcutLabel } from '../config/hotkeys'
 import type { RoomStatus } from '../collaboration'
 import type { InteractionEntry } from '../types/collaboration'
@@ -15,9 +15,10 @@ const props = defineProps<{
   clientId: string; versions: Version[]; recentInteractions: InteractionEntry[]
   colorForUser: (id: string) => string
   branchCount: number; active: Version; activeNodes: number; activeChildren: number
+  volume: number; muted: boolean; branchingEnabled: boolean
 }>()
 const { expand: ChevronDown, export: Download, layers: Layers3, darkMode: Moon,
-  settings: Settings, lightMode: Sun, import: Upload, tag: TagIcon } = actionIcons
+  settings: Settings, lightMode: Sun, import: Upload, tag: TagIcon, changeRoom: ChangeRoom } = actionIcons
 const settingsOpen = ref(false)
 const importInput = ref<HTMLInputElement | null>(null)
 function importFile(event: Event) {
@@ -31,11 +32,38 @@ function versionLabel(id: string) {
   const version = props.versions.find((item) => item.id === id)
   return version ? displayVersionId(version) : id
 }
+function interactionSymbol(entry: InteractionEntry) {
+  const action = (entry.action.split(' · ').at(-1) ?? entry.action).toLowerCase()
+  if (entry.ping) return '◎'
+  if (action.includes('merge')) return actionSymbols.merge
+  if (action.includes('split')) return actionSymbols.split
+  if (action.includes('delete') || action.includes('cut') || action.includes('removed')) return actionSymbols.delete
+  if (action.includes('detach')) return actionSymbols.detach
+  if (action.includes('move')) return actionSymbols.move
+  if (action.includes('add') || action.includes('create') || action.includes('paste')) return actionSymbols.add
+  return actionSymbols.modify
+}
+function interactionAvailable(entry: InteractionEntry) {
+  return !!entry.ping || !!entry.versionId && props.versions.some((version) => version.id === entry.versionId)
+}
+function focusInteraction(entry: InteractionEntry) {
+  if (entry.ping) emit('focus-ping', entry.ping)
+  else if (entry.nodeId && entry.versionId && props.versions.some((version) =>
+    version.id === entry.versionId && findNode(version.data, entry.nodeId!))) emit('navigate', entry, 'node')
+  else {
+    const version = props.versions.find((item) => item.id === entry.versionId)
+    const parent = props.versions.find((item) => item.id === version?.parentId)
+    if (entry.nodeId && parent && findNode(parent.data, entry.nodeId)) {
+      emit('navigate', { ...entry, versionId: parent.id }, 'node')
+    } else emit('navigate', entry, 'version')
+  }
+}
 const emit = defineEmits<{
   'toggle-sidebar': []; 'toggle-theme': []; 'change-room': []; 'copy-invite': []
   'focus-collaborator': [id: string]; 'focus-ping': [location: { x: number; y: number }]
   navigate: [entry: InteractionEntry, kind: 'node' | 'version']; 'focus-active': []
   'import-data': [file: File]; 'export-data': []; 'show-tags': []
+  'set-volume': [value: number]; 'toggle-mute': []; 'set-branching': [enabled: boolean]
 }>()
 </script>
 
@@ -50,7 +78,38 @@ const emit = defineEmits<{
         :aria-label="sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'" :aria-expanded="!sidebarCollapsed"
         @click="emit('toggle-sidebar')"><ChevronDown :size="16" /></button>
     </div>
+    <div v-if="sidebarCollapsed" class="compact-sidebar">
+      <button type="button" class="quiet-icon compact-room" title="Change Room" aria-label="Change Room"
+        @click="emit('change-room')"><ChangeRoom :size="19" /></button>
+      <div class="compact-collaborators" aria-label="Collaborators">
+        <button v-for="user in connectedUsers" :key="user.id" type="button" class="collaborator compact-user"
+          :disabled="!user.activeVersionId || !versions.some((version) => version.id === user.activeVersionId)"
+          :title="`${user.name} · ${user.activeVersionId ? versionLabel(user.activeVersionId) : 'No active version'}`"
+          :aria-label="`Focus ${user.name}${user.id === clientId ? ' (you)' : ''}`"
+          @click="emit('focus-collaborator', user.id)">
+          <span class="collaborator-avatar" :style="{ '--collaborator-color': colorForUser(user.id) }" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4" /><path d="M4.5 21a7.5 7.5 0 0 1 15 0" /></svg>
+          </span>
+        </button>
+      </div>
+      <div class="sidebar-fill"></div>
+      <ol class="compact-interactions" aria-label="Interaction log">
+        <li v-for="entry in recentInteractions" :key="entry.id">
+          <button type="button" class="quiet-icon compact-interaction" :disabled="!interactionAvailable(entry)"
+            :style="{ color: entry.actorColor || colorForUser(entry.actorId) }" :title="`${entry.actorName}: ${entry.action}`"
+            :aria-label="`${entry.actorName}: ${entry.action}`" @click="focusInteraction(entry)">{{ interactionSymbol(entry) }}</button>
+        </li>
+      </ol>
+    </div>
     <section v-if="settingsOpen" class="side-section settings-section">
+      <button type="button" class="theme-toggle" @click="emit('toggle-mute')">{{ muted ? 'Unmute sound' : 'Mute sound' }}</button>
+      <label class="volume-control">Volume
+        <input type="range" min="0" max="1" step="0.05" :value="volume" aria-label="Volume"
+          @input="emit('set-volume', Number(($event.target as HTMLInputElement).value))" />
+      </label>
+      <button type="button" class="theme-toggle" :aria-pressed="branchingEnabled" @click="emit('set-branching', !branchingEnabled)">
+        Branching {{ branchingEnabled ? 'on' : 'off' }}
+      </button>
       <button type="button" class="theme-toggle" @click="emit('toggle-theme')">
         <component :is="darkMode ? Sun : Moon" :size="15" />
         <span>{{ darkMode ? 'Light mode' : 'Dark mode' }}</span>
@@ -95,7 +154,7 @@ const emit = defineEmits<{
       <div class="interaction-heading"><span class="section-label">INTERACTION LOG</span><small>LAST 10</small></div>
       <ol v-if="recentInteractions.length" class="interaction-list">
         <li v-for="entry in recentInteractions" :key="entry.id">
-          <span class="interaction-user" :style="{ color: colorForUser(entry.actorId) }">{{ entry.actorName }}</span>
+          <span class="interaction-user" :style="{ color: entry.actorColor || colorForUser(entry.actorId) }">{{ entry.actorName }}</span>
           <span class="interaction-action">{{ entry.action }}</span>
           <button v-if="entry.ping" class="interaction-reference" type="button"
             :title="`Focus ping by ${entry.actorName}`" @click="emit('focus-ping', entry.ping)">Ping location</button>

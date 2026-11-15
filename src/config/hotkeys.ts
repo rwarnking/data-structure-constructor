@@ -26,6 +26,8 @@ export const shortcuts = {
   neighborhood: [{ key: '2' }],
   fitHeight: [{ key: '3' }],
   fitAll: [{ key: '4' }],
+  zoomIn: [{ key: '+', shift: 'any' }, { key: '=', shift: 'any' }],
+  zoomOut: [{ key: '-', shift: 'any' }],
   firstLane: [{ key: 'pageup' }],
   lastLane: [{ key: 'pagedown' }],
   firstVersion: [{ key: 'home' }],

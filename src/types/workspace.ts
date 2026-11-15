@@ -33,8 +33,10 @@ export type Version = {
   mapView?: MapView
   createdAt: number
 }
-export type StoredState = { versions: Version[]; activeId: string; nextNode: number; nextVersion: number; nextLane: number; copyLinks: CopyLink[]; retiredVersionNumbers?: RetiredVersionNumber[] }
 export type Revision = { clock: number; actor: string }
+export type VersionSound = 'entryAdded' | 'moved' | 'none' | 'silent'
+export type BranchingSetting = { enabled: boolean; revision: Revision }
+export type StoredState = { versions: Version[]; activeId: string; nextNode: number; nextVersion: number; nextLane: number; copyLinks: CopyLink[]; retiredVersionNumbers?: RetiredVersionNumber[]; branching?: BranchingSetting }
 export type CollaborationMetadata = {
   clock: number
   versions: Record<string, Revision>

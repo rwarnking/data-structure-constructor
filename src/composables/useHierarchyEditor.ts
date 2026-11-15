@@ -1,5 +1,5 @@
 import { nextTick, ref, watch, type ComputedRef, type Ref } from 'vue'
-import type { EditorState, EntryDraft, EntryOperation, MapView, SpatialPreview, SplitDraft, StoredState, TreeNode, Version } from '../types/workspace'
+import type { EditorState, EntryDraft, EntryOperation, MapView, SpatialPreview, SplitDraft, StoredState, TreeNode, Version, VersionSound } from '../types/workspace'
 import { countNodes, descendants, findNode, findParent, flattenNodes, removeNode } from '../utils/tree'
 
 export function useHierarchyEditor(options: {
@@ -8,9 +8,10 @@ export function useHierarchyEditor(options: {
   active: ComputedRef<Version>
   selectedNodes: Ref<string[]>
   isReadOnly: ComputedRef<boolean>
-  createVersion: (data: TreeNode[], change: string, forceNew?: boolean) => Version | null
+  createVersion: (data: TreeNode[], change: string, forceNew?: boolean, sound?: VersionSound) => Version | null
+  canCreateFrom: (version: Version) => boolean
   setSelectedNodes: (ids: string[]) => void
-  notify: (message: string) => void
+  notify: (message: string, error?: boolean) => void
 }) {
   const { clientId: CLIENT_ID, state, active, selectedNodes, isReadOnly, createVersion, setSelectedNodes, notify } = options
   const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
@@ -52,7 +53,7 @@ export function useHierarchyEditor(options: {
       const selected = findNode(active.value.data, id)
       return selected && descendants(selected).includes(parent.id)
     })) {
-      notify('Cannot add a parent inside the selected entries')
+      notify('Cannot add a parent inside the selected entries', true)
       return
     }
     editor.value = { mode: 'create', parentId: parent?.id ?? null, parentOf: ids, entries: [newEntryDraft()] }
@@ -60,6 +61,10 @@ export function useHierarchyEditor(options: {
 
   function commitEditor() {
     if (!editor.value || (isReadOnly.value && editor.value.mode === 'rename')) return
+    if (!options.canCreateFrom(active.value)) {
+      notify('Cannot create a version here while branching is disabled', true)
+      return
+    }
     const currentEditor = editor.value
     if (currentEditor.mode === 'create') {
       const entries = currentEditor.entries.map((entry) => ({
@@ -70,28 +75,28 @@ export function useHierarchyEditor(options: {
       const data = clone(active.value.data)
       if (currentEditor.childOf) {
         const parents = currentEditor.childOf.map((id) => findNode(data, id))
-        if (parents.some((parent) => !parent)) { notify('Selected entries are no longer available'); return }
+        if (parents.some((parent) => !parent)) { notify('Selected entries are no longer available', true); return }
         for (const parent of parents) {
           parent!.children.push(...entries.map((entry) => makeNode(entry.value, entry.description)))
         }
         editor.value = null
         const count = parents.length * entries.length
-        createVersion(data, count > 1 ? `Created ${count} items` : `Add ${entries[0]!.value}`, count > 1)
+        createVersion(data, count > 1 ? `Created ${count} items` : `Add ${entries[0]!.value}`, count > 1, 'entryAdded')
         return
       }
       if (currentEditor.parentOf) {
         const ids = currentEditor.parentOf
         const flat = flattenNodes(data)
         const original = ids.map((id) => flat.get(id)?.node)
-        if (original.some((node) => !node)) { notify('Selected entries are no longer available'); return }
+        if (original.some((node) => !node)) { notify('Selected entries are no longer available', true); return }
         const siblings = currentEditor.parentId ? findNode(data, currentEditor.parentId)?.children : data
-        if (!siblings) { notify('The original parent is no longer available'); return }
+        if (!siblings) { notify('The original parent is no longer available', true); return }
         const insertionIndex = siblings.findIndex((node) => node.id === ids[0])
         const selectedBefore = siblings.slice(0, insertionIndex).filter((node) => ids.includes(node.id)).length
         if (insertionIndex < 0 || ids.some((id) => {
           const node = findNode(data, id)
           return !!node && !!currentEditor.parentId && descendants(node).includes(currentEditor.parentId)
-        })) { notify('Cannot add a parent inside the selected entries'); return }
+        })) { notify('Cannot add a parent inside the selected entries', true); return }
         const depth = (id: string) => {
           let result = 0
           let parentId = flat.get(id)?.parentId
@@ -103,7 +108,7 @@ export function useHierarchyEditor(options: {
         parent.children = original.filter((node): node is TreeNode => !!node)
         siblings.splice(Math.min(insertionIndex - selectedBefore, siblings.length), 0, parent)
         editor.value = null
-        const version = createVersion(data, `Add parent ${parent.value}`, true)
+        const version = createVersion(data, `Add parent ${parent.value}`, true, 'entryAdded')
         if (version) setSelectedNodes([parent.id])
         return
       }
@@ -118,7 +123,7 @@ export function useHierarchyEditor(options: {
       const summary = nodes.length === 1
         ? `${operation} ${entries[0]!.value}`
         : `Created ${nodes.length} items`
-      createVersion(data, summary, nodes.length > 1)
+      createVersion(data, summary, nodes.length > 1, 'entryAdded')
       return
     }
     const { nodeId, value: rawValue, description: rawDescription } = currentEditor
@@ -173,7 +178,7 @@ export function useHierarchyEditor(options: {
       siblings.splice(index, 1)
       data.push(...detached)
     } else siblings.splice(index, 1)
-    createVersion(data, `Delete ${node.value}`)
+    createVersion(data, `Delete ${node.value}`, false, 'moved')
   }
 
   function deleteSelectedEntries(mode: 'keep-children' | 'subtree' | 'detach-children') {
@@ -214,7 +219,7 @@ export function useHierarchyEditor(options: {
     const nextData = removeSelected(data)
     if (mode === 'detach-children') nextData.push(...detachedRoots)
     const count = countNodes(active.value.data) - countNodes(nextData)
-    const version = createVersion(nextData, `Deleted ${count} items`, true)
+    const version = createVersion(nextData, `Deleted ${count} items`, true, 'moved')
     if (version) setSelectedNodes([])
     entryOperation.value = null
     bulkDeleteDialog.value = false
@@ -354,7 +359,7 @@ export function useHierarchyEditor(options: {
       mergeNode.children = children
       siblings.splice(Math.max(0, originalIndex - removedBefore), 0, mergeNode)
       entryOperation.value = null
-      const version = createVersion(nextData, `Merge ${selected.size} entries into ${value}`, true)
+      const version = createVersion(nextData, `Merge ${selected.size} entries into ${value}`, true, 'entryAdded')
       if (version) setSelectedNodes([mergeNode.id])
       return
     }
@@ -385,7 +390,7 @@ export function useHierarchyEditor(options: {
     const nextData = data
     siblings.splice(index, 1, ...replacements)
     entryOperation.value = null
-    const version = createVersion(nextData, `Split ${original.value} into ${entries.length} entries`, true)
+    const version = createVersion(nextData, `Split ${original.value} into ${entries.length} entries`, true, 'entryAdded')
     if (version) setSelectedNodes(replacements.map((node) => node.id))
   }
 
@@ -398,7 +403,7 @@ export function useHierarchyEditor(options: {
     let version: Version | null = null
     if (detached) {
       data.push(detached)
-      version = createVersion(data, `Detach ${detached.value}`)
+      version = createVersion(data, `Detach ${detached.value}`, false, 'moved')
       if (version && preview) {
         version.positions = clone(preview.positions)
         version.mapView = clone(preview.view)
@@ -422,7 +427,7 @@ export function useHierarchyEditor(options: {
     const target = findNode(data, targetId)
     if (!source || !target) return null
     target.children.push(source)
-    const version = createVersion(data, `Attach ${source.value} to ${target.value}`)
+    const version = createVersion(data, `Attach ${source.value} to ${target.value}`, false, 'moved')
     if (version && preview) {
       version.positions = clone(preview.positions)
       version.mapView = clone(preview.view)

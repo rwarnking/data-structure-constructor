@@ -1,4 +1,4 @@
-import type { CopyLink, RetiredVersionNumber, Revision, StoredState, Version } from './workspace'
+import type { BranchingSetting, CopyLink, RetiredVersionNumber, Revision, StoredState, Version } from './workspace'
 
 export type VersionChange = { version: Version; revision: Revision }
 export type VersionRemoval = { id: string; revision: Revision }
@@ -9,6 +9,7 @@ export type SyncDelta = {
   retiredVersionNumbers?: RetiredVersionNumber[]
   active?: { id: string; revision: Revision }
   copyLinks?: { links: CopyLink[]; revision: Revision }
+  branching?: BranchingSetting
   nextNode: number
   nextVersion: number
   nextLane: number
@@ -27,6 +28,7 @@ export type InteractionEntry = {
   id: string
   actorId: string
   actorName: string
+  actorColor?: string
   action: string
   createdAt: number
   versionId?: string

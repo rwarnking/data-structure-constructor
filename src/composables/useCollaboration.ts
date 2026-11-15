@@ -21,7 +21,8 @@ export function useCollaboration(options: {
   reflowLayout: () => void
   fitGraph: () => void
   followVersion: (version: Version) => void
-  notify: (message: string) => void
+  notify: (message: string, error?: boolean) => void
+  playPing: () => void
 }) {
   const { clientId: CLIENT_ID, state, active, selectedNodes, currentRoomName, graphCanvas, pan, zoom, normalizeState, roomDataKey, reflowLayout, fitGraph, followVersion, notify } = options
   const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
@@ -113,6 +114,7 @@ export function useCollaboration(options: {
       id: `${CLIENT_ID}-${Date.now()}-${++interactionSequence}`,
       actorId: CLIENT_ID,
       actorName: userName.value.trim() || animalForUser(CLIENT_ID),
+      actorColor: localColor.value,
       action,
       createdAt: Date.now(),
       ...reference,
@@ -198,6 +200,8 @@ export function useCollaboration(options: {
       .filter((item) => !retiredKeys.has(JSON.stringify([item.id, item.suffix ?? 0])))
     const delta: SyncDelta = {
       type: 'sync-delta', versions: changed, removed, copyLinks, retiredVersionNumbers,
+      ...(value.branching && JSON.stringify(previous.branching) !== JSON.stringify(value.branching)
+        ? { branching: value.branching } : {}),
       nextNode: value.nextNode, nextVersion: value.nextVersion, nextLane: value.nextLane,
     }
     persistCollaborationMetadata()
@@ -225,7 +229,7 @@ export function useCollaboration(options: {
       || !Object.values(message.versions).every(isRevision) || !Object.values(message.removed).every(isRevision)
       || (message.interactions !== undefined
         && (!Array.isArray(message.interactions) || !message.interactions.every(isInteractionEntry)))) {
-      notify('Ignored an invalid shared-state snapshot')
+      notify('Ignored an invalid shared-state snapshot', true)
       return
     }
     collaborationMetadata = {
@@ -258,14 +262,23 @@ export function useCollaboration(options: {
       || (message.retiredVersionNumbers !== undefined && (!Array.isArray(message.retiredVersionNumbers)
         || !message.retiredVersionNumbers.every(isRetiredVersionNumber)))
       || !Number.isInteger(message.nextNode) || !Number.isInteger(message.nextVersion)
-      || !Number.isInteger(message.nextLane)) {
-      notify('Ignored an invalid shared-state update')
+      || !Number.isInteger(message.nextLane)
+      || (message.branching !== undefined && (!isRecord(message.branching)
+        || typeof message.branching.enabled !== 'boolean' || !isRevision(message.branching.revision)))) {
+      notify('Ignored an invalid shared-state update', true)
       return
     }
     const previousVersions = new Map(state.value.versions.map((version) => [version.id, version]))
     const versionsById = new Map(previousVersions)
     const newVersions: Version[] = []
     let changed = false
+    if (message.branching) {
+      collaborationMetadata.clock = Math.max(collaborationMetadata.clock, message.branching.revision.clock)
+      if (revisionIsNewer(message.branching.revision, state.value.branching?.revision)) {
+        state.value.branching = clone(message.branching)
+        changed = true
+      }
+    }
     const retired = state.value.retiredVersionNumbers ?? []
     const retiredById = new Map(retired.map((item) => [item.id, item]))
     for (const item of message.retiredVersionNumbers ?? []) {
@@ -274,7 +287,7 @@ export function useCollaboration(options: {
         || previous.number.step !== item.number.step || previous.number.branch !== item.number.branch
         || previous.number.subbranch !== item.number.subbranch || previous.number.origin !== item.number.origin
         || previous.number.owner !== item.number.owner || previous.number.scheme !== item.number.scheme)) {
-        notify('Ignored a shared update with conflicting retired version numbers')
+        notify('Ignored a shared update with conflicting retired version numbers', true)
         return
       }
       retiredById.set(item.id, item)
@@ -310,7 +323,7 @@ export function useCollaboration(options: {
     }
     for (const change of message.versions) {
       if (!change || !isVersion(change.version) || !isRevision(change.revision)) {
-        notify('Ignored an invalid shared version update')
+        notify('Ignored an invalid shared version update', true)
         continue
       }
       const parent = change.version.parentId ? versionsById.get(change.version.parentId) : undefined
@@ -321,7 +334,7 @@ export function useCollaboration(options: {
         ? change.version.parentId === null && change.version.step === 0
         : !!parent && hasValidVersionStep(change.version, parent, mergeSource)
       if (!validParent) {
-        notify('Ignored a shared version with a missing or invalid connection')
+        notify('Ignored a shared version with a missing or invalid connection', true)
         continue
       }
       const currentRevision = collaborationMetadata.versions[change.version.id]
@@ -330,7 +343,7 @@ export function useCollaboration(options: {
       const existing = versionsById.get(change.version.id)
       if (existing?.number) {
         if (change.version.number && JSON.stringify(change.version.number) !== JSON.stringify(existing.number)) {
-          notify('Ignored a shared update that changed a version number')
+          notify('Ignored a shared update that changed a version number', true)
           continue
         }
         change.version.number = existing.number
@@ -340,7 +353,7 @@ export function useCollaboration(options: {
       if (change.version.number && [...versionsById.values()].some((version) =>
         version.id !== change.version.id && version.number?.origin === change.version.number!.origin
         && version.number.step === change.version.number!.step)) {
-        notify('Ignored a shared version with a duplicate version number')
+        notify('Ignored a shared version with a duplicate version number', true)
         continue
       }
       if (!versionsById.has(change.version.id) && change.revision.actor !== CLIENT_ID) newVersions.push(change.version)
@@ -524,12 +537,17 @@ export function useCollaboration(options: {
     if (!collaborationRoom) return
     peerRoom.send(presenceMessage(CLIENT_ID, userName.value.trim() || animalForUser(CLIENT_ID), localColor.value, active.value.id, selectedNodes.value))
   }
+  function setBranching(enabled: boolean) {
+    const clock = Math.max(collaborationMetadata?.clock ?? 0, state.value.branching?.revision.clock ?? 0) + 1
+    if (collaborationMetadata) collaborationMetadata.clock = clock
+    state.value.branching = { enabled, revision: newRevision(clock) }
+  }
   function showPing(ping: Ping) {
     pings.value = [...pings.value.filter((item) => item.id !== ping.id), ping]
     window.setTimeout(() => {
       pings.value = pings.value.filter((item) => item.id !== ping.id)
     }, 1600)
-    playPingSound()
+    options.playPing()
   }
   function sendPingAt(clientX: number, clientY: number) {
     const rect = graphCanvas.value?.getBoundingClientRect()
@@ -546,29 +564,6 @@ export function useCollaboration(options: {
     logInteraction('Ping', { ping: { x: ping.x, y: ping.y } })
   }
 
-  function playPingSound() {
-    try {
-      const context = new window.AudioContext()
-      const play = () => {
-        const oscillator = context.createOscillator()
-        const gain = context.createGain()
-        oscillator.type = 'sine'
-        oscillator.frequency.setValueAtTime(660, context.currentTime)
-        oscillator.frequency.exponentialRampToValueAtTime(440, context.currentTime + 0.11)
-        gain.gain.setValueAtTime(0.045, context.currentTime)
-        gain.gain.exponentialRampToValueAtTime(0.001, context.currentTime + 0.12)
-        oscillator.connect(gain)
-        gain.connect(context.destination)
-        oscillator.start()
-        oscillator.stop(context.currentTime + 0.12)
-        window.setTimeout(() => { void context.close().catch(() => undefined) }, 200)
-      }
-      if (context.state === 'suspended') void context.resume().then(play).catch(() => { void context.close() })
-      else play()
-    } catch {
-      // Audio is optional; the visual ping still works when browser audio is unavailable.
-    }
-  }
   function onRoomStatus(status: RoomStatus) {
     roomStatus.value = status
     if (status.state === 'connected' || status.state === 'hosting') publishPresence()
@@ -589,7 +584,7 @@ export function useCollaboration(options: {
       try {
         await peerRoom.joinRoom(room, handleRoomMessage, onRoomStatus)
       } catch {
-        notify(`Could not connect to room "${room}": ${roomStatus.value.message}`)
+        notify(`Could not connect to room "${room}": ${roomStatus.value.message}`, true)
         return
       }
     }
@@ -608,5 +603,5 @@ export function useCollaboration(options: {
 
   return { remoteUsers, interactions, pings, roomStatus, peerRoom, connectedUsers, recentInteractions, colorForUser,
     metadataKey, interactionStorageKey, logInteraction, initializeCollaborationMetadata, sendPingAt,
-    expireRemoteUsers, connectAutomatically, resetRoomTracking, setObservedState, finishRoomSwitch }
+    expireRemoteUsers, connectAutomatically, resetRoomTracking, setObservedState, finishRoomSwitch, setBranching }
 }

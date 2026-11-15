@@ -1,5 +1,5 @@
 import { computed, ref, watch, type ComputedRef, type Ref } from 'vue'
-import type { CopyLink, StoredState, TreeNode, Version } from '../types/workspace'
+import type { CopyLink, StoredState, TreeNode, Version, VersionSound } from '../types/workspace'
 import type { useVersionComparison } from './useVersionComparison'
 import type { useGraphCamera } from './useGraphCamera'
 import type { useTreemapViews } from './useTreemapViews'
@@ -20,7 +20,9 @@ export function useVersionHistory(options: {
   treemaps: ReturnType<typeof useTreemapViews>
   reflowLayout: () => void
   setSelectedNodes: (ids: string[]) => void
-  notify: (message: string) => void
+  notify: (message: string, error?: boolean) => void
+  playChange: (sound: VersionSound, branch: boolean) => void
+  canCreateFrom: (version: Version) => boolean
   logInteraction: (action: string, reference?: { versionId?: string; nodeId?: string; nodeLabel?: string; ping?: { x: number; y: number } }) => void
 }) {
   const { clientId: CLIENT_ID, state, versions, active, selectedNode, windowDimensions, reflowLayout, setSelectedNodes, notify, logInteraction } = options
@@ -54,7 +56,7 @@ export function useVersionHistory(options: {
     const version = latestVersion.value
     if (!version || !canUndo.value) return
     const parent = versions.value.find((item) => item.id === version.parentId)
-    if (!parent) { notify('Cannot undo: the parent version is missing'); return }
+    if (!parent) { notify('Cannot undo: the parent version is missing', true); return }
     const wasCentered = isVersionCentered(active.value)
     commitMapView(version.id)
     undone.value = { version: clone(version), copyLinks: clone(state.value.copyLinks.filter((link) =>
@@ -73,7 +75,7 @@ export function useVersionHistory(options: {
     options.comparison.closeVersionSelection()
     reflowLayout()
     panToVersion(parent, wasCentered)
-    logInteraction(`Undid ${displayVersionId(version)}`)
+    logInteraction(`Undid ${displayVersionId(version)}`, { versionId: parent.id })
     notify(`Undid ${displayVersionId(version)}`)
   }
 
@@ -108,7 +110,7 @@ export function useVersionHistory(options: {
       continuedParents.add(parent.id)
     }
   }
-  function createVersion(data: TreeNode[], change: string, forceNew = false) {
+  function createVersion(data: TreeNode[], change: string, forceNew = false, sound: VersionSound = 'none') {
     const parent = active.value
     const wasCentered = isVersionCentered(parent)
     const parentPosition = cardPosition(parent)
@@ -132,6 +134,10 @@ export function useVersionHistory(options: {
       panToVersion(duplicate, wasCentered)
       return duplicate
     }
+    if (!options.canCreateFrom(parent)) {
+      notify('Cannot create a version here while branching is disabled', true)
+      return null
+    }
     const lane = parent.lane
     const branchNumber = siblings.reduce((highest, version) => {
       if (parent.id === 'v0') {
@@ -144,7 +150,7 @@ export function useVersionHistory(options: {
     }, 0) + 1
     const branch = parent.id === 'v0'
       ? `B${branchNumber}`
-      : siblings.length ? `${parent.branch}.${branchNumber}` : parent.branch
+      : siblings.length && state.value.branching?.enabled !== false ? `${parent.branch}.${branchNumber}` : parent.branch
     const viewport = mapViewport(parent)
     const currentMapView = mapViewFor(parent)
     const positions = positionsForData(parent.data, data, parent.positions, currentMapView, viewport)
@@ -157,6 +163,9 @@ export function useVersionHistory(options: {
     }
     numberVersion(version, parent, branch !== parent.branch)
     state.value.versions.push(version)
+    if (sound !== 'silent' && (sound !== 'none' || branch !== parent.branch)) {
+      options.playChange(sound, branch !== parent.branch)
+    }
     assignVersionSuffixes(state.value.versions, state.value.retiredVersionNumbers)
     reflowLayout()
     startVersionArrival(version, arrivalFrom)
@@ -188,6 +197,10 @@ export function useVersionHistory(options: {
   function confirmMerge() {
     const result = mergeResult.value
     if (!result) return
+    if (!options.canCreateFrom(result.source) || !options.canCreateFrom(result.target)) {
+      notify('Cannot merge: both versions must be branch tips while branching is disabled', true)
+      return
+    }
     const sourceIsLatest = isLatestOnBranch(versions.value, result.source)
     const targetIsLatest = isLatestOnBranch(versions.value, result.target)
     const laneParent = targetIsLatest ? result.target : sourceIsLatest ? result.source : result.target
@@ -216,6 +229,7 @@ export function useVersionHistory(options: {
     numberVersion(version, laneParent, needsMergeLane)
     const wasCentered = isVersionCentered(result.target)
     state.value.versions.push(version)
+    if (needsMergeLane) options.playChange('none', true)
     assignVersionSuffixes(state.value.versions, state.value.retiredVersionNumbers)
     compactVersionTreemaps(version.id, false)
     reflowLayout()
@@ -249,7 +263,7 @@ export function useVersionHistory(options: {
     }
     if (versions.value.some((version) => !removeIds.has(version.id)
       && version.mergeSourceId && removeIds.has(version.mergeSourceId))) {
-      notify('Cannot prune a version referenced by a merge')
+      notify('Cannot prune a version referenced by a merge', true)
       return
     }
     const fallbackId = versions.value.find((version) => version.id === id)?.parentId ?? 'v0'

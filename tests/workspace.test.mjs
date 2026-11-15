@@ -56,6 +56,7 @@ test('requested shortcuts resolve without collisions or obsolete alternatives', 
     ['v', true, false, 'paste'], ['c', false, true, 'compare'], ['m', false, true, 'merge'],
     ['l', false, true, 'compact'], ['a', false, true, 'center'], ['1', false, false, 'focus'],
     ['2', false, false, 'neighborhood'], ['3', false, false, 'fitHeight'], ['4', false, false, 'fitAll'],
+    ['+', false, true, 'zoomIn'], ['-', false, false, 'zoomOut'],
     ['ArrowLeft', false, false, 'previous'], ['ArrowRight', false, false, 'next'],
     ['ArrowUp', false, false, 'up'], ['ArrowDown', false, false, 'down'],
     ['PageUp', false, false, 'firstLane'], ['PageDown', false, false, 'lastLane'],
@@ -65,7 +66,7 @@ test('requested shortcuts resolve without collisions or obsolete alternatives', 
     assert.equal(shortcutAction({ key, ctrlKey, shiftKey, metaKey: false, altKey: false, repeat: false }), expected)
   }
   for (const [key, ctrlKey, shiftKey] of [['c', false, false], ['n', true, false], ['o', true, false],
-    ['f', false, false], ['p', false, false], ['+', false, true], ['-', false, false]]) {
+    ['f', false, false], ['p', false, false]]) {
     assert.equal(shortcutAction({ key, ctrlKey, shiftKey, metaKey: false, altKey: false, repeat: false }), undefined)
   }
 })
@@ -95,7 +96,7 @@ test('adding children applies one independent entry per selected parent', () => 
     let commits = 0
     const editor = useHierarchyEditor({
       clientId: 'test', state, active, selectedNodes, isReadOnly: computed(() => false),
-      setSelectedNodes: () => {}, notify: () => {},
+      setSelectedNodes: () => {}, notify: () => {}, canCreateFrom: () => true,
       createVersion: (data) => { commits++; active.value.data = data; return active.value },
     })
     editor.addChildren()
@@ -121,6 +122,7 @@ test('adding one parent preserves selected entries and uses the first entry pare
       clientId: 'test', state, active, selectedNodes, isReadOnly: computed(() => false),
       setSelectedNodes: (ids) => { selectedNodes.value = ids },
       notify: (message) => messages.push(message),
+      canCreateFrom: () => true,
       createVersion: (data) => { active.value.data = data; return active.value },
     })
     editor.addParent()
@@ -172,6 +174,7 @@ test('splitting a parent preserves each child under its assigned result', () => 
       active,
       selectedNodes,
       isReadOnly: computed(() => false),
+      canCreateFrom: () => true,
       setSelectedNodes: (ids) => { selectedNodes.value = ids },
       createVersion: (data) => {
         const next = version('v1', data, 'v0', 1)
@@ -270,6 +273,7 @@ test('merges continue the latest target, otherwise the latest source, otherwise 
         cardHeight: () => 150, startVersionArrival: () => {}, panToVersion: () => {} },
       treemaps: { compactVersionTreemaps: () => {} },
       reflowLayout: () => reflowVersionLayout(state.value), setSelectedNodes: () => {}, notify: () => {}, logInteraction: () => {},
+      canCreateFrom: () => true, playChange: () => {},
     })
     history.confirmMerge()
     const merged = state.value.versions.find((item) => item.id === state.value.activeId)
@@ -314,6 +318,7 @@ test('merge continuation ignores unrelated histories sharing a legacy branch nam
       cardHeight: () => 150, startVersionArrival: () => {}, panToVersion: () => {} },
     treemaps: { compactVersionTreemaps: () => {} },
     reflowLayout: () => reflowVersionLayout(state.value), setSelectedNodes: () => {}, notify: () => {}, logInteraction: () => {},
+    canCreateFrom: () => true, playChange: () => {},
   })
   history.confirmMerge()
   const result = state.value.versions.find((item) => item.id === state.value.activeId)
@@ -715,7 +720,7 @@ test('attachment rejects cycles and moves a subtree without losing descendants',
     let commits = 0
     const editor = useHierarchyEditor({
       clientId: 'test', state, active, selectedNodes: ref([]),
-      isReadOnly: computed(() => false), setSelectedNodes: () => {},
+      isReadOnly: computed(() => false), setSelectedNodes: () => {}, canCreateFrom: () => true,
       createVersion: (data) => {
         commits++
         return state.value.versions[0] = version('v1', data)
@@ -742,7 +747,7 @@ test('bulk deletion keeps unselected descendants even when selected nodes are ne
     const selected = ref(['a', 'b'])
     const editor = useHierarchyEditor({
       clientId: 'test', state, active, selectedNodes: selected,
-      isReadOnly: computed(() => false), setSelectedNodes: (ids) => { selected.value = ids },
+      isReadOnly: computed(() => false), setSelectedNodes: (ids) => { selected.value = ids }, canCreateFrom: () => true,
       createVersion: (data) => state.value.versions[0] = version('v1', data),
     })
     editor.deleteSelectedEntries('keep-children')

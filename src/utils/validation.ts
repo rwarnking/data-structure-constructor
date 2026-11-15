@@ -27,6 +27,7 @@ export function hasRootEntries(value: unknown): boolean {
 export function isInteractionEntry(value: unknown): value is InteractionEntry {
   if (!isRecord(value) || typeof value.id !== 'string' || typeof value.actorId !== 'string'
     || typeof value.actorName !== 'string' || typeof value.action !== 'string'
+    || (value.actorColor !== undefined && (typeof value.actorColor !== 'string' || !/^#[0-9a-f]{6}$/i.test(value.actorColor)))
     || !Number.isFinite(value.createdAt)
     || (value.versionId !== undefined && typeof value.versionId !== 'string')
     || (value.nodeId !== undefined && typeof value.nodeId !== 'string')
@@ -114,6 +115,8 @@ export function isStoredState(value: unknown): value is StoredState {
     || typeof value.activeId !== 'string' || !Number.isInteger(value.nextNode)
     || !Number.isInteger(value.nextVersion) || !Number.isInteger(value.nextLane)
     || !Array.isArray(value.copyLinks) || !value.copyLinks.every(isCopyLink)
+    || (value.branching !== undefined && (!isRecord(value.branching) || typeof value.branching.enabled !== 'boolean'
+      || !isRevision(value.branching.revision)))
     || (value.retiredVersionNumbers !== undefined && (!Array.isArray(value.retiredVersionNumbers)
       || !value.retiredVersionNumbers.every(isRetiredVersionNumber)
       || new Set(value.retiredVersionNumbers.map((item) => JSON.stringify([item.id, item.suffix ?? 0]))).size !== value.retiredVersionNumbers.length))) return false

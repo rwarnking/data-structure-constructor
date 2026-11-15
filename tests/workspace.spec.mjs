@@ -1369,12 +1369,17 @@ test('expanded sidebar exposes additional actions and search while collapsed sho
   const expandedOnly = ['Copy entry', 'Cut entry', 'Paste entry', 'Box select', 'Zoom version', 'Pan version',
     'Zoom graph', 'Pan graph', 'Previous version', 'Next version', 'Timeline above', 'Timeline below',
     'First timeline', 'Last timeline', 'First version in timeline', 'Last version in timeline',
-    'Undo', 'Redo', 'Search versions', 'Select entry', 'Select multiple entries', 'Activate version', 'Focus version']
+    'Undo', 'Redo', 'Select entry', 'Select multiple entries', 'Activate version', 'Focus version']
   for (const name of expandedOnly) await expect(sidebar.locator(`[title^="${name} ·"]`)).toHaveCount(0)
+  await expect(sidebar.getByRole('button', { name: 'Search versions, Ctrl or Command+F' })).toBeVisible()
+  await expect(sidebar.getByRole('button', { name: 'Zoom in preset, +' })).toBeVisible()
+  await expect(sidebar.getByRole('button', { name: 'Zoom out preset, -' })).toBeVisible()
   await page.keyboard.press('Control+f')
   await expect(page.getByRole('dialog', { name: 'Search versions' })).toBeVisible()
   await page.keyboard.press('Escape')
   await page.getByRole('button', { name: 'Expand action sidebar' }).click()
+  await expect(sidebar.getByRole('button', { name: 'Zoom in preset, +' })).toHaveCount(0)
+  await expect(sidebar.getByRole('button', { name: 'Zoom out preset, -' })).toHaveCount(0)
   await expect(sidebar.locator('section').first()).toHaveAttribute('aria-label', 'Communication actions')
   for (const name of expandedOnly) await expect(sidebar.locator(`[title^="${name} ·"]`)).toHaveCount(1)
   for (const [name, gesture, group] of [
@@ -1392,6 +1397,232 @@ test('expanded sidebar exposes additional actions and search while collapsed sho
   await page.getByRole('button', { name: 'Expand action sidebar' }).click()
   await sidebar.getByRole('button', { name: 'Search versions, Ctrl or Command+F' }).click()
   await expect(page.getByRole('dialog', { name: 'Search versions' })).toBeVisible()
+})
+
+test('collapsed sidebar retains room, user and interaction navigation', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['Compact log entry'])
+  const version = (await state(page, room)).activeId
+  await page.getByRole('button', { name: 'Collapse sidebar', exact: true }).click()
+  const sidebar = page.locator('.sidebar')
+  await expect(sidebar.getByRole('button', { name: 'Change Room', exact: true })).toBeVisible()
+  await expect(sidebar.getByRole('button', { name: /Focus .+ \(you\)/ })).toBeVisible()
+  const interaction = sidebar.locator('.compact-interaction').first()
+  await expect(interaction).toBeEnabled()
+  const savedLog = await page.evaluate((name) =>
+    JSON.parse(localStorage.getItem(`canopy-interactions-${encodeURIComponent(name)}`)), room)
+  expect(await interaction.evaluate((element) => getComputedStyle(element).color)).toBe(
+    await page.evaluate((color) => {
+      const element = document.createElement('span')
+      element.style.color = color
+      document.body.appendChild(element)
+      const value = getComputedStyle(element).color
+      element.remove()
+      return value
+    }, savedLog.at(-1).actorColor))
+  await interaction.click()
+  await expectCentered(page, version)
+  await sidebar.getByRole('button', { name: 'Change Room', exact: true }).click()
+  await expect(page.getByRole('dialog', { name: /room/i })).toBeVisible()
+})
+
+test('branching setting prevents edits from non-tip versions and persists', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['Base'])
+  const base = (await state(page, room)).activeId
+  await addEntries(page, ['Tip'])
+  const before = (await state(page, room)).versions.length
+  await page.getByRole('button', { name: 'Settings' }).click()
+  await page.getByRole('button', { name: 'Branching on' }).click()
+  await expect.poll(async () => (await state(page, room)).branching?.enabled).toBe(false)
+  await page.keyboard.press('ArrowLeft')
+  await expect.poll(async () => (await state(page, room)).activeId).toBe(base)
+  await page.keyboard.press('n')
+  await page.getByPlaceholder('Entry name').fill('Blocked')
+  await page.getByRole('button', { name: 'Add 1 entry' }).click()
+  await expect(page.getByText('Cannot create a version here while branching is disabled')).toBeVisible()
+  await expect(page.getByPlaceholder('Entry name')).toHaveValue('Blocked')
+  expect((await state(page, room)).versions).toHaveLength(before)
+  await page.reload()
+  await page.getByRole('button', { name: 'Settings' }).click()
+  await expect(page.getByRole('button', { name: 'Branching off' })).toBeVisible()
+})
+
+test('branching setting synchronizes between room participants', async ({ browser }) => {
+  const hostContext = await browser.newContext()
+  const guestContext = await browser.newContext()
+  try {
+    const host = await hostContext.newPage()
+    const guest = await guestContext.newPage()
+    const room = await openRoom(host)
+    await guest.goto(`/?room=${room}`)
+    await expect(guest.getByRole('status').first()).toHaveText('Connected')
+    await host.getByRole('button', { name: 'Settings' }).click()
+    await host.getByRole('button', { name: 'Branching on' }).click()
+    await expect.poll(async () => (await state(guest, room)).branching?.enabled).toBe(false)
+    await guest.getByRole('button', { name: 'Settings' }).click()
+    await guest.getByRole('button', { name: 'Branching off' }).click()
+    await expect.poll(async () => (await state(host, room)).branching?.enabled).toBe(true)
+  } finally {
+    await hostContext.close()
+    await guestContext.close()
+  }
+})
+
+test('a branch tip with only fork children can still be continued when branching is off', async ({ page }) => {
+  const room = `test-${randomUUID()}`
+  await page.addInitScript((name) => {
+    const number = (step, subbranch, origin) => ({ step, branch: 1, subbranch, origin, owner: 'fixture', scheme: 2 })
+    const versions = [
+      { id: 'v0', parentId: null, step: 0, lane: 0, branch: 'ROOT', change: 'Root', data: [], createdAt: 0 },
+      { id: 'base', parentId: 'v0', step: 1, lane: 0, branch: 'B1', change: 'Base',
+        data: [{ id: 'base-node', value: 'Base', children: [] }], createdAt: 1, number: number(1, 1, 'base') },
+      { id: 'fork', parentId: 'base', step: 2, lane: 1, branch: 'B1.1', change: 'Fork',
+        data: [{ id: 'base-node', value: 'Base', children: [] }, { id: 'fork-node', value: 'Fork', children: [] }],
+        createdAt: 2, number: number(2, 2, 'fork') },
+    ]
+    localStorage.setItem(`canopy-room-data-v1-${encodeURIComponent(name)}`, JSON.stringify({
+      versions, activeId: 'base', nextNode: 100, nextVersion: 3, nextLane: 2, copyLinks: [],
+      branching: { enabled: false, revision: { clock: 1, actor: 'fixture' } },
+    }))
+  }, room)
+  await openRoom(page, room)
+  await addEntries(page, ['Continuation'])
+  const saved = await state(page, room)
+  const continuation = saved.versions.find((version) => version.id === saved.activeId)
+  expect(continuation.parentId).toBe('base')
+  expect(continuation.branch).toBe('B1')
+})
+
+test('sounds use the shared volume and branch sounds replace entry sounds', async ({ page }) => {
+  await page.addInitScript(() => {
+    window.recordedSounds = []
+    window.Audio = class {
+      constructor(url) { this.url = url; this.volume = 1 }
+      play() { window.recordedSounds.push({ url: this.url, volume: this.volume }); return Promise.resolve() }
+    }
+  })
+  const room = await openRoom(page)
+  await page.getByRole('button', { name: 'Settings' }).click()
+  await page.getByRole('slider', { name: 'Volume' }).fill('0.4')
+  await addEntries(page, ['First'])
+  const first = (await state(page, room)).activeId
+  await addEntries(page, ['Second'])
+  const sounds = await page.evaluate(() => window.recordedSounds)
+  expect(sounds.map((sound) => sound.url.split('/').pop())).toEqual(['happy-pop-2-185287.mp3', 'bing-298405.mp3'])
+  expect(sounds.map((sound) => sound.volume)).toEqual([0.4, 0.4])
+  await page.keyboard.press('4')
+  await page.keyboard.press('Shift+c')
+  await page.locator(`.version-card[data-version="${first}"]`).click()
+  await page.getByRole('img', { name: 'Source treemap comparison' }).locator('.comparison-tile').first().click()
+  expect((await page.evaluate(() => window.recordedSounds)).map((sound) => sound.url.split('/').pop()))
+    .toEqual(['happy-pop-2-185287.mp3', 'bing-298405.mp3', 'click-with-big-reverb-28848-01.mp3'])
+  await page.getByRole('button', { name: 'Abort and close' }).click()
+  await focusActive(page)
+  await page.getByRole('button', { name: 'Mute sound' }).click()
+  await addEntries(page, ['Silent'])
+  expect((await page.evaluate(() => window.recordedSounds)).map((sound) => sound.url.split('/').pop()))
+    .toEqual(['happy-pop-2-185287.mp3', 'bing-298405.mp3', 'click-with-big-reverb-28848-01.mp3', 'ui-sound-off-270300.mp3'])
+  await page.getByRole('button', { name: 'Unmute sound' }).click()
+  await expect.poll(async () => (await page.evaluate(() => window.recordedSounds)).at(-1).url)
+    .toContain('ui-sound-on-270295.mp3')
+  await page.getByRole('button', { name: 'Change Room', exact: true }).click()
+  await page.getByRole('button', { name: 'Join room' }).click()
+  await expect(page.getByText('Enter a room name of 1–80 characters.')).toBeVisible()
+  await expect.poll(async () => (await page.evaluate(() => window.recordedSounds)).at(-1).url).toContain('obacht.mp3')
+  await page.getByRole('button', { name: 'Close', exact: true }).click()
+  await page.reload()
+  await page.getByRole('button', { name: 'Settings' }).click()
+  await expect(page.getByRole('slider', { name: 'Volume' })).toHaveValue('0.4')
+})
+
+test('comparison treemaps zoom, pan and reset without changing source versions', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['First'])
+  const first = (await state(page, room)).activeId
+  await addEntries(page, ['Second'])
+  const before = (await state(page, room)).versions
+  await page.keyboard.press('4')
+  await page.keyboard.press('Shift+c')
+  await page.locator(`.version-card[data-version="${first}"]`).click()
+  const svg = page.getByRole('img', { name: 'Source treemap comparison' })
+  await expect(svg).toBeVisible()
+  const initial = await svg.getAttribute('viewBox')
+  await svg.hover()
+  await page.keyboard.down('Shift')
+  await page.mouse.wheel(0, -250)
+  await expect.poll(() => svg.getAttribute('viewBox')).not.toBe(initial)
+  const zoomed = await svg.getAttribute('viewBox')
+  const box = await svg.boundingBox()
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(box.x + box.width / 2 + 40, box.y + box.height / 2 + 20)
+  await page.mouse.up()
+  await expect.poll(() => svg.getAttribute('viewBox')).not.toBe(zoomed)
+  await page.keyboard.press('a')
+  await page.keyboard.up('Shift')
+  await expect(svg).toHaveAttribute('viewBox', initial)
+  expect((await state(page, room)).versions).toEqual(before)
+})
+
+test('merge treemap supports shift zoom, pan and reset without editing the preview', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['First'])
+  const first = (await state(page, room)).activeId
+  await addEntries(page, ['Second'])
+  await page.keyboard.press('4')
+  await page.keyboard.press('Shift+m')
+  await page.locator(`.version-card[data-version="${first}"]`).click()
+  const svg = page.getByRole('img', { name: 'Interactive resulting hierarchy preview' })
+  await expect(svg).toBeVisible()
+  const initial = await svg.getAttribute('viewBox')
+  const tileCount = await svg.locator('.merge-preview-tile').count()
+  await svg.hover()
+  await page.keyboard.down('Shift')
+  await page.mouse.wheel(0, -250)
+  await expect.poll(() => svg.getAttribute('viewBox')).not.toBe(initial)
+  const zoomed = await svg.getAttribute('viewBox')
+  const box = await svg.boundingBox()
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(box.x + box.width / 2 + 35, box.y + box.height / 2 + 20)
+  await page.mouse.up()
+  await expect.poll(() => svg.getAttribute('viewBox')).not.toBe(zoomed)
+  await page.keyboard.press('a')
+  await page.keyboard.up('Shift')
+  await expect(svg).toHaveAttribute('viewBox', initial)
+  await expect(svg.locator('.merge-preview-tile')).toHaveCount(tileCount)
+})
+
+test('plus and minus and collapsed controls step through camera presets', async ({ page }) => {
+  await openRoom(page)
+  await addEntries(page, ['One'])
+  await addEntries(page, ['Two'])
+  const scale = () => page.locator('.graph-world').evaluate((element) =>
+    Number(element.style.transform.match(/scale\(([^)]+)\)/)[1]))
+  const presets = []
+  for (const key of ['4', '3', '2', '1']) {
+    await page.keyboard.press(key)
+    await page.waitForTimeout(600)
+    presets.push(await scale())
+  }
+  await page.keyboard.press('4')
+  await page.waitForTimeout(600)
+  await page.keyboard.press('+')
+  await page.waitForTimeout(600)
+  expect(await scale()).toBeCloseTo(presets[1], 2)
+  await page.getByRole('button', { name: 'Zoom in preset, +' }).click()
+  await page.waitForTimeout(600)
+  expect(await scale()).toBeCloseTo(presets[2], 2)
+  await page.keyboard.press('+')
+  await page.waitForTimeout(600)
+  expect(await scale()).toBeCloseTo(presets[3], 2)
+  await page.getByRole('button', { name: 'Zoom out preset, -' }).click()
+  await page.waitForTimeout(600)
+  expect(await scale()).toBeCloseTo(presets[2], 2)
+  await page.keyboard.press('-')
+  await page.waitForTimeout(600)
+  expect(await scale()).toBeCloseTo(presets[1], 2)
 })
 
 test('undo and redo operate on one version, restore copy links and clear redo after a new version', async ({ page }) => {

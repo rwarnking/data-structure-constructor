@@ -9,6 +9,7 @@ import { useTreemapViews } from '../composables/useTreemapViews'
 import { useTreeDrag } from '../composables/useTreeDrag'
 import { useHierarchyEditor } from '../composables/useHierarchyEditor'
 import { useVersionHistory } from '../composables/useVersionHistory'
+import { useSounds } from '../composables/useSounds'
 import { createRoomStorage, LAST_ROOM_KEY } from '../services/roomStorage'
 import { parseDataset, type Dataset } from '../services/dataset'
 import VersionComparison from '../components/VersionComparison.vue'
@@ -28,7 +29,7 @@ import tutorial from '../content/tutorial.json'
 import type { CopyLink, StoredState, Tile, TreeNode, Version, VersionTag } from '../types/workspace'
 import { countNodes, findNode, findParent, flattenNodes, removeNode } from '../utils/tree'
 import { duplicateLinks } from '../utils/duplicateLinks'
-import { compareCopyLinks, displayVersionId, reflowVersionLayout } from '../utils/versions'
+import { compareCopyLinks, displayVersionId, isLatestOnBranch, reflowVersionLayout } from '../utils/versions'
 import { changedEntryIds } from '../utils/versionDifferences'
 import { RootNotEmptyError } from '../utils/validation'
 import { CARD_WIDTH, TREE_MAP_HEIGHT, tilesForForest, tileForNode } from '../utils/treemap'
@@ -43,6 +44,7 @@ const { addChild: AddChildIcon, group: GroupIcon, compact: CompactIcon, center: 
 
 type ClipboardEntry = { sourceVersionId: string; nodes: TreeNode[]; cut: boolean }
 const CLIENT_ID = getClientId()
+const { volume, muted, play: playSound, ping: playPing, toggleMute } = useSounds()
 const GRAPH_GAP_X = 300
 const TERMINAL_TAIL_LENGTH = GRAPH_GAP_X
 const TERMINAL_ARROW_BASE_INSET = 0.3
@@ -136,7 +138,7 @@ function editTag(versionId?: string) {
 }
 function saveTag(tag?: VersionTag) {
   const version = tagVersion.value
-  if (!version) { notify('Version is no longer available'); tagsOpen.value = false; return }
+  if (!version) { notify('Version is no longer available', true); tagsOpen.value = false; return }
   if (tag) version.tag = tag
   else delete version.tag
   logInteraction(tag ? `Tagged ${displayVersionId(version)}` : `Removed tag from ${displayVersionId(version)}`, { versionId: version.id })
@@ -159,6 +161,7 @@ const graphCamera = useGraphCamera({ versions, active, state, compareIds, dragge
   zoom, pan, canvasSize, windowDimensions, suppressClicks: suppressGraphClicks })
 const { versionArrival, cardPosition, cardHeight, rootLabelOffset, rootLabelX, displayCardPosition, graphBounds,
   visibleVersions, visibleConnectionVersions, visibleMergeConnectionVersions, fitGraph, fitHeight, focusNeighborhood,
+  stepPreset,
   startCanvasPan, moveCanvasPan, endCanvasPan, onWheel, focusVersion, focusActive, animateCamera,
   stopGraphAnimations,
 } = graphCamera
@@ -221,10 +224,10 @@ function cancelBoxSelection(event: PointerEvent) { endBoxSelection(event, true) 
 const {
   remoteUsers, pings, roomStatus, peerRoom, connectedUsers, recentInteractions, colorForUser, metadataKey,
   interactionStorageKey, logInteraction, initializeCollaborationMetadata, sendPingAt,
-  expireRemoteUsers, connectAutomatically, resetRoomTracking, setObservedState, finishRoomSwitch,
+  expireRemoteUsers, connectAutomatically, resetRoomTracking, setObservedState, finishRoomSwitch, setBranching,
 } = useCollaboration({
   clientId: CLIENT_ID, state, active, selectedNodes, currentRoomName, graphCanvas, pan, zoom,
-  normalizeState, roomDataKey, reflowLayout, fitGraph, notify,
+  normalizeState, roomDataKey, reflowLayout, fitGraph, notify, playPing,
   followVersion: (version) => {
     const wasCentered = graphCamera.isVersionCentered(active.value)
     state.value.activeId = version.id
@@ -233,17 +236,27 @@ const {
   },
 })
 
+function canCreateFrom(version: Version) {
+  return state.value.branching?.enabled !== false
+    || (version.id === 'v0'
+      ? !versions.value.some((candidate) => candidate.parentId === version.id)
+      : isLatestOnBranch(versions.value, version))
+}
 const { createVersion, confirmMerge, pruneVersion, canUndo, canRedo, undoVersion, redoVersion } = useVersionHistory({
   clientId: CLIENT_ID, state, currentRoomName, versions, active, selectedNode, windowDimensions,
   comparison: comparisonController, camera: graphCamera, treemaps: treemapViews,
-  reflowLayout, setSelectedNodes, notify, logInteraction,
+  reflowLayout, setSelectedNodes, notify, logInteraction, canCreateFrom,
+  playChange: (sound, branch) => {
+    if (branch) playSound('branch')
+    else if (sound !== 'none' && sound !== 'silent') playSound(sound)
+  },
 })
 
 const { editor, setEntryValueInput, entryOperation, bulkDeleteMode, bulkDeleteDialog,
   addEntry, addChildren, addParent, commitEditor, renameEntry, addEditorEntryRow, removeEditorEntryRow, deleteEntry,
   deleteSelectedEntries, openBulkDelete, openMergeEntries, openSplitEntry, addSplitEntry,
   removeSplitEntry, commitEntryOperation, detachEntry, canAttach, attachEntry,
-} = useHierarchyEditor({ clientId: CLIENT_ID, state, active, selectedNodes, isReadOnly, createVersion, setSelectedNodes, notify })
+} = useHierarchyEditor({ clientId: CLIENT_ID, state, active, selectedNodes, isReadOnly, createVersion, canCreateFrom, setSelectedNodes, notify })
 
 function suppressGraphClicks() {
   suppressVersionClick = true
@@ -258,7 +271,7 @@ function suppressGraphClicks() {
 const { draggedNode, draggedPosition, overNode, invalidNode, treeDrag, spatialPreview,
   draggedSubtreeIds, draggedOriginalTile, startTreeDrag, moveTreeDrag, finishTreeDrag, cancelTreeDrag,
 } = useTreeDrag({ state, active, isReadOnly, selectedNodes, hoveredNode, entryTooltip, mapViewFor, mapViewport,
-  canAttach, attachEntry, detachEntry, createVersion, setSelectedNodes, notify, suppressClicks: suppressGraphClicks })
+  canAttach, attachEntry, detachEntry, createVersion, setSelectedNodes, notify, playMove: () => playSound('moved'), suppressClicks: suppressGraphClicks })
 
 watch(selectedNode, (nodeId) => {
   if (!nodeId) selectedNodes.value = []
@@ -381,14 +394,14 @@ function leaveTile(versionId: string, nodeId: string) {
 async function activateRoom(room: string, createEmpty = false) {
   const name = room.trim()
   if (!name || name.length > 80) {
-    notify('Room names must contain 1–80 characters')
+    notify('Room names must contain 1–80 characters', true)
     return
   }
   let nextState: StoredState
   try { nextState = createEmpty ? clone(seed) : readRoomState(name) }
   catch (error) {
     if (!(error instanceof RootNotEmptyError)) throw error
-    notify(`Cannot open room "${name}": ${error.message}`)
+    notify(`Cannot open room "${name}": ${error.message}`, true)
     return
   }
   peerRoom.send({ type: 'presence-leave', userId: CLIENT_ID })
@@ -442,7 +455,7 @@ function exportData() {
 async function importData(file: File) {
   let dataset: Dataset
   try { dataset = parseDataset(JSON.parse(await file.text()) as unknown) }
-  catch (error) { notify(error instanceof Error ? `Import failed: ${error.message}` : 'Import failed'); return }
+  catch (error) { notify(error instanceof Error ? `Import failed: ${error.message}` : 'Import failed', true); return }
   const base = dataset.room.trim()
   let name = base
   let suffix = 0
@@ -459,7 +472,7 @@ async function importData(file: File) {
     localStorage.removeItem(roomDataKey(name))
     localStorage.removeItem(interactionStorageKey(name))
     localStorage.removeItem(localOnlyRoomKey(name))
-    notify(error instanceof Error ? `Import failed: ${error.message}` : 'Import failed')
+    notify(error instanceof Error ? `Import failed: ${error.message}` : 'Import failed', true)
     return
   }
   await activateRoom(name)
@@ -473,7 +486,7 @@ async function copySessionInvite() {
     await navigator.clipboard.writeText(url.toString())
     notify('Invite link copied')
   } catch {
-    notify('Could not access clipboard; copy the room name to invite peers')
+    notify('Could not access clipboard; copy the room name to invite peers', true)
   }
 }
 
@@ -492,11 +505,11 @@ function deleteLocalRoom(room: string) {
 function createRoomFromDialog() {
   const name = newRoomName.value.trim()
   if (!name || name.length > 80) {
-    notify('Enter a room name of 1–80 characters')
+    notify('Enter a room name of 1–80 characters', true)
     return
   }
   if (localRooms.value.includes(name) || localStorage.getItem(roomDataKey(name)) !== null) {
-    notify('A saved room with that name already exists; choose it from the list or join it')
+    notify('A saved room with that name already exists; choose it from the list or join it', true)
     return
   }
   newRoomName.value = ''
@@ -521,7 +534,8 @@ async function initializeCurrentRoom() {
   else await connectAutomatically(currentRoomName.value)
 }
 
-function notify(message: string) {
+function notify(message: string, error = false) {
+  if (error) playSound('error')
   toast.value = message
   window.clearTimeout(toastTimer)
   toastTimer = window.setTimeout(() => (toast.value = ''), 2400)
@@ -1056,6 +1070,8 @@ function performAction(action: ShortcutAction) {
     case 'neighborhood': focusNeighborhood(); break
     case 'fitHeight': fitHeight(); break
     case 'fitAll': fitGraph(); break
+    case 'zoomIn': stepPreset(1); break
+    case 'zoomOut': stepPreset(-1); break
     case 'selectAll': setSelectedNodes([...flattenNodes(active.value.data).keys()]); break
     case 'copy': case 'cut': copyEntries(selectedNodes.value, action === 'cut'); break
     case 'paste': pasteEntry(); break
@@ -1063,6 +1079,8 @@ function performAction(action: ShortcutAction) {
   }
 }
 function onKeydown(event: KeyboardEvent) {
+  if (compareIds.value.length === 2 && event.shiftKey && event.key.toLowerCase() === 'a'
+    && !event.ctrlKey && !event.metaKey && !event.altKey) return
   if (mergeMode.value && compareIds.value.length === 2) {
     if (shortcutAction(event) === 'dismiss') {
       event.preventDefault()
@@ -1084,7 +1102,7 @@ function measureCanvas() {
   if (graphCanvas.value) canvasSize.value = { width: graphCanvas.value.clientWidth, height: graphCanvas.value.clientHeight }
 }
 onMounted(() => {
-  if (initialRoomError) return
+  if (initialRoomError) { playSound('error'); return }
   canvasObserver = new ResizeObserver(measureCanvas)
   if (graphCanvas.value) canvasObserver.observe(graphCanvas.value)
   measureCanvas()
@@ -1152,23 +1170,27 @@ function copyEntries(nodeIds: string[], cut: boolean) {
 function pasteEntry() {
   if (!clipboard.value) return
   if (isReadOnly.value) {
-    notify('Zoom in to paste entries')
+    notify('Zoom in to paste entries', true)
     return
   }
   const copied = clone(clipboard.value)
   const source = versionsById.value.get(copied.sourceVersionId)
   if (copied.cut && (!source || copied.nodes.some((node) => !findNode(source.data, node.id)))) {
-    notify('Cannot cut: the source version or entry is no longer available')
+    notify('Cannot cut: the source version or entry is no longer available', true)
     return
   }
   if (copied.cut && source?.id === active.value.id) {
-    notify('Choose another version before pasting cut entries')
+    notify('Choose another version before pasting cut entries', true)
+    return
+  }
+  if (!canCreateFrom(active.value) || copied.cut && source && !canCreateFrom(source)) {
+    notify('Cannot paste: branching is disabled for a version that is not a branch tip', true)
     return
   }
   const rekey = (node: TreeNode): TreeNode => ({ ...node, id: `n${state.value.nextNode++}-${CLIENT_ID}`, children: node.children.map(rekey) })
   const newNodes = copied.nodes.map(rekey)
   const label = newNodes.length === 1 ? newNodes[0]!.value : `${newNodes.length} entries`
-  const version = createVersion([...clone(active.value.data), ...newNodes], `Paste ${label}`, true)
+  const version = createVersion([...clone(active.value.data), ...newNodes], `Paste ${label}`, true, copied.cut ? 'moved' : 'entryAdded')
   if (!version) return
   if (source) {
     state.value.copyLinks = [...state.value.copyLinks, ...copied.nodes.map((node, index) => ({
@@ -1180,10 +1202,10 @@ function pasteEntry() {
     const sourceData = clone(source.data)
     for (const node of copied.nodes) removeNode(sourceData, node.id)
     state.value.activeId = source.id
-    const removal = createVersion(sourceData, `Cut ${label}`, true)
+    const removal = createVersion(sourceData, `Cut ${label}`, true, 'silent')
     if (!removal) {
       state.value.activeId = version.id
-      notify('Copied entries, but could not create the cut source version')
+      notify('Copied entries, but could not create the cut source version', true)
       return
     }
     state.value.activeId = version.id
@@ -1261,15 +1283,17 @@ const cardModel: VersionCardModel = reactive({
       <button type="button" class="primary-button" @click="roomDialogOpen = true">Choose another room</button>
     </section>
     <RoomManager v-if="roomDialogOpen" v-model="newRoomName" :local-rooms="localRooms" :current-room-name="currentRoomName"
-      @close="roomDialogOpen = false" @activate="switchFromBlockedRoom" @delete="deleteLocalRoom" @create="switchFromBlockedRoom(newRoomName)" />
+      @close="roomDialogOpen = false" @activate="switchFromBlockedRoom" @delete="deleteLocalRoom" @create="switchFromBlockedRoom(newRoomName)" @error="playSound('error')" />
   </main>
   <main v-else class="app-shell" :class="{ dark: darkMode }" @click.capture="handleAppClickCapture">
     <div class="workspace" :inert="mergeMode && compareIds.length === 2">
       <WorkspaceSidebar :sidebar-collapsed="sidebarCollapsed" :dark-mode="darkMode" :current-room-name="currentRoomName"
+        :volume="volume" :muted="muted" :branching-enabled="state.branching?.enabled !== false"
         :room-status="roomStatus" :local-only="isLocalOnlyRoom(currentRoomName)" :connected-users="connectedUsers" :client-id="CLIENT_ID" :versions="versions"
         :recent-interactions="recentInteractions" :branch-count="branchCount" :active="active" :color-for-user="colorForUser"
         :active-nodes="activeNodes" :active-children="activeChildren"
         @toggle-sidebar="sidebarCollapsed = !sidebarCollapsed" @toggle-theme="darkMode = !darkMode"
+        @set-volume="volume = $event" @toggle-mute="toggleMute" @set-branching="setBranching"
         @change-room="roomDialogOpen = true" @copy-invite="copySessionInvite" @focus-collaborator="focusCollaborator"
         @focus-ping="focusPingLocation" @navigate="navigateInteraction" @focus-active="focusActive"
         @import-data="importData" @export-data="exportData" @show-tags="tagVersionId = null; tagsOpen = true" />
@@ -1334,7 +1358,7 @@ const cardModel: VersionCardModel = reactive({
     </div>
 
     <VersionComparison :model="comparisonModel" :versions="versions" :sidebar-collapsed="sidebarCollapsed"
-      :action-sidebar-collapsed="actionSidebarCollapsed" @confirm="confirmMerge" />
+      :action-sidebar-collapsed="actionSidebarCollapsed" @confirm="confirmMerge" @entry-click="playSound('entryClick')" />
 
     <div v-if="menu" ref="contextMenuElement" class="context-menu" :style="{ left: `${contextMenuPosition.x}px`, top: `${contextMenuPosition.y}px` }" @click.stop>
       <template v-if="menu.kind === 'version'">
@@ -1397,7 +1421,7 @@ const cardModel: VersionCardModel = reactive({
     <EntryOperationDialog v-if="entryOperation" :entry-operation="entryOperation" :data="active.data"
       @close="entryOperation = null" @commit="commitEntryOperation" @add-split="addSplitEntry" @remove-split="removeSplitEntry" />
     <RoomManager v-if="roomDialogOpen" v-model="newRoomName" :local-rooms="localRooms" :current-room-name="currentRoomName"
-      @close="roomDialogOpen = false" @activate="activateRoom" @delete="deleteLocalRoom" @create="createRoomFromDialog" />
+      @close="roomDialogOpen = false" @activate="activateRoom" @delete="deleteLocalRoom" @create="createRoomFromDialog" @error="playSound('error')" />
     <VersionSearch v-if="searchOpen" :versions="versions" @close="searchOpen = false"
       @focus="activateAndFocusVersion($event); searchOpen = false" />
     <VersionTags v-if="tagsOpen" :versions="versions" :editing="tagVersion"

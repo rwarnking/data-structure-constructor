@@ -6,7 +6,7 @@ import {
   Scan, Network, PanelTop, PanelsTopLeft, ChevronsUp, ChevronsDown, ChevronsLeft,
   ChevronsRight, Move, ZoomIn, MousePointerClick, SquareDashedMousePointer, Scissors,
   GitMerge, ArrowLeft, ArrowRight, ArrowUp, ArrowDown, Undo2, Redo2,
-  Pointer, ListChecks, PanelTopOpen, Crosshair,
+  Pointer, ListChecks, PanelTopOpen, Crosshair, ZoomOut, LogIn,
 } from '@lucide/vue'
 
 export const actionIcons = {
@@ -26,6 +26,7 @@ export const actionIcons = {
   lastVersion: ChevronsRight, clickPing: MousePointerClick,
   undo: Undo2, redo: Redo2,
   selectEntry: Pointer, selectEntries: ListChecks, activateVersion: PanelTopOpen, clickFocusVersion: Crosshair,
+  zoomIn: ZoomIn, zoomOut: ZoomOut, changeRoom: LogIn,
 } as const
 
 export const actionSymbols = {

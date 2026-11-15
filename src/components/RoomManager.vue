@@ -5,25 +5,29 @@ const { delete: Trash2, close: X } = actionIcons
 
 defineProps<{ localRooms: string[]; currentRoomName: string }>()
 const newRoomName = defineModel<string>({ required: true })
-const emit = defineEmits<{ close: []; activate: [room: string]; delete: [room: string]; create: [] }>()
+const emit = defineEmits<{ close: []; activate: [room: string]; delete: [room: string]; create: []; error: [] }>()
 const joinInput = ref('')
 const joinError = ref('')
+function reportError(message: string) {
+  joinError.value = message
+  emit('error')
+}
 function joinRoom() {
   const input = joinInput.value.trim()
   let room = input
   if (/^(?:https?|ftp):/i.test(input) || /^[a-z][a-z0-9+.-]*:\/\//i.test(input)) {
     let url: URL
     try { url = new URL(input) }
-    catch { joinError.value = 'Enter a valid room URL or name.'; return }
+    catch { reportError('Enter a valid room URL or name.'); return }
     if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-      joinError.value = 'Room links must use HTTP or HTTPS.'
+      reportError('Room links must use HTTP or HTTPS.')
       return
     }
     room = url.searchParams.get('room')?.trim() ?? ''
-    if (!room) { joinError.value = 'The room link must include a room name.'; return }
+    if (!room) { reportError('The room link must include a room name.'); return }
   }
   if (!room || room.length > 80) {
-    joinError.value = 'Enter a room name of 1–80 characters.'
+    reportError('Enter a room name of 1–80 characters.')
     return
   }
   joinError.value = ''

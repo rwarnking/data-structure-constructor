@@ -1,5 +1,5 @@
 import { computed, ref, type ComputedRef, type Ref } from 'vue'
-import type { MapView, SpatialPreview, StoredState, TreeNode, Version } from '../types/workspace'
+import type { MapView, SpatialPreview, StoredState, TreeNode, Version, VersionSound } from '../types/workspace'
 import { descendants, findNode, findParent, removeNode } from '../utils/tree'
 import { CARD_WIDTH, TREE_MAP_HEIGHT, defaultPositions, fitMapViewAfterDrag, positionsAfterDetach, positionsAfterMoves, positionsForData, tileForNode, tilesForForest } from '../utils/treemap'
 
@@ -13,8 +13,9 @@ export function useTreeDrag(options: {
   canAttach: (source: string, target: string, data?: TreeNode[]) => boolean
   attachEntry: (source: string, target: string, preview?: { data: TreeNode[]; positions: Record<string, { x: number; y: number }>; view: MapView }) => Version | null
   detachEntry: (id: string, preview?: SpatialPreview) => Version | null
-  createVersion: (data: TreeNode[], change: string, forceNew?: boolean) => Version | null
-  setSelectedNodes: (ids: string[]) => void; notify: (message: string) => void; suppressClicks: () => void
+  createVersion: (data: TreeNode[], change: string, forceNew?: boolean, sound?: VersionSound) => Version | null
+  playMove: () => void
+  setSelectedNodes: (ids: string[]) => void; notify: (message: string, error?: boolean) => void; suppressClicks: () => void
 }) {
   const { state, active, isReadOnly, selectedNodes, hoveredNode, entryTooltip, mapViewFor, mapViewport,
     canAttach, attachEntry, detachEntry, createVersion, setSelectedNodes, notify, suppressClicks } = options
@@ -166,6 +167,7 @@ export function useTreeDrag(options: {
     version.positions = clone(preview.positions)
     version.mapView = clone(preview.view)
     notify('Treemap layout updated')
+    options.playMove()
     return true
   }
   function startTreeDrag(event: PointerEvent, version: Version, id: string) {
@@ -257,24 +259,25 @@ export function useTreeDrag(options: {
       if (overNode.value && drag.ids.every((id) => canAttach(id, overNode.value!))) {
         const layout = previewLayout.value
         if (drag.ids.length > 1 && layout) {
-          const version = createVersion(layout.data, `Attach ${drag.ids.length} selected entries`, true)
+          const version = createVersion(layout.data, `Attach ${drag.ids.length} selected entries`, true, 'moved')
           if (version) { version.positions = clone(layout.positions); version.mapView = clone(layout.view); committed = true }
         } else committed = !!attachEntry(drag.id, overNode.value, layout ?? undefined)
       } else if (spatialPreview.value?.valid && spatialPreview.value.nodeId === drag.id) {
         const preview = drag.ids.length > 1
           ? groupDropLayout(active.value, drag.ids, drag.id, spatialPreview.value)
           : spatialDropLayout(active.value, drag.id, spatialPreview.value)
-        if (!preview.valid) notify('Cannot move the selected entries')
+        if (!preview.valid) notify('Cannot move the selected entries', true)
         if (preview.kind === 'move') {
           if (drag.ids.length > 1) {
             active.value.positions = clone(preview.positions)
             active.value.mapView = clone(preview.view)
             notify('Treemap layout updated')
+            options.playMove()
             committed = true
           } else committed = placeRoot(active.value, preview)
         } else if (preview.kind === 'detach') {
           if (drag.ids.length > 1) {
-            const version = createVersion(preview.data, `Detach ${drag.ids.length} selected entries`, true)
+            const version = createVersion(preview.data, `Detach ${drag.ids.length} selected entries`, true, 'moved')
             if (version) { version.positions = clone(preview.positions); version.mapView = clone(preview.view); committed = true }
           } else committed = !!detachEntry(drag.id, preview)
         }
