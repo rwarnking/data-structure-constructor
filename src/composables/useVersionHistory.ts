@@ -158,6 +158,7 @@ export function useVersionHistory(options: {
     const version: Version = {
       id: `v${state.value.nextVersion++}-${CLIENT_ID}-${crypto.randomUUID().replace(/-/g, '')}`, parentId: parent.id, step: parent.step + 1,
       lane, branch, change, data, createdBy: CLIENT_ID, positions,
+      ...(parent.treemapOrder ? { treemapOrder: [...parent.treemapOrder] } : {}),
       ...(currentMapView.manual ? { mapView: clone(fittedMapView) } : {}),
       createdAt: Date.now(),
     }

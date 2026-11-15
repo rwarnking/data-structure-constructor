@@ -1,6 +1,6 @@
 import { computed, nextTick, ref, watch, type ComputedRef, type Ref } from 'vue'
 import type { MapView, StoredState, TreeNode, Version } from '../types/workspace'
-import { CARD_HEIGHT, CARD_WIDTH, TREE_MAP_HEIGHT, MAP_PADDING, MAP_ZOOM_MIN, MAP_ZOOM_MAX, compactTreemapPositions, defaultPositions, mapGeometry, outerTreemapDimensions } from '../utils/treemap'
+import { CARD_HEIGHT, CARD_WIDTH, TREE_MAP_HEIGHT, MAP_PADDING, MAP_ZOOM_MIN, MAP_ZOOM_MAX, compactTreemapPositions, defaultPositions, mapGeometry, outerTreemapDimensions, tilesForForest } from '../utils/treemap'
 
 export function useTreemapViews(options: {
   state: Ref<StoredState>
@@ -48,11 +48,25 @@ export function useTreemapViews(options: {
         height: cardHeight(version) - 2,
       }
     }
-    return {
-      width: CARD_WIDTH - 14,
+    return { width: CARD_WIDTH - 14,
       height: (CARD_WIDTH - 14) * Math.max(1, windowDimensions.value.height - 47)
-        / Math.max(1, windowDimensions.value.width - 14),
-    }
+        / Math.max(1, windowDimensions.value.width - 14) }
+  }
+  function zoomVersionAfterMove(version: Version) {
+    if (version.id === 'v0' || !version.data.length) return
+    const viewport = mapViewport(version)
+    const view = mapViewFor(version)
+    const roots = tilesForForest(version.data, version.positions).filter((tile) => tile.depth === 0)
+    const left = Math.min(...roots.map((tile) => tile.x))
+    const top = Math.min(...roots.map((tile) => tile.y))
+    const right = Math.max(...roots.map((tile) => tile.x + tile.width))
+    const bottom = Math.max(...roots.map((tile) => tile.y + tile.height))
+    const padding = Math.min(MAP_PADDING, viewport.width / 4, viewport.height / 4)
+    const targetZoom = Math.min(MAP_ZOOM_MAX, (viewport.width - padding * 2) / Math.max(1, right - left),
+      (viewport.height - padding * 2) / Math.max(1, bottom - top))
+    if (targetZoom <= view.zoom) return
+    version.mapView = { zoom: targetZoom, panX: (viewport.width - (right - left) * targetZoom) / 2 - left * targetZoom,
+      panY: (viewport.height - (bottom - top) * targetZoom) / 2 - top * targetZoom, manual: true }
   }
   function mapViewFor(version: Version): MapView {
     const transient = transientMapViews.value[version.id]
@@ -224,7 +238,7 @@ export function useTreemapViews(options: {
       suppressClicks()
     } else if (transientMapViews.value[versionId]) scheduleMapViewCommit(versionId)
   }
-  return { transientMapViews, mapViewTimers, cardData, cardPositions, mapViewport, mapViewFor,
+  return { transientMapViews, mapViewTimers, cardData, cardPositions, mapViewport, mapViewFor, zoomVersionAfterMove,
     centerVersionTreemaps, compactVersionTreemaps, commitMapView, clearTransientMapViews,
     initializeMapViews, zoomMap, startMapPan, moveMapPan, endMapPan }
 }

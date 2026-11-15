@@ -261,11 +261,10 @@ h1 { margin: 7px 0 0; font-size: 21px; line-height: 1.25; font-weight: 700; lett
 .tree-tile.is-hovered, .tree-tile.is-over { fill: color-mix(in srgb, var(--theme-entry-hover) var(--theme-entry-hover-strength), var(--tile-base)); }
 .tree-tile.is-peer-selected { fill: color-mix(in srgb, var(--tile-selection) var(--theme-entry-selection-strength), var(--tile-base)); }
 .tree-tile.is-over { fill: color-mix(in srgb, var(--theme-entry-hover) var(--theme-entry-hover-strength), var(--tile-base)); stroke: var(--theme-accent); }
-.tree-tile.is-source { opacity: .16; }
-.version-card.previewing .tree-tile.is-source { opacity: .2; }
-.tree-tile.is-invalid { fill: color-mix(in srgb, var(--tile-base) 55%, var(--theme-entry-invalid)); }
+.treemap-overlap-outline { fill: none; stroke: black; stroke-width: 3px; stroke-dasharray: 1 4; stroke-linecap: round; }
+.treemap-drop-outline { fill: none; stroke: var(--theme-accent); stroke-width: 5px; }
 .drag-source-ghost { opacity: 1; }
-.dragged-overlay { opacity: .94; stroke: #f7faf7; stroke-width: 3; filter: drop-shadow(0 3px 4px #24352f55); }
+.dragged-overlay { stroke: #f7faf7; stroke-width: 3; filter: drop-shadow(0 3px 4px #24352f55); }
 .dragged-overlay.depth-0 { stroke: #176b68; stroke-dasharray: 5 3; stroke-width: 3; }
 .tile-label, .merge-preview-label { fill: var(--theme-entry-label); pointer-events: none; font-family: Arial, sans-serif; font-weight: 500; }
 .mini-map { overflow: hidden; overscroll-behavior: contain; touch-action: none; }

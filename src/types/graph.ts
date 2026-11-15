@@ -6,19 +6,18 @@ export type VersionCardModel = {
   compareMode: boolean
   zoom: number
   overNode: string | null
-  invalidNode: string | null
   hoveredNode: { versionId: string; nodeId: string } | null
   selectedNodes: string[]
   draggedSubtreeIds: string[]
   draggedOriginalTile: Tile | null
   selectionBox: { versionId: string; left: number; top: number; width: number; height: number } | null
-  windowDimensions: { width: number; height: number }
   clientId: string
   colorForUser: (id: string) => string
   isReadOnly: boolean
   versionTiles: Map<string, Tile[]>
   duplicateValueLinks: Map<string, { id: string; path: string }[]>
   displayCardPosition: (version: Version) => { x: number; y: number }
+  cardWidth: (version: Version) => number
   cardHeight: (version: Version) => number
   rootLabelOffset: () => number
   rootLabelX: () => number

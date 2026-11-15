@@ -42,6 +42,9 @@ export function useGraphCamera(options: {
       ? Math.max(graphBounds.value.height, (canvasSize.value.height - pan.value.y) / zoom.value) - cardPosition(version).y
       : windowDimensions.value.height
   }
+  function cardWidth(_version: Version) {
+    return windowDimensions.value.width
+  }
   function rootLabelOffset() {
     return (canvasSize.value.height / 2 - pan.value.y) / zoom.value - cardPosition(versionsById.value.get('v0')!).y
   }
@@ -93,8 +96,8 @@ export function useGraphCamera(options: {
     return {
       left: includeRoot ? 0 : Math.min(...positions.map((position) => position.x)),
       top: Math.min(...positions.map((position) => position.y)),
-      right: Math.max(...positions.map((position) => position.x + windowDimensions.value.width)) + (includeRoot ? 140 : 0),
-      bottom: Math.max(...positions.map((position) => position.y + windowDimensions.value.height)),
+      right: Math.max(...positions.map((position, index) => position.x + cardWidth(cards[index]!))) + (includeRoot ? 140 : 0),
+      bottom: Math.max(...positions.map((position, index) => position.y + cardHeight(cards[index]!))),
     }
   }
   const fitZoom = computed(() => {
@@ -219,9 +222,9 @@ export function useGraphCamera(options: {
     const availableWidth = Math.max(1, canvasSize.value.width - 100)
     const availableHeight = Math.max(1, canvasSize.value.height - 100)
     const height = version.id === 'v0' ? windowDimensions.value.height : cardHeight(version)
-    const targetZoom = Math.max(0.005, Math.min(ZOOM_MAX, availableWidth / windowDimensions.value.width, availableHeight / height))
+    const targetZoom = Math.max(0.005, Math.min(ZOOM_MAX, availableWidth / cardWidth(version), availableHeight / height))
     const target = {
-      x: canvasSize.value.width / 2 - (position.x + windowDimensions.value.width / 2) * targetZoom,
+      x: canvasSize.value.width / 2 - (position.x + cardWidth(version) / 2) * targetZoom,
       y: version.id === 'v0' ? canvasSize.value.height / 2 - (canvasSize.value.height / 2 - pan.value.y) / zoom.value * targetZoom
         : canvasSize.value.height / 2 - (position.y + height / 2) * targetZoom,
     }
@@ -242,7 +245,7 @@ export function useGraphCamera(options: {
     const visible = versions.value.filter((version) => {
       if (retained.has(version.id)) return true
       const position = cardPosition(version)
-      return position.x <= right && position.x + windowDimensions.value.width >= left
+      return position.x <= right && position.x + cardWidth(version) >= left
         && position.y <= bottom && position.y + cardHeight(version) >= top
     })
     return previous && previous.length === visible.length && visible.every((version, index) => version === previous[index])
@@ -258,7 +261,7 @@ export function useGraphCamera(options: {
   function connectionInViewport(source: Version, destination: Version) {
     const from = displayCardPosition(source)
     const to = displayCardPosition(destination)
-    const startX = from.x + windowDimensions.value.width
+    const startX = from.x + cardWidth(source)
     const startY = from.y + cardHeight(source) / 2
     const endY = to.y + cardHeight(destination) / 2
     // Include the label position as well as the path, including the root's horizontal route.
@@ -305,7 +308,7 @@ export function useGraphCamera(options: {
   }
   function isVersionCentered(version: Version) {
     const position = cardPosition(version)
-    const centerX = (position.x + windowDimensions.value.width / 2) * zoom.value + pan.value.x
+    const centerX = (position.x + cardWidth(version) / 2) * zoom.value + pan.value.x
     const centerY = (position.y + cardHeight(version) / 2) * zoom.value + pan.value.y
     return Math.abs(centerX - canvasSize.value.width / 2) < 2
       && Math.abs(centerY - canvasSize.value.height / 2) < 2
@@ -315,7 +318,7 @@ export function useGraphCamera(options: {
     focusedVersionId.value = centerImmediately ? version.id : null
     cancelPanAnimation()
     const position = cardPosition(version)
-    const width = windowDimensions.value.width * zoom.value
+    const width = cardWidth(version) * zoom.value
     const height = cardHeight(version) * zoom.value
     const margin = 50
     const target = { ...pan.value }
@@ -325,7 +328,7 @@ export function useGraphCamera(options: {
     const bottom = top + height
 
     if (centerImmediately || width > canvasSize.value.width - margin * 2) {
-      target.x = canvasSize.value.width / 2 - (position.x + windowDimensions.value.width / 2) * zoom.value
+      target.x = canvasSize.value.width / 2 - (position.x + cardWidth(version) / 2) * zoom.value
     } else if (left < margin) target.x += margin - left
     else if (right > canvasSize.value.width - margin) target.x -= right - (canvasSize.value.width - margin)
 
@@ -358,7 +361,7 @@ export function useGraphCamera(options: {
     if (versionArrivalFrame) cancelAnimationFrame(versionArrivalFrame)
   }
 
-  return { focusedVersionId, versionArrival, cardPosition, cardHeight, rootLabelOffset, rootLabelX, displayCardPosition, startVersionArrival, graphBounds,
+  return { focusedVersionId, versionArrival, cardPosition, cardWidth, cardHeight, rootLabelOffset, rootLabelX, displayCardPosition, startVersionArrival, graphBounds,
     visibleVersions, visibleConnectionVersions, visibleMergeConnectionVersions, intersectsViewport, zoomAt, stepPreset, fitGraph, fitHeight, focusNeighborhood,
     startCanvasPan, moveCanvasPan, endCanvasPan, onWheel, focusVersion, focusActive, animateCamera,
     isVersionCentered, panToVersion, stopGraphAnimations }

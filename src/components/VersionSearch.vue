@@ -4,14 +4,15 @@ import { actionIcons } from '../config/icons'
 import type { TreeNode, Version } from '../types/workspace'
 import { displayVersionChange, displayVersionId } from '../utils/versions'
 
-const props = defineProps<{ versions: Version[]; actionForVersion: (version: Version) => string }>()
+const props = defineProps<{ versions: Version[]; room: string; actionForVersion: (version: Version) => string }>()
 const { close: X } = actionIcons
 const emit = defineEmits<{ close: []; focus: [version: Version] }>()
 type Query = { all: string; step: string; branch: string; subbranch: string; tag: string; action: string; entries: string }
+type RecentSearch = { query: Query; room?: string; versionId?: string; result?: string }
 const emptyQuery = (): Query => ({ all: '', step: '', branch: '', subbranch: '', tag: '', action: '', entries: '' })
 const storageKey = 'canopy-recent-version-searches-v1'
 const query = ref<Query>(emptyQuery())
-const recent = ref<Query[]>([])
+const recent = ref<RecentSearch[]>([])
 const firstInput = ref<HTMLInputElement | null>(null)
 const hasQuery = computed(() => Object.values(query.value).some((part) => part.trim()))
 function findMatchingEntry(nodes: TreeNode[], text: string): TreeNode | undefined {
@@ -53,14 +54,16 @@ const matches = computed(() => hasQuery.value ? props.versions.flatMap((version)
     ? [{ version, reasons, detail }] : []
 }) : [])
 
-function remember() {
+function remember(version: Version, detail: string) {
   if (!hasQuery.value) return
   const item: Query = {
     all: query.value.all.trim(), step: query.value.step.trim(), branch: query.value.branch.trim(),
     subbranch: query.value.subbranch.trim(), tag: query.value.tag.trim(),
     action: query.value.action.trim(), entries: query.value.entries.trim(),
   }
-  recent.value = [item, ...recent.value.filter((previous) => JSON.stringify(previous) !== JSON.stringify(item))].slice(0, 3)
+  const result = [displayVersionId(version), version.tag?.title, detail].filter(Boolean).join(' · ')
+  recent.value = [{ query: item, room: props.room, versionId: version.id, result }, ...recent.value.filter((previous) =>
+    previous.room !== props.room || previous.versionId !== version.id || JSON.stringify(previous.query) !== JSON.stringify(item))].slice(0, 3)
   localStorage.setItem(storageKey, JSON.stringify(recent.value))
 }
 function recentLabel(item: Query) {
@@ -71,9 +74,17 @@ function recentLabel(item: Query) {
   ]
   return parts.filter(Boolean).join(' · ')
 }
-function choose(version: Version) {
-  remember()
+function choose(version: Version, detail: string) {
+  remember(version, detail)
   emit('focus', version)
+}
+function chooseRecent(item: RecentSearch) {
+  const version = item.room === props.room && props.versions.find((candidate) => candidate.id === item.versionId)
+  if (version) {
+    recent.value = [item, ...recent.value.filter((previous) => previous !== item)].slice(0, 3)
+    localStorage.setItem(storageKey, JSON.stringify(recent.value))
+    emit('focus', version)
+  } else query.value = { ...item.query }
 }
 onMounted(() => {
   try {
@@ -81,14 +92,18 @@ onMounted(() => {
     if (Array.isArray(saved)) {
       recent.value = saved.flatMap((item: unknown) => {
         if (Array.isArray(item) && (item.length === 3 || item.length === 4) && item.every((part) => typeof part === 'string')) {
-          return [{ ...emptyQuery(), step: item[0], branch: item[1], subbranch: item[2], tag: item[3] ?? '' }]
+          return [{ query: { ...emptyQuery(), step: item[0], branch: item[1], subbranch: item[2], tag: item[3] ?? '' } }]
         }
         if (!item || typeof item !== 'object') return []
         const value = item as Record<string, unknown>
+        const fields = value.query && typeof value.query === 'object' ? value.query as Record<string, unknown> : value
         const keys = Object.keys(emptyQuery()) as (keyof Query)[]
-        if (!keys.every((key) => typeof value[key] === 'string')) return []
-        return [{ all: value.all as string, step: value.step as string, branch: value.branch as string,
-          subbranch: value.subbranch as string, tag: value.tag as string, action: value.action as string, entries: value.entries as string }]
+        if (!keys.every((key) => typeof fields[key] === 'string')) return []
+        const savedQuery = { all: fields.all as string, step: fields.step as string, branch: fields.branch as string,
+          subbranch: fields.subbranch as string, tag: fields.tag as string, action: fields.action as string, entries: fields.entries as string }
+        return [{ query: savedQuery, room: typeof value.room === 'string' ? value.room : undefined,
+          versionId: typeof value.versionId === 'string' ? value.versionId : undefined,
+          result: typeof value.result === 'string' ? value.result : undefined }]
       }).slice(0, 3)
     }
   } catch (error) {
@@ -102,7 +117,7 @@ onMounted(() => {
   <div class="editor-scrim search-scrim" @click.self="emit('close')" @keydown.esc.prevent.stop="emit('close')">
     <section class="version-search entry-editor" role="dialog" aria-modal="true" aria-label="Search versions">
       <div class="editor-heading"><span class="section-label">Search through</span><button type="button" class="quiet-icon" aria-label="Close search" @click="emit('close')"><X :size="17" /></button></div>
-      <form class="version-search-fields" @submit.prevent="remember">
+      <form class="version-search-fields" @submit.prevent>
         <label class="version-search-row"><span>All</span><input ref="firstInput" v-model="query.all" aria-label="All" placeholder="Search everything" /></label>
         <div class="version-search-row">
           <span>Versions</span>
@@ -115,16 +130,17 @@ onMounted(() => {
         <label class="version-search-row"><span>Tag &amp; Description</span><input v-model="query.tag" aria-label="Tag text" placeholder="Tag text or description" /></label>
         <label class="version-search-row"><span>Actions</span><input v-model="query.action" aria-label="Actions" placeholder="Action" /></label>
         <label class="version-search-row"><span>Entries &amp; Description</span><input v-model="query.entries" aria-label="Entries and description" placeholder="Entry text or description" /></label>
-        <button type="submit" class="primary-button">Search</button>
       </form>
       <div v-if="!hasQuery" class="version-search-results">
         <span class="section-label">RECENT SEARCHES</span>
-        <button v-for="item in recent" :key="JSON.stringify(item)" type="button" @click="query = { ...item }">{{ recentLabel(item) }}</button>
+        <button v-for="item in recent" :key="JSON.stringify(item)" type="button" @click="chooseRecent(item)">
+          <strong>{{ recentLabel(item.query) }}</strong><span v-if="item.result">{{ item.room }} · {{ item.result }}</span>
+        </button>
         <span v-if="!recent.length" class="interaction-empty">No recent searches</span>
       </div>
       <div v-else class="version-search-results">
         <span class="section-label">RESULTS</span>
-        <button v-for="{ version, reasons, detail } in matches" :key="version.id" type="button" @click="choose(version)">
+        <button v-for="{ version, reasons, detail } in matches" :key="version.id" type="button" @click="choose(version, detail)">
           <strong>{{ displayVersionId(version) }}<template v-if="version.tag"> · {{ version.tag.title }}</template></strong>
           <span>{{ reasons.join(', ') }} · {{ detail }}</span>
         </button>

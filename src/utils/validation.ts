@@ -83,6 +83,12 @@ export function isVersion(value: unknown): value is Version {
   if (value.positions !== undefined
     && (!isRecord(value.positions) || !Object.values(value.positions).every((position) =>
       isRecord(position) && Number.isFinite(position.x) && Number.isFinite(position.y)))) return false
+  if (value.treemapOrder !== undefined && (!Array.isArray(value.treemapOrder)
+    || !value.treemapOrder.every((id) => typeof id === 'string')
+    || new Set(value.treemapOrder).size !== value.treemapOrder.length)) return false
+  if (value.windowScale !== undefined && (!isRecord(value.windowScale)
+    || typeof value.windowScale.width !== 'number' || !Number.isFinite(value.windowScale.width) || value.windowScale.width <= 0 || value.windowScale.width > 1
+    || typeof value.windowScale.height !== 'number' || !Number.isFinite(value.windowScale.height) || value.windowScale.height <= 0 || value.windowScale.height > 1)) return false
   if ((value.number !== undefined && !isVersionNumber(value.number)) || !isSuffix(value.numberSuffix)) return false
   if (value.tag !== undefined && (!isRecord(value.tag) || typeof value.tag.title !== 'string'
     || !value.tag.title.trim() || value.tag.title.length > 120 || typeof value.tag.description !== 'string'

@@ -30,7 +30,9 @@ export type Version = {
   number?: VersionNumber
   numberSuffix?: number
   positions?: Record<string, { x: number; y: number }>
+  treemapOrder?: string[]
   mapView?: MapView
+  windowScale?: { width: number; height: number } // Legacy saved window size; no longer used for rendering.
   createdAt: number
 }
 export type Revision = { clock: number; actor: string }

@@ -1,5 +1,5 @@
 import type { MapView, Tile, TreeNode } from '../types/workspace'
-import { nodeParentIds } from './tree'
+import { findNode, nodeParentIds } from './tree'
 import { hierarchy, treemap, treemapSquarify } from 'd3-hierarchy'
 
 let labelContext: CanvasRenderingContext2D | null | undefined
@@ -347,81 +347,116 @@ export function positionsAfterMove(
 ) {
   const defaults = defaultPositions(data, existing)
   if (!data.some((node) => node.id === nodeId)) return { ...defaults, ...existing }
-  return resolveRootOverlaps(data, { ...defaults, ...existing, [nodeId]: position }, [nodeId])
-}
-export function positionsAfterMoves(
-  data: TreeNode[],
-  positions: Record<string, { x: number; y: number }>,
-  fixedIds: string[],
-) {
-  return resolveRootOverlaps(data, positions, fixedIds)
-}
-export function positionsAfterDetach(
-  data: TreeNode[],
-  positions: Record<string, { x: number; y: number }>,
-  moves: { id: string; parentId?: string }[],
-) {
-  const resolved = { ...positions }
-  const moving = new Set(moves.map((move) => move.id))
-  const occupied = data.filter((node) => !moving.has(node.id))
-  for (const move of moves) {
-    const node = data.find((item) => item.id === move.id)
-    const position = resolved[move.id]
-    if (!node || !position) throw new Error(`Missing detached root or position: ${move.id}`)
-    const parent = move.parentId ? tileForNode(data, resolved, move.parentId) : undefined
-    resolved[move.id] = nearestDetachedPosition(position, outerTreemapDimensions(node), occupied, resolved, parent)
-    occupied.push(node)
-  }
-  return resolved
+  return { ...defaults, ...existing, [nodeId]: position }
 }
 
-function nearestDetachedPosition(
-  preferred: { x: number; y: number },
-  size: { width: number; height: number },
-  occupied: TreeNode[],
-  positions: Record<string, { x: number; y: number }>,
-  parent?: Tile,
+type TreemapBounds = { id: string; left: number; top: number; right: number; bottom: number }
+type ExpansionDirection = 'right' | 'left' | 'down' | 'up'
+
+export function resolveTreemapExpansion(
+  before: TreemapBounds,
+  after: TreemapBounds,
+  treemaps: TreemapBounds[],
 ) {
-  const x = preferred.x * CARD_WIDTH
-  const y = preferred.y * TREE_MAP_HEIGHT
-  const obstacles = occupied.map((node) => {
-    const position = positions[node.id] ?? { x: 0, y: 0 }
-    const other = outerTreemapDimensions(node)
-    return {
-      left: position.x * CARD_WIDTH - size.width - MAP_GAP,
-      right: position.x * CARD_WIDTH + other.width + MAP_GAP,
-      top: position.y * TREE_MAP_HEIGHT - size.height - MAP_GAP,
-      bottom: position.y * TREE_MAP_HEIGHT + other.height + MAP_GAP,
-    }
-  })
-  // The closest point outside these expanded rectangles lies at the requested x or a rectangle edge.
-  const xs = [x, ...obstacles.flatMap((obstacle) => [obstacle.left, obstacle.right])]
-  let best: { x: number; y: number; distance: number; parentDistance: number } | undefined
-  for (const candidateX of xs) {
-    const intervals = obstacles.filter((obstacle) => candidateX > obstacle.left && candidateX < obstacle.right)
-      .map((obstacle) => ({ top: obstacle.top, bottom: obstacle.bottom }))
-      .sort((a, b) => a.top - b.top)
-    const merged: { top: number; bottom: number }[] = []
-    for (const interval of intervals) {
-      const last = merged.at(-1)
-      if (last && interval.top < last.bottom) last.bottom = Math.max(last.bottom, interval.bottom)
-      else merged.push({ ...interval })
-    }
-    const collision = merged.find((interval) => y > interval.top && y < interval.bottom)
-    const ys = collision ? [collision.top, collision.bottom] : [y]
-    for (const candidateY of ys) {
-      const distance = (candidateX - x) ** 2 + (candidateY - y) ** 2
-      const dx = parent ? Math.max(parent.x - candidateX - size.width, candidateX - parent.x - parent.width, 0) : 0
-      const dy = parent ? Math.max(parent.y - candidateY - size.height, candidateY - parent.y - parent.height, 0) : 0
-      const parentDistance = dx * dx + dy * dy
-      if (!best || distance < best.distance - 1e-8
-        || (Math.abs(distance - best.distance) <= 1e-8 && parentDistance < best.parentDistance)) {
-        best = { x: candidateX, y: candidateY, distance, parentDistance }
-      }
+  const directions: ExpansionDirection[] = []
+  if (after.right > before.right) directions.push('right')
+  if (after.left < before.left) directions.push('left')
+  if (after.bottom > before.bottom) directions.push('down')
+  if (after.top < before.top) directions.push('up')
+  const horizontal = (direction: ExpansionDirection) => direction === 'left' || direction === 'right'
+  const positive = (direction: ExpansionDirection) => direction === 'right' || direction === 'down'
+  function axis(bounds: TreemapBounds, direction: ExpansionDirection) {
+    const start = horizontal(direction) ? bounds.left : bounds.top
+    const end = horizontal(direction) ? bounds.right : bounds.bottom
+    return positive(direction) ? { start, end } : { start: -end, end: -start }
+  }
+  function projectedOverlap(a: TreemapBounds, b: TreemapBounds, direction: ExpansionDirection) {
+    return horizontal(direction) ? a.top < b.bottom && a.bottom > b.top : a.left < b.right && a.right > b.left
+  }
+  function onSide(a: TreemapBounds, b: TreemapBounds, direction: ExpansionDirection) {
+    const left = axis(a, direction)
+    const right = axis(b, direction)
+    return right.start + right.end >= left.start + left.end
+  }
+  const candidates = new Map<ExpansionDirection, { bounds: TreemapBounds; distance: number }[]>()
+  for (const bounds of treemaps) {
+    if (bounds.id === after.id) continue
+    const matches = directions.flatMap((direction) => {
+      const oldAxis = axis(before, direction)
+      const newAxis = axis(after, direction)
+      const other = axis(bounds, direction)
+      if (!projectedOverlap(after, bounds, direction) || !onSide(before, bounds, direction)
+        || other.start >= newAxis.end || other.end <= oldAxis.end) return []
+      return [{ direction, distance: newAxis.end - other.start }]
+    })
+    matches.sort((a, b) => a.distance - b.distance || directions.indexOf(a.direction) - directions.indexOf(b.direction))
+    const match = matches[0]
+    if (match) {
+      const group = candidates.get(match.direction) ?? []
+      group.push({ bounds, distance: match.distance })
+      candidates.set(match.direction, group)
     }
   }
-  return { x: best!.x / CARD_WIDTH, y: best!.y / TREE_MAP_HEIGHT }
+  const moved = new Map<string, { x: number; y: number }>()
+  for (const direction of directions) {
+    const initial = (candidates.get(direction) ?? []).filter(({ bounds }) => !moved.has(bounds.id))
+    if (!initial.length) continue
+    const group = new Map(initial.map(({ bounds }) => [bounds.id, bounds]))
+    let distance = Math.max(...initial.map((item) => item.distance))
+    let changed = true
+    while (changed) {
+      changed = false
+      for (const member of group.values()) {
+        const memberAxis = axis(member, direction)
+        for (const other of treemaps) {
+          if (other.id === after.id || group.has(other.id) || moved.has(other.id)
+            || !projectedOverlap(member, other, direction) || !onSide(member, other, direction)) continue
+          const otherAxis = axis(other, direction)
+          if (otherAxis.start >= memberAxis.end + distance || otherAxis.end <= memberAxis.start) continue
+          group.set(other.id, other)
+          if (projectedOverlap(after, other, direction) && onSide(before, other, direction)
+            && otherAxis.start < axis(after, direction).end && otherAxis.end > axis(before, direction).end) {
+            distance = Math.max(distance, axis(after, direction).end - otherAxis.start)
+          }
+          changed = true
+        }
+      }
+    }
+    const displacement = positive(direction) ? distance : -distance
+    for (const id of group.keys()) {
+      moved.set(id, horizontal(direction) ? { x: displacement, y: 0 } : { x: 0, y: displacement })
+    }
+  }
+  return moved
 }
+
+export function positionsAfterAttachment(
+  previousData: TreeNode[],
+  data: TreeNode[],
+  previousPositions: Record<string, { x: number; y: number }> | undefined,
+  targetId: string,
+) {
+  const oldPositions = { ...defaultPositions(previousData, previousPositions), ...previousPositions }
+  const positions = positionsForData(previousData, data, oldPositions)
+  const target = previousData.find((root) => !!findNode([root], targetId))
+  const nextTarget = target && data.find((root) => root.id === target.id)
+  if (!target || !nextTarget) throw new Error(`Missing attachment target treemap: ${targetId}`)
+  function bounds(node: TreeNode, position: { x: number; y: number }): TreemapBounds {
+    const size = outerTreemapDimensions(node)
+    const left = position.x * CARD_WIDTH
+    const top = position.y * TREE_MAP_HEIGHT
+    return { id: node.id, left, top, right: left + size.width, bottom: top + size.height }
+  }
+  const before = bounds(target, oldPositions[target.id]!)
+  const after = bounds(nextTarget, positions[target.id]!)
+  const treemaps = data.map((root) => bounds(root, positions[root.id]!))
+  for (const [id, delta] of resolveTreemapExpansion(before, after, treemaps)) {
+    const position = positions[id]!
+    positions[id] = { x: position.x + delta.x / CARD_WIDTH, y: position.y + delta.y / TREE_MAP_HEIGHT }
+  }
+  return positions
+}
+
 export function positionsForData(
   previousData: TreeNode[],
   nextData: TreeNode[],
@@ -452,7 +487,7 @@ export function positionsForData(
     positions[node.id] = nearestFreePosition(preferred, size, occupied, positions)
     occupied.push(node)
   }
-  return resolveRootOverlaps(nextData, positions)
+  return positions
 }
 function nearestFreePosition(
   preferred: { x: number; y: number },
@@ -493,48 +528,6 @@ function nearestFreePosition(
   while (!isFree(fallback)) fallback.x += stepX
   return { x: fallback.x / CARD_WIDTH, y: fallback.y / TREE_MAP_HEIGHT }
 }
-function resolveRootOverlaps(
-  data: TreeNode[],
-  positions: Record<string, { x: number; y: number }>,
-  fixedIds: string[] = [],
-) {
-  const resolved = { ...positions }
-  const fixed = new Set(fixedIds)
-  const ordered = fixed.size
-    ? [...data].sort((left, right) => Number(fixed.has(right.id)) - Number(fixed.has(left.id)))
-    : data
-  const occupied: TreeNode[] = []
-  for (const node of ordered) {
-    const position = resolved[node.id] ?? { x: 0, y: 0 }
-    const size = outerTreemapDimensions(node)
-    if (!nearestPositionIsFree(position, size, occupied, resolved)) {
-      resolved[node.id] = nearestFreePosition(
-        { x: position.x * CARD_WIDTH, y: position.y * TREE_MAP_HEIGHT },
-        size,
-        occupied,
-        resolved,
-      )
-    }
-    occupied.push(node)
-  }
-  return resolved
-}
-export function nearestPositionIsFree(
-  position: { x: number; y: number },
-  size: { width: number; height: number },
-  occupied: TreeNode[],
-  positions: Record<string, { x: number; y: number }>,
-) {
-  const candidate = { x: position.x * CARD_WIDTH, y: position.y * TREE_MAP_HEIGHT }
-  return !occupied.some((other) => {
-    const otherPosition = positions[other.id] ?? { x: 0, y: 0 }
-    const otherSize = outerTreemapDimensions(other)
-    return candidate.x < otherPosition.x * CARD_WIDTH + otherSize.width + MAP_GAP
-      && candidate.x + size.width + MAP_GAP > otherPosition.x * CARD_WIDTH
-      && candidate.y < otherPosition.y * TREE_MAP_HEIGHT + otherSize.height + MAP_GAP
-      && candidate.y + size.height + MAP_GAP > otherPosition.y * TREE_MAP_HEIGHT
-  })
-}
 export function tilesFor(
   root: TreeNode,
   forest: TreeNode[],
@@ -569,11 +562,38 @@ function tilesForWithCache(
     depth: node.depth, hasChildren: !!node.children?.length,
   }))
 }
-export function tilesForForest(data: TreeNode[], positions?: Record<string, { x: number; y: number }>) {
+export function orderedTreemapRoots(data: TreeNode[], order?: string[]) {
+  if (!order?.length) return data
+  const roots = new Map(data.map((node) => [node.id, node]))
+  const ordered: TreeNode[] = []
+  for (const id of order) {
+    const node = roots.get(id)
+    if (node) { ordered.push(node); roots.delete(id) }
+  }
+  return [...ordered, ...roots.values()]
+}
+export function overlappingTreemapIds(tiles: Tile[]) {
+  const roots = tiles.filter((tile) => tile.depth === 0)
+    .map((tile, order) => ({ tile, order }))
+    .sort((a, b) => a.tile.x - b.tile.x)
+  let active: typeof roots = []
+  const overlapping = new Set<string>()
+  for (const current of roots) {
+    active = active.filter((other) => other.tile.x + other.tile.width > current.tile.x)
+    for (const other of active) {
+      if (other.tile.y < current.tile.y + current.tile.height && other.tile.y + other.tile.height > current.tile.y) {
+        overlapping.add(current.order > other.order ? current.tile.id : other.tile.id)
+      }
+    }
+    active.push(current)
+  }
+  return overlapping
+}
+export function tilesForForest(data: TreeNode[], positions?: Record<string, { x: number; y: number }>, order?: string[]) {
   const cache: LayoutCache = new Map()
   const resolved = data.some((root) => !positions?.[root.id])
     ? { ...defaultPositionsWithCache(data, positions, cache), ...positions } : positions
-  return data.flatMap((root) => tilesForWithCache(root, data, resolved, cache))
+  return orderedTreemapRoots(data, order).flatMap((root) => tilesForWithCache(root, data, resolved, cache))
 }
 export function tileForNode(
   data: TreeNode[],

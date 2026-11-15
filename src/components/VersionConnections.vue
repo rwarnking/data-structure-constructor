@@ -5,7 +5,6 @@ import { versionColor } from '../utils/colors'
 
 const props = defineProps<{
   graphBounds: { width: number; height: number }
-  windowDimensions: { width: number; height: number }
   versions: Version[]; visibleVersions: Version[]; visibleConnectionVersions: Version[]
   visibleMergeConnectionVersions: Version[]; activeId: string
   connectionPath: (version: Version) => string
@@ -14,6 +13,7 @@ const props = defineProps<{
   mergeConnectionColor: (version: Version) => string
   cardPosition: (version: Version) => { x: number; y: number }
   displayCardPosition: (version: Version) => { x: number; y: number }
+  cardWidth: (version: Version) => number
   cardHeight: (version: Version) => number
   terminalTailEnd: (version: Version) => number
   arrivingVersionId?: string
@@ -47,7 +47,7 @@ const straightGroups = computed(() => {
     const opacity = version.id === props.activeId || version.parentId === props.activeId ? 0.96 : 0.76
     const from = props.displayCardPosition(parent)
     const to = props.displayCardPosition(version)
-    const start = from.x + props.windowDimensions.width
+    const start = from.x + props.cardWidth(parent)
     const end = to.x
     const batchable = parent.id !== 'v0' && version.step === parent.step + 1
       && Math.abs(from.y + props.cardHeight(parent) / 2 - to.y - props.cardHeight(version) / 2) < 1
@@ -82,8 +82,8 @@ const straightGroups = computed(() => {
         :opacity="version.id === activeId || version.mergeSourceId === activeId ? 0.96 : 0.76" />
     </template>
     <template v-for="version in visibleVersions.filter((item) => !parentIds.has(item.id) && item.id !== arrivingVersionId)" :key="`tail-${version.id}`">
-      <path :d="`M ${cardPosition(version).x + windowDimensions.width} ${cardPosition(version).y + cardHeight(version) / 2} H ${cardPosition(version).x + windowDimensions.width + terminalTailEnd(version)}`" class="connection-outline" fill="none" stroke="var(--theme-connector-outline)" :stroke-width="connectionWidth(version) + 10" stroke-linecap="butt" />
-      <path :data-version-tail="version.id" :d="`M ${cardPosition(version).x + windowDimensions.width} ${cardPosition(version).y + cardHeight(version) / 2} H ${cardPosition(version).x + windowDimensions.width + terminalTailEnd(version)}`" fill="none" :stroke="versionColor(version)" :stroke-width="connectionWidth(version)" stroke-linecap="butt" marker-end="url(#arrow)" />
+      <path :d="`M ${cardPosition(version).x + cardWidth(version)} ${cardPosition(version).y + cardHeight(version) / 2} H ${cardPosition(version).x + cardWidth(version) + terminalTailEnd(version)}`" class="connection-outline" fill="none" stroke="var(--theme-connector-outline)" :stroke-width="connectionWidth(version) + 10" stroke-linecap="butt" />
+      <path :data-version-tail="version.id" :d="`M ${cardPosition(version).x + cardWidth(version)} ${cardPosition(version).y + cardHeight(version) / 2} H ${cardPosition(version).x + cardWidth(version) + terminalTailEnd(version)}`" fill="none" :stroke="versionColor(version)" :stroke-width="connectionWidth(version)" stroke-linecap="butt" marker-end="url(#arrow)" />
     </template>
     <template v-for="version in curvedConnections" :key="`branch-edge-${version.id}`">
       <path :d="connectionPath(version)" class="connection-outline" fill="none" stroke="var(--theme-connector-outline)" :stroke-width="connectionWidth(version) + 10" stroke-linecap="round" stroke-linejoin="round" />

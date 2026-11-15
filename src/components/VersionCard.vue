@@ -6,13 +6,12 @@ import type { VersionCardModel } from '../types/graph'
 import { versionColor } from '../utils/colors'
 import TileLabel from './TileLabel.vue'
 import { displayVersionChange, displayVersionId } from '../utils/versions'
-import { outOfViewDirections, type MapDirection } from '../utils/treemap'
+import { outOfViewDirections, overlappingTreemapIds, type MapDirection } from '../utils/treemap'
 
 const props = defineProps<{ version: Version; model: VersionCardModel }>()
 const { menu: MoreHorizontal, tag: TagIcon } = actionIcons
-const { active, compareIds, compareMode, zoom, overNode, invalidNode, hoveredNode, selectedNodes, draggedSubtreeIds, draggedOriginalTile, selectionBox, windowDimensions, clientId, colorForUser, isReadOnly, versionTiles, duplicateValueLinks, displayCardPosition, cardHeight, rootLabelOffset, rootLabelX, versionAuthorColor, activeUsersFor, descendantsCount, isPreviewing, previewLabel, versionAction, cardData, mapViewport, cardMapView, mapTransform, changedEntries, tileSelectionColor, dragOverlayTiles, handleVersionClick, handleVersionDoubleClick, onVersionContext, onVersionMenu, startMapPan, zoomMap, startMapTileGesture, enterTile, moveTileTooltip, leaveTile, onTileClick, onTileDoubleClick, onTileContext } = toRefs(props.model)
+const { active, compareIds, compareMode, zoom, overNode, hoveredNode, selectedNodes, draggedSubtreeIds, draggedOriginalTile, selectionBox, clientId, colorForUser, isReadOnly, versionTiles, duplicateValueLinks, displayCardPosition, cardWidth, cardHeight, rootLabelOffset, rootLabelX, versionAuthorColor, activeUsersFor, descendantsCount, isPreviewing, previewLabel, versionAction, cardData, mapViewport, cardMapView, mapTransform, changedEntries, tileSelectionColor, dragOverlayTiles, handleVersionClick, handleVersionDoubleClick, onVersionContext, onVersionMenu, startMapPan, zoomMap, startMapTileGesture, enterTile, moveTileTooltip, leaveTile, onTileClick, onTileDoubleClick, onTileContext } = toRefs(props.model)
 const overlayTiles = computed(() => dragOverlayTiles.value(props.version))
-const overlayIds = computed(() => new Set(overlayTiles.value.map((tile) => tile.id)))
 const overviewHover = ref(false)
 const previewPosition = ref({ left: 0, top: 0 })
 const previewTiles = computed(() => versionTiles.value.get(props.version.id) ?? [])
@@ -52,11 +51,22 @@ const renderedTiles = computed(() => {
     retained.has(tile.id) || (tile.x <= right && tile.x + tile.width >= left
       && tile.y <= bottom && tile.y + tile.height >= top))
 })
+const renderedTreemaps = computed(() => {
+  const groups: typeof renderedTiles.value[] = []
+  for (const tile of renderedTiles.value) {
+    if (tile.depth === 0 || !groups.length) groups.push([])
+    groups[groups.length - 1]!.push(tile)
+  }
+  return groups
+})
+const overlappingTreemaps = computed(() => overlappingTreemapIds(previewTiles.value))
+const dropTarget = computed(() => props.version.id === active.value.id
+  ? renderedTiles.value.find((tile) => tile.id === overNode.value) : undefined)
 </script>
 
 <template>
   <article class="version-card" :class="{ active: version.id === active.id, compared: compareIds.includes(version.id), 'compare-pick': compareMode, compact: zoom < 0.66, 'lod-overview': isReadOnly, previewing: isPreviewing(version), 'root-version': version.id === 'v0' }"
-    :data-version="version.id" :style="{ left: `${displayCardPosition(version).x}px`, top: `${displayCardPosition(version).y}px`, width: `${windowDimensions.width}px`, height: `${cardHeight(version)}px`, '--branch-color': versionColor(version), '--user-color': colorForUser(clientId), '--author-color': versionAuthorColor(version) }"
+    :data-version="version.id" :style="{ left: `${displayCardPosition(version).x}px`, top: `${displayCardPosition(version).y}px`, width: `${cardWidth(version)}px`, height: `${cardHeight(version)}px`, '--branch-color': versionColor(version), '--user-color': colorForUser(clientId), '--author-color': versionAuthorColor(version) }"
     @pointerenter="showOverviewPreview" @pointerleave="overviewHover = false"
     @click="handleVersionClick(version, $event)" @dblclick.stop="handleVersionDoubleClick(version)" @contextmenu="onVersionContext(version, $event)" :data-over="overNode === version.id">
     <span v-for="(user, index) in activeUsersFor(version.id)" :key="`active-${user.id}`"
@@ -96,9 +106,10 @@ const renderedTiles = computed(() => {
       <template v-if="cardData(version).length">
         <svg :viewBox="`0 0 ${mapViewport(version).width} ${mapViewport(version).height}`" preserveAspectRatio="xMidYMid meet" class="treemap-svg">
           <g :transform="mapTransform(version)">
-            <rect v-for="tile in renderedTiles" :key="tile.id"
+            <g v-for="group in renderedTreemaps" :key="group[0]!.id">
+            <rect v-for="tile in group" :key="tile.id"
               :x="tile.x" :y="tile.y" :width="tile.width" :height="tile.height"
-              :class="['tree-tile', `depth-${tile.depth}`, { 'is-selected': selectedNodes.includes(tile.id) && version.id === active.id, 'is-peer-selected': !!tileSelectionColor(version.id, tile.id), 'is-different': changedEntries.get(version.id)?.has(tile.id), 'is-source': draggedSubtreeIds.includes(tile.id) && version.id === active.id, 'is-over': overNode === tile.id && version.id === active.id, 'is-invalid': invalidNode === tile.id && version.id === active.id, 'is-hovered': hoveredNode?.versionId === version.id && hoveredNode.nodeId === tile.id && !draggedSubtreeIds.includes(tile.id) }]"
+              :class="['tree-tile', `depth-${tile.depth}`, { 'is-selected': selectedNodes.includes(tile.id) && version.id === active.id, 'is-peer-selected': !!tileSelectionColor(version.id, tile.id), 'is-different': changedEntries.get(version.id)?.has(tile.id), 'is-over': overNode === tile.id && version.id === active.id, 'is-hovered': hoveredNode?.versionId === version.id && hoveredNode.nodeId === tile.id && !draggedSubtreeIds.includes(tile.id) }]"
               :data-node="tile.id" :style="{ '--tile-selection': tileSelectionColor(version.id, tile.id),
                 '--tile-base': tile.depth === 0 ? 'var(--theme-entry-root)' : tile.depth === 3 ? 'var(--theme-entry-deep)' : tile.depth % 2 ? 'var(--theme-entry-odd)' : 'var(--theme-entry-even)' }"
               @pointerdown.stop="startMapTileGesture($event, version, tile.id)"
@@ -110,6 +121,12 @@ const renderedTiles = computed(() => {
               @contextmenu="version.id === active.id && !isReadOnly && onTileContext($event, tile.id)">
               <title>{{ tile.label }}</title>
             </rect>
+            <TileLabel v-for="tile in group" :key="`label-${tile.id}`"
+              :tile="tile" class="tile-label" />
+            <rect v-if="overlappingTreemaps.has(group[0]!.id)" class="treemap-overlap-outline"
+              :data-overlap-root="group[0]!.id" :x="group[0]!.x" :y="group[0]!.y"
+              :width="group[0]!.width" :height="group[0]!.height" pointer-events="none" />
+            </g>
             <path v-for="link in duplicateValueLinks.get(version.id) ?? []" :key="link.id"
               :d="link.path" fill="none" stroke="var(--theme-duplicate-connector)" stroke-width="3"
               stroke-dasharray="4 3" opacity=".72" pointer-events="none" />
@@ -119,9 +136,9 @@ const renderedTiles = computed(() => {
                 :fill="tile.depth === 0 ? 'var(--theme-entry-root)' : tile.depth === 3 ? 'var(--theme-entry-deep)' : tile.depth % 2 ? 'var(--theme-entry-odd)' : 'var(--theme-entry-even)'" />
               <TileLabel :tile="tile" class="tile-label" />
             </g>
-            <TileLabel v-for="tile in renderedTiles.filter((item) =>
-              !overlayIds.has(item.id))" :key="`label-${tile.id}`"
-              :tile="tile" class="tile-label" />
+            <rect v-if="dropTarget" class="treemap-drop-outline"
+              :x="dropTarget.x" :y="dropTarget.y" :width="dropTarget.width" :height="dropTarget.height"
+              pointer-events="none" />
             <rect v-if="version.id === active.id && draggedOriginalTile" class="drag-source-ghost"
               :x="draggedOriginalTile.x" :y="draggedOriginalTile.y"
               :width="draggedOriginalTile.width" :height="draggedOriginalTile.height"

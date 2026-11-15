@@ -9,17 +9,19 @@ async function openRoom(page, room = `test-${randomUUID()}`) {
   return room
 }
 
-async function openTreemapRoom(page, data) {
+async function openTreemapRoom(page, data, versionOptions = {}) {
   const room = `test-${randomUUID()}`
-  await page.addInitScript(({ room, data }) => {
+  await page.addInitScript(({ room, data, versionOptions }) => {
+    const key = `canopy-room-data-v1-${encodeURIComponent(room)}`
+    if (localStorage.getItem(key)) return
     const versions = [
       { id: 'v0', parentId: null, step: 0, lane: 0, branch: 'ROOT', change: 'Root', data: [], createdAt: 0 },
-      { id: 'v1', parentId: 'v0', step: 1, lane: 0, branch: 'B1', change: 'Edit', data, createdAt: 1 },
+      { id: 'v1', parentId: 'v0', step: 1, lane: 0, branch: 'B1', change: 'Edit', data, createdAt: 1, ...versionOptions },
     ]
-    localStorage.setItem(`canopy-room-data-v1-${encodeURIComponent(room)}`, JSON.stringify({
+    localStorage.setItem(key, JSON.stringify({
       versions, activeId: 'v1', nextNode: 100, nextVersion: 2, nextLane: 1, copyLinks: [],
     }))
-  }, { room, data })
+  }, { room, data, versionOptions })
   await openRoom(page, room)
   await focusActive(page)
   await expectCentered(page, 'v1')
@@ -496,7 +498,7 @@ test('version search persists recent queries and focuses a result', async ({ pag
   await expectCentered(page, first)
   await page.reload()
   await page.keyboard.press('Control+f')
-  await expect(dialog.getByRole('button', { name: identifier, exact: true })).toBeVisible()
+  await expect(dialog.getByRole('button', { name: new RegExp(identifier.replaceAll('.', '\\.')) })).toBeVisible()
   await page.keyboard.press('Escape')
   await expect(dialog).toHaveCount(0)
 })
@@ -531,17 +533,22 @@ test('search filters all entity types and remembers combined searches', async ({
   await dialog.getByLabel('Actions', { exact: true }).fill('nonexistent')
   await expect(result).toHaveCount(0)
   await dialog.getByLabel('Actions', { exact: true }).fill('edit')
-  await dialog.getByRole('button', { name: 'Search', exact: true }).click()
+  await expect(dialog.getByRole('button', { name: 'Search', exact: true })).toHaveCount(0)
   await page.keyboard.press('Escape')
   await page.keyboard.press('Control+f')
-  await dialog.getByRole('button', { name: /Actions: edit.*Entries: hidden description/ }).click()
-  await expect(dialog.getByLabel('Actions', { exact: true })).toHaveValue('edit')
-  await expect(result).toHaveCount(1)
+  await expect(dialog.getByText('No recent searches')).toBeVisible()
+  await dialog.getByLabel('Entries and description').fill('hidden description')
+  await dialog.getByLabel('Actions', { exact: true }).fill('edit')
+  await dialog.getByLabel('Tag text').fill('milestone')
   await result.click()
   await expect.poll(async () => (await state(page, room)).activeId).toBe('v1')
   await page.reload()
   await page.keyboard.press('Control+f')
-  await expect(dialog.getByRole('button', { name: /Actions: edit.*Entries: hidden description/ })).toBeVisible()
+  const recent = dialog.getByRole('button', { name: /Actions: edit.*Entries: hidden description.*Nested needle/ })
+  await expect(recent).toBeVisible()
+  await recent.click()
+  await expect(dialog).toHaveCount(0)
+  await expect.poll(async () => (await state(page, room)).activeId).toBe('v1')
 })
 
 test('search retains recent searches saved in the previous format', async ({ page }) => {
@@ -552,6 +559,41 @@ test('search retains recent searches saved in the previous format', async ({ pag
   await dialog.getByRole('button', { name: '01.02.003 · Tag: old tag' }).click()
   await expect(dialog.getByLabel('Version step')).toHaveValue('01')
   await expect(dialog.getByLabel('Tag text')).toHaveValue('old tag')
+})
+
+test('recent searches distinguish the results selected for the same query', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['Common'])
+  const first = (await state(page, room)).activeId
+  await addEntries(page, ['Other'])
+  const second = (await state(page, room)).activeId
+  const dialog = page.getByRole('dialog', { name: 'Search versions' })
+  for (const id of [first, second]) {
+    await page.keyboard.press('Control+f')
+    await dialog.getByLabel('All', { exact: true }).fill('Common')
+    const number = await page.locator(`.version-card[data-version="${id}"] .version-header-id`).innerText()
+    await dialog.getByRole('button', { name: new RegExp(number.replaceAll('.', '\\.')) }).click()
+  }
+  await page.reload()
+  await page.keyboard.press('Control+f')
+  const recent = dialog.locator('.version-search-results button')
+  await expect(recent).toHaveCount(2)
+  await recent.nth(1).click()
+  await expect.poll(async () => (await state(page, room)).activeId).toBe(first)
+})
+
+test('recent search results from another room restore the query rather than opening a matching id', async ({ page }) => {
+  await openTreemapRoom(page, [{ id: 'one', value: 'Shared text', children: [] }])
+  await page.keyboard.press('Control+f')
+  let dialog = page.getByRole('dialog', { name: 'Search versions' })
+  await dialog.getByLabel('All', { exact: true }).fill('Shared text')
+  await dialog.locator('.version-search-results button').click()
+  await openTreemapRoom(page, [{ id: 'two', value: 'Different text', children: [] }])
+  await page.keyboard.press('Control+f')
+  dialog = page.getByRole('dialog', { name: 'Search versions' })
+  await dialog.getByRole('button', { name: /All: Shared text/ }).click()
+  await expect(dialog.getByLabel('All', { exact: true })).toHaveValue('Shared text')
+  await expect(dialog.getByText('No matching versions')).toBeVisible()
 })
 
 test('search remains usable in a short narrow viewport', async ({ page }) => {
@@ -1183,6 +1225,72 @@ test('dragging attaches a root, outside drops cancel, and shortcut detaches a ch
   expect(findNode(await activeData(page, room), 'Target').children).toHaveLength(0)
 })
 
+for (const count of [1, 2]) {
+  test(`attaching ${count} ${count === 1 ? 'entry' : 'entries'} pushes conflicting roots only after drop`, async ({ page }) => {
+    const sources = Array.from({ length: count }, (_, index) => ({
+      id: `source${index}`, value: `Source ${index}`, children: [],
+    }))
+    const room = await openTreemapRoom(page, [
+      ...sources, { id: 'target', value: 'Target', children: [] },
+      { id: 'blocker', value: 'Blocker', children: [] },
+      { id: 'manual-a', value: 'Manual A', children: [] },
+      { id: 'manual-b', value: 'Manual B', children: [] },
+    ], {
+      positions: {
+        source0: { x: -0.75, y: 0 }, source1: { x: -1.5, y: 0 },
+        target: { x: 0, y: 0 }, blocker: { x: 0.62, y: 0 },
+        'manual-a': { x: 1.8, y: 1.6 }, 'manual-b': { x: 2, y: 1.6 },
+      },
+      mapView: { zoom: 0.17, panX: 80, panY: 20, manual: true },
+    })
+    const card = page.locator('.version-card.active')
+    if (count === 2) {
+      await card.locator('[data-node="source0"]').click()
+      await expect(card.locator('[data-node="source0"]')).toHaveClass(/is-selected/)
+      await card.locator('[data-node="source1"]').click({ modifiers: ['Shift'] })
+      await expect(card.locator('.tree-tile.is-selected')).toHaveCount(2)
+    }
+    const source = card.locator('[data-node="source0"]')
+    const target = card.locator('[data-node="target"]')
+    const blocker = card.locator('[data-node="blocker"]')
+    const from = await source.boundingBox()
+    const to = await target.boundingBox()
+    const blockerBefore = await blocker.boundingBox()
+    const before = await state(page, room)
+    const transform = await card.locator('.treemap-svg > g').getAttribute('transform')
+    await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(to.x + to.width / 2, to.y + to.height / 2, { steps: 8 })
+    await expect(target).toHaveClass(/is-over/)
+    expect(await blocker.boundingBox()).toEqual(blockerBefore)
+    expect(await card.locator('.treemap-svg > g').getAttribute('transform')).toBe(transform)
+    expect((await state(page, room)).versions.length).toBe(before.versions.length)
+    await page.mouse.up()
+    await expect.poll(async () => findNode(await activeData(page, room), 'Target')?.children.length).toBe(count)
+    const saved = await state(page, room)
+    const version = saved.versions.find((item) => item.id === saved.activeId)
+    const original = before.versions.find((item) => item.id === before.activeId)
+    expect(version.positions.blocker.x).toBeGreaterThan(original.positions.blocker.x)
+    expect(version.positions.blocker.y).toBe(original.positions.blocker.y)
+    expect(version.positions.target).toEqual(original.positions.target)
+    expect(version.positions['manual-a']).toEqual(original.positions['manual-a'])
+    expect(version.positions['manual-b']).toEqual(original.positions['manual-b'])
+    const targetWidth = Number(await page.locator('.version-card.active [data-node="target"]').getAttribute('width'))
+    expect(version.positions.blocker.x * 260).toBeCloseTo(targetWidth, 5)
+    for (const id of ['target', 'blocker', 'manual-a', 'manual-b', ...sources.map((source) => source.id)]) {
+      const margins = await page.locator(`.version-card.active [data-node="${id}"]`).evaluate((element) => {
+        const tile = element.getBoundingClientRect()
+        const viewport = element.closest('.mini-map').getBoundingClientRect()
+        return [tile.left - viewport.left, tile.top - viewport.top, viewport.right - tile.right, viewport.bottom - tile.bottom]
+      })
+      expect(Math.min(...margins)).toBeGreaterThan(-2)
+    }
+    await page.reload()
+    const reloaded = await state(page, room)
+    expect(reloaded.versions.find((item) => item.id === reloaded.activeId).positions).toEqual(version.positions)
+  })
+}
+
 for (const steps of [1, 12]) {
   test(`dragging onto the deepest child works with a selected parent at ${steps === 1 ? 'high' : 'low'} pointer speed`, async ({ page }) => {
     const room = await openTreemapRoom(page, [
@@ -1229,7 +1337,7 @@ for (const steps of [1, 12]) {
   })
 }
 
-test('detaching into nearby empty space finds a free position and an outside drop cancels', async ({ page }) => {
+test('detaching into empty space and canceling an outside drop', async ({ page }) => {
   const room = await openTreemapRoom(page, [
     { id: 'parent', value: 'Parent', children: [
       { id: 'a', value: 'a', children: [] }, { id: 'b', value: 'b', children: [] },
@@ -1277,6 +1385,283 @@ test('detaching into nearby empty space finds a free position and an outside dro
     })
     expect(outside).toBeGreaterThan(-2)
   }
+})
+
+for (const target of ['parent', 'child']) {
+  test(`dragging a treemap onto its ${target === 'parent' ? 'own header' : 'descendant'} moves it and zooms only after release`, async ({ page }) => {
+    const room = await openTreemapRoom(page, [
+      { id: 'parent', value: 'Parent', children: [{ id: 'child', value: 'Child', children: [] }] },
+    ], { positions: { parent: { x: 0.05, y: 0.05 } }, mapView: { zoom: 0.35, panX: 24, panY: 24, manual: true } })
+    await page.waitForTimeout(500)
+    const card = page.locator('.version-card.active')
+    const parent = card.locator('[data-node="parent"]')
+    const destination = card.locator(`[data-node="${target}"]`)
+    const before = await state(page, room)
+    const sizeBefore = await card.evaluate((element) => [element.style.width, element.style.height])
+    const transformBefore = await card.locator('.treemap-svg > g').getAttribute('transform')
+    const from = await parent.boundingBox()
+    const to = await destination.boundingBox()
+    const start = { x: from.x + 5, y: from.y + 5 }
+    const end = target === 'parent' ? { x: from.x + 25, y: from.y + 12 }
+      : { x: to.x + to.width / 2, y: to.y + to.height / 2 }
+    await page.mouse.move(start.x, start.y)
+    await page.mouse.down()
+    await page.mouse.move(end.x, end.y, { steps: 8 })
+    await expect(card.locator('.dragged-overlay')).not.toHaveCount(0)
+    await expect(card.locator('.tree-tile.is-over')).toHaveCount(0)
+    expect(await card.evaluate((element) => [element.style.width, element.style.height])).toEqual(sizeBefore)
+    expect(await card.locator('.treemap-svg > g').getAttribute('transform')).toBe(transformBefore)
+    await page.mouse.up()
+    await expect.poll(async () => (await state(page, room)).versions.find((item) => item.id === 'v1').positions.parent)
+      .not.toEqual(before.versions.find((item) => item.id === 'v1').positions.parent)
+    const saved = await state(page, room)
+    expect(saved.versions.length).toBe(before.versions.length)
+    expect(findNode(saved.versions.find((item) => item.id === 'v1').data, 'Parent').children[0].value).toBe('Child')
+    expect(await card.evaluate((element) => [element.style.width, element.style.height])).toEqual(sizeBefore)
+    const view = saved.versions.find((item) => item.id === 'v1').mapView
+    const expectedZoom = await parent.evaluate((tile) => {
+      const viewport = tile.ownerSVGElement.viewBox.baseVal
+      return Math.min(8, (viewport.width - 24) / Number(tile.getAttribute('width')),
+        (viewport.height - 24) / Number(tile.getAttribute('height')))
+    })
+    expect(view.zoom).toBeGreaterThan(before.versions.find((item) => item.id === 'v1').mapView.zoom)
+    expect(view.zoom).toBeCloseTo(expectedZoom, 6)
+    const bounds = await parent.evaluate((element) => {
+      const tile = element.getBoundingClientRect()
+      const map = element.closest('.mini-map').getBoundingClientRect()
+      return [tile.left - map.left, tile.top - map.top, map.right - tile.right, map.bottom - tile.bottom]
+    })
+    expect(Math.min(...bounds)).toBeGreaterThan(0)
+    await page.reload()
+    expect((await state(page, room)).versions.find((item) => item.id === 'v1').mapView).toEqual(view)
+  })
+}
+
+test('moving a treemap can overlap another without displacing it', async ({ page }) => {
+  const room = await openTreemapRoom(page, [
+    { id: 'source', value: 'Source', children: [] }, { id: 'other', value: 'Other', children: [] },
+  ], {
+    positions: { source: { x: 0, y: 0 }, other: { x: 0.7, y: 0 } },
+    mapView: { zoom: 0.35, panX: 24, panY: 24, manual: true },
+  })
+  await page.waitForTimeout(500)
+  const card = page.locator('.version-card.active')
+  const source = card.locator('[data-node="source"]')
+  const box = await source.boundingBox()
+  const beforeSize = await card.evaluate((element) => parseFloat(element.style.width))
+  const start = { x: box.x + 5, y: box.y + 5 }
+  const end = { x: box.x + box.width * 0.6, y: box.y + 5 }
+  const initial = await state(page, room)
+  await page.mouse.move(start.x, start.y)
+  await page.mouse.down()
+  await page.mouse.move(end.x, end.y, { steps: 8 })
+  await expect(card.locator('.tree-tile.is-over')).toHaveCount(0)
+  await page.mouse.up()
+  await expect.poll(async () => (await state(page, room)).versions.find((item) => item.id === 'v1').positions.source.x).toBeGreaterThan(0.1)
+  const version = (await state(page, room)).versions.find((item) => item.id === 'v1')
+  expect(version.positions.other).toEqual(initial.versions.find((item) => item.id === 'v1').positions.other)
+  expect(version.positions.source.x * 260 + 152).toBeGreaterThan(version.positions.other.x * 260)
+  expect(await card.evaluate((element) => parseFloat(element.style.width))).toBe(beforeSize)
+  expect(version.treemapOrder).toEqual(['other', 'source'])
+  await expect(card.locator('[data-overlap-root="source"]')).toHaveCount(1)
+  await expect(card.locator('[data-overlap-root="other"]')).toHaveCount(0)
+  const hit = await card.evaluate((element) => {
+    const source = element.querySelector('[data-node="source"]').getBoundingClientRect()
+    const other = element.querySelector('[data-node="other"]').getBoundingClientRect()
+    return { x: (Math.max(source.left, other.left) + Math.min(source.right, other.right)) / 2,
+      y: (Math.max(source.top, other.top) + Math.min(source.bottom, other.bottom)) / 2 }
+  })
+  expect(await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.getAttribute('data-node'), hit)).toBe('source')
+  for (const id of ['other', 'source']) {
+    const margins = await card.locator(`[data-node="${id}"]`).evaluate((element) => {
+      const tile = element.getBoundingClientRect()
+      const map = element.closest('.mini-map').getBoundingClientRect()
+      return [tile.left - map.left, tile.top - map.top, map.right - tile.right, map.bottom - tile.bottom]
+    })
+    expect(Math.min(...margins)).toBeGreaterThan(0)
+  }
+  await page.reload()
+  const reloaded = (await state(page, room)).versions.find((item) => item.id === 'v1')
+  expect(reloaded.positions).toEqual(version.positions)
+  expect(reloaded.treemapOrder).toEqual(['other', 'source'])
+  await page.keyboard.press('1')
+  await addEntries(page, ['New entry'])
+  const next = await state(page, room)
+  expect(next.versions.find((item) => item.id === next.activeId).treemapOrder).toEqual(['other', 'source'])
+})
+
+test('moving an offscreen treemap does not zoom in when all content cannot fit', async ({ page }) => {
+  const room = await openTreemapRoom(page, [
+    { id: 'parent', value: 'Parent', children: [{ id: 'child', value: 'Child', children: [] }] },
+  ], { positions: { parent: { x: 0, y: 0 } }, mapView: { zoom: 2, panX: 12, panY: 12, manual: true } })
+  await page.waitForTimeout(500)
+  const card = page.locator('.version-card.active')
+  const parent = card.locator('[data-node="parent"]')
+  const box = await parent.boundingBox()
+  const size = await card.evaluate((element) => [element.style.width, element.style.height])
+  await page.mouse.move(box.x + 8, box.y + 8)
+  await page.mouse.down()
+  await page.mouse.move(box.x + 24, box.y + 8, { steps: 4 })
+  await page.mouse.up()
+  await expect.poll(async () => (await state(page, room)).versions.find((item) => item.id === 'v1').positions.parent.x).toBeGreaterThan(0)
+  expect(await card.evaluate((element) => [element.style.width, element.style.height])).toEqual(size)
+  expect((await state(page, room)).versions.find((item) => item.id === 'v1').mapView.zoom).toBeLessThanOrEqual(2)
+})
+
+test('legacy resized versions use the standard window size', async ({ page }) => {
+  const room = await openTreemapRoom(page, [{ id: 'parent', value: 'Parent', children: [] }], {
+    windowScale: { width: 0.5, height: 0.5 }, mapView: { zoom: 0.35, panX: 24, panY: 24, manual: true },
+  })
+  const card = page.locator('.version-card.active')
+  const root = page.locator('.version-card.root-version')
+  expect(await card.evaluate((element) => element.style.width)).toBe(await root.evaluate((element) => element.style.width))
+  expect((await state(page, room)).versions.find((item) => item.id === 'v1').windowScale).toEqual({ width: 0.5, height: 0.5 })
+})
+
+test('treemap moves, stacking and view zoom synchronize to collaborators', async ({ browser }) => {
+  const hostContext = await browser.newContext()
+  const guestContext = await browser.newContext()
+  try {
+    const host = await hostContext.newPage()
+    const guest = await guestContext.newPage()
+    const room = await openTreemapRoom(host, [
+      { id: 'parent', value: 'Parent', children: [] }, { id: 'other', value: 'Other', children: [] },
+    ], {
+      positions: { parent: { x: 0, y: 0 }, other: { x: 0.7, y: 0 } },
+      mapView: { zoom: 0.35, panX: 24, panY: 24, manual: true },
+    })
+    await guest.goto(`/?room=${room}`)
+    await expect(guest.getByRole('status').first()).toHaveText('Connected')
+    await expect.poll(async () => (await state(guest, room)).versions.some((version) => version.id === 'v1')).toBe(true)
+    await host.waitForTimeout(500)
+    const box = await host.locator('.version-card.active [data-node="parent"]').boundingBox()
+    await host.mouse.move(box.x + 5, box.y + 5)
+    await host.mouse.down()
+    await host.mouse.move(box.x + box.width * 0.6, box.y + 5, { steps: 4 })
+    await host.mouse.up()
+    await expect.poll(async () => (await state(host, room)).versions.find((version) => version.id === 'v1').mapView.zoom).toBeGreaterThan(0.35)
+    const hostVersion = (await state(host, room)).versions.find((version) => version.id === 'v1')
+    expect(hostVersion.treemapOrder).toEqual(['other', 'parent'])
+    await expect.poll(async () => {
+      const version = (await state(guest, room)).versions.find((item) => item.id === 'v1')
+      return { positions: version.positions, treemapOrder: version.treemapOrder, mapView: version.mapView }
+    }).toEqual({ positions: hostVersion.positions, treemapOrder: hostVersion.treemapOrder, mapView: hostVersion.mapView })
+  } finally {
+    await hostContext.close()
+    await guestContext.close()
+  }
+})
+
+test('drop targeting follows the persisted treemap stacking order', async ({ page }) => {
+  const room = await openTreemapRoom(page, [
+    { id: 'front', value: 'Front', children: [] }, { id: 'back', value: 'Back', children: [] },
+    { id: 'source', value: 'Source', children: [] },
+  ], {
+    positions: { front: { x: 0, y: 0 }, back: { x: 0, y: 0 }, source: { x: 1.6, y: 0 } },
+    treemapOrder: ['back', 'front', 'source'],
+    mapView: { zoom: 0.35, panX: 20, panY: 20, manual: true },
+  })
+  await page.waitForTimeout(500)
+  const card = page.locator('.version-card.active')
+  const front = card.locator('[data-node="front"]')
+  const back = card.locator('[data-node="back"]')
+  const source = card.locator('[data-node="source"]')
+  const from = await source.boundingBox()
+  const to = await front.boundingBox()
+  await page.mouse.move(from.x + 5, from.y + 5)
+  await page.mouse.down()
+  await page.mouse.move(to.x + to.width / 2, to.y + to.height / 2, { steps: 6 })
+  await expect(front).toHaveClass(/is-over/)
+  await expect(back).not.toHaveClass(/is-over/)
+  await page.mouse.up()
+  await expect.poll(async () => findNode(await activeData(page, room), 'Front')?.children.map((node) => node.value)).toEqual(['Source'])
+  const saved = await state(page, room)
+  expect(saved.versions.find((item) => item.id === saved.activeId).treemapOrder.at(-1)).toBe('front')
+})
+
+test('overlapping treemaps remain opaque and hit testing selects the topmost target', async ({ page }) => {
+  const room = await openTreemapRoom(page, [
+    { id: 'lower', value: 'Lower', children: [{ id: 'lower-child', value: 'Lower child', children: [] }] },
+    { id: 'upper', value: 'Upper', children: [] },
+    { id: 'source', value: 'Source', children: [] },
+  ], {
+    positions: { lower: { x: 0, y: 0 }, upper: { x: 0, y: 0 }, source: { x: 1.6, y: 0 } },
+    mapView: { zoom: 0.35, panX: 20, panY: 20, manual: true },
+  })
+  const card = page.locator('.version-card.active')
+  const upper = card.locator('[data-node="upper"]')
+  const lower = card.locator('[data-node="lower"]')
+  const source = card.locator('[data-node="source"]')
+  const initial = await state(page, room)
+  const upperBox = await upper.boundingBox()
+  const lowerChildBox = await card.locator('[data-node="lower-child"]').boundingBox()
+  const hit = { x: lowerChildBox.x + 8, y: lowerChildBox.y + 8 }
+  expect(hit.x).toBeLessThan(upperBox.x + upperBox.width)
+  expect(hit.y).toBeLessThan(upperBox.y + upperBox.height)
+  expect(await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.getAttribute('data-node'), hit)).toBe('upper')
+  await upper.click({ position: { x: 5, y: 5 } })
+  await expect(card.locator('.treemap-overlap-outline')).toHaveCount(1)
+  await expect(card.locator('[data-overlap-root="upper"]')).toHaveCount(1)
+  await expect(card.locator('[data-overlap-root="lower"]')).toHaveCount(0)
+  expect(await card.locator('[data-overlap-root="upper"]').evaluate((element) => {
+    const style = getComputedStyle(element)
+    return [style.stroke, style.strokeDasharray, style.strokeLinecap]
+  })).toEqual(['rgb(0, 0, 0)', '1px, 4px', 'round'])
+  await source.click({ position: { x: 5, y: 5 } })
+  await expect(card.locator('[data-overlap-root="source"]')).toHaveCount(0)
+  expect(await upper.evaluate((element) => getComputedStyle(element).opacity)).toBe('1')
+  expect(await lower.evaluate((element) => getComputedStyle(element).opacity)).toBe('1')
+  const sourceBox = await source.boundingBox()
+  await page.mouse.move(sourceBox.x + 5, sourceBox.y + 5)
+  await page.mouse.down()
+  await page.mouse.move(hit.x, hit.y, { steps: 8 })
+  await expect(upper).toHaveClass(/is-over/)
+  await expect(card.locator('.treemap-drop-outline')).toHaveCount(1)
+  await expect(card.locator('[data-node="lower-child"]')).not.toHaveClass(/is-over/)
+  await page.mouse.up()
+  await expect.poll(async () => findNode(await activeData(page, room), 'Upper')?.children.map((node) => node.value)).toEqual(['Source'])
+  const saved = await state(page, room)
+  const version = saved.versions.find((item) => item.id === saved.activeId)
+  expect(version.positions.lower).toEqual(initial.versions.find((item) => item.id === 'v1').positions.lower)
+  expect(version.positions.upper).toEqual(initial.versions.find((item) => item.id === 'v1').positions.upper)
+  await page.reload()
+  expect((await state(page, room)).versions.find((item) => item.id === saved.activeId).positions).toEqual(version.positions)
+})
+
+test('dragging a nested entry onto its descendant detaches at the requested position', async ({ page }) => {
+  const room = await openTreemapRoom(page, [
+    { id: 'parent', value: 'Parent', children: [
+      { id: 'source', value: 'Source', children: [{ id: 'child', value: 'Child', children: [] }] },
+    ] },
+  ], { positions: { parent: { x: 0.05, y: 0.05 } }, mapView: { zoom: 0.35, panX: 24, panY: 24, manual: true } })
+  await page.waitForTimeout(500)
+  const card = page.locator('.version-card.active')
+  const source = card.locator('[data-node="source"]')
+  const child = card.locator('[data-node="child"]')
+  const from = await source.boundingBox()
+  const to = await child.boundingBox()
+  const start = { x: from.x + 5, y: from.y + 5 }
+  const end = { x: to.x + to.width / 2, y: to.y + to.height / 2 }
+  const expected = await source.evaluate((element, { start, end }) => {
+    const matrix = element.getScreenCTM().inverse()
+    const a = new DOMPoint(start.x, start.y).matrixTransform(matrix)
+    const b = new DOMPoint(end.x, end.y).matrixTransform(matrix)
+    return { x: (Number(element.getAttribute('x')) + b.x - a.x) / 260,
+      y: (Number(element.getAttribute('y')) + b.y - a.y) / 220 }
+  }, { start, end })
+  const before = await state(page, room)
+  await page.mouse.move(start.x, start.y)
+  await page.mouse.down()
+  await page.mouse.move(end.x, end.y, { steps: 8 })
+  await expect(card.locator('.tree-tile.is-over')).toHaveCount(0)
+  await page.mouse.up()
+  await expect.poll(async () => (await activeData(page, room)).map((node) => node.value).sort()).toEqual(['Parent', 'Source'])
+  const saved = await state(page, room)
+  const version = saved.versions.find((item) => item.id === saved.activeId)
+  expect(version.positions.parent).toEqual(before.versions.find((item) => item.id === 'v1').positions.parent)
+  expect(version.positions.source.x).toBeCloseTo(expected.x, 3)
+  expect(version.positions.source.y).toBeCloseTo(expected.y, 3)
+  expect(findNode(version.data, 'Source').children[0].value).toBe('Child')
 })
 
 test('version view combines directional indicators after panning and removes them when fitted', async ({ page }) => {

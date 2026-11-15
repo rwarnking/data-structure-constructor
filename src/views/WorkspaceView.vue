@@ -159,7 +159,7 @@ watch([compareMode, mergeMode], () => {
 
 const graphCamera = useGraphCamera({ versions, active, state, compareIds, draggedVersionId: () => treeDrag.value?.versionId,
   zoom, pan, canvasSize, windowDimensions, suppressClicks: suppressGraphClicks })
-const { versionArrival, cardPosition, cardHeight, rootLabelOffset, rootLabelX, displayCardPosition, graphBounds,
+const { versionArrival, cardPosition, cardWidth, cardHeight, rootLabelOffset, rootLabelX, displayCardPosition, graphBounds,
   visibleVersions, visibleConnectionVersions, visibleMergeConnectionVersions, fitGraph, fitHeight, focusNeighborhood,
   stepPreset,
   startCanvasPan, moveCanvasPan, endCanvasPan, onWheel, focusVersion, focusActive, animateCamera,
@@ -167,7 +167,7 @@ const { versionArrival, cardPosition, cardHeight, rootLabelOffset, rootLabelX, d
 } = graphCamera
 
 const treemapViews = useTreemapViews({ state, versions, windowDimensions, zoom, cardHeight, notify, suppressClicks: suppressGraphClicks })
-const { mapViewTimers, cardData, cardPositions, mapViewport, mapViewFor,
+const { mapViewTimers, cardData, cardPositions, mapViewport, mapViewFor, zoomVersionAfterMove,
   centerVersionTreemaps, compactVersionTreemaps, commitMapView, clearTransientMapViews, initializeMapViews,
   zoomMap, startMapPan, moveMapPan, endMapPan,
 } = treemapViews
@@ -268,10 +268,11 @@ function suppressGraphClicks() {
   window.setTimeout(() => { suppressVersionClick = false; suppressTileClick = false; suppressCanvasClick = false }, 0)
 }
 
-const { draggedNode, draggedPosition, overNode, invalidNode, treeDrag, spatialPreview,
+const { draggedNode, draggedPosition, overNode, treeDrag, spatialPreview,
   draggedSubtreeIds, draggedOriginalTile, startTreeDrag, moveTreeDrag, finishTreeDrag, cancelTreeDrag,
-} = useTreeDrag({ state, active, isReadOnly, selectedNodes, hoveredNode, entryTooltip, mapViewFor, mapViewport,
-  canAttach, attachEntry, detachEntry, createVersion, setSelectedNodes, notify, playMove: () => playSound('moved'), suppressClicks: suppressGraphClicks })
+} = useTreeDrag({ state, active, isReadOnly, selectedNodes, hoveredNode, entryTooltip, mapViewFor, mapViewport, commitMapView,
+  canAttach, attachEntry, detachEntry, createVersion, setSelectedNodes, notify, zoomVersionAfterMove,
+  playMove: () => playSound('moved'), suppressClicks: suppressGraphClicks })
 
 watch(selectedNode, (nodeId) => {
   if (!nodeId) selectedNodes.value = []
@@ -699,7 +700,7 @@ function navigateLane(version: Version) {
   playSound('tick')
   const position = cardPosition(version)
   animateCamera(zoom.value, {
-    x: canvasSize.value.width / 2 - (position.x + windowDimensions.value.width / 2) * zoom.value,
+    x: canvasSize.value.width / 2 - (position.x + cardWidth(version) / 2) * zoom.value,
     y: pan.value.y,
   })
 }
@@ -712,7 +713,7 @@ function connectionPath(version: Version) {
 function versionConnectionPath(source: Version, destination: Version, endOffsetY = 0) {
   const from = displayCardPosition(source)
   const to = displayCardPosition(destination)
-  const startX = from.x + windowDimensions.value.width
+  const startX = from.x + cardWidth(source)
   const startY = from.y + cardHeight(source) / 2
   const endX = to.x
   const endY = to.y + cardHeight(destination) / 2 + endOffsetY
@@ -821,7 +822,7 @@ const versionTiles = computed(() => {
   for (const version of visibleVersions.value) {
     const data = cardData(version)
     const positions = cardPositions(version)
-    const tiles = tilesForForest(data, positions)
+    const tiles = tilesForForest(data, positions, version.treemapOrder)
     result.set(version.id, tiles)
   }
   return result
@@ -859,7 +860,7 @@ function nodeGraphBounds(versionId: string, nodeId: string, tileIndex?: Map<stri
   if (!version) return null
   const view = mapViewFor(version)
   const viewport = mapViewport(version)
-  const mapWidth = version.id === 'v0' ? windowDimensions.value.width - 2 : windowDimensions.value.width - 12
+  const mapWidth = version.id === 'v0' ? cardWidth(version) - 2 : cardWidth(version) - 12
   const mapHeight = version.id === 'v0' ? cardHeight(version) - 2 : cardHeight(version) - 47
   const scaleX = mapWidth / viewport.width
   const scaleY = mapHeight / viewport.height
@@ -1257,17 +1258,16 @@ const cardModel: VersionCardModel = reactive({
   compareMode,
   zoom,
   overNode,
-  invalidNode,
   hoveredNode,
   selectedNodes,
   draggedSubtreeIds,
   draggedOriginalTile,
   selectionBox,
-  windowDimensions,
   isReadOnly,
   versionTiles,
   duplicateValueLinks,
   displayCardPosition,
+  cardWidth,
   cardHeight,
   rootLabelOffset,
   rootLabelX,
@@ -1331,12 +1331,12 @@ const cardModel: VersionCardModel = reactive({
           <button type="button" class="tutorial-button quiet-icon" aria-label="Open tutorial" title="Open tutorial"
             @pointerdown.stop @click.stop="tutorialOpen = true"><TutorialIcon :size="21" /></button>
           <div class="graph-world" :style="{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }">
-            <VersionConnections :graph-bounds="graphBounds" :window-dimensions="windowDimensions" :versions="versions"
+            <VersionConnections :graph-bounds="graphBounds" :versions="versions"
               :visible-versions="visibleVersions" :visible-connection-versions="visibleConnectionVersions"
               :visible-merge-connection-versions="visibleMergeConnectionVersions" :active-id="active.id"
               :connection-path="connectionPath" :connection-width="connectionWidth"
               :merge-connection-path="mergeConnectionPath" :merge-connection-color="mergeConnectionColor"
-              :card-position="cardPosition" :display-card-position="displayCardPosition" :card-height="cardHeight" :terminal-tail-end="terminalTailEnd"
+              :card-position="cardPosition" :display-card-position="displayCardPosition" :card-width="cardWidth" :card-height="cardHeight" :terminal-tail-end="terminalTailEnd"
               :arriving-version-id="versionArrival?.versionId" />
 
             <VersionCard v-for="version in visibleVersions" :key="version.id" :version="version" :model="cardModel" />
@@ -1450,7 +1450,7 @@ const cardModel: VersionCardModel = reactive({
       @close="entryOperation = null" @commit="commitEntryOperation" @add-split="addSplitEntry" @remove-split="removeSplitEntry" />
     <RoomManager v-if="roomDialogOpen" v-model="newRoomName" :local-rooms="localRooms" :current-room-name="currentRoomName"
       @close="roomDialogOpen = false" @activate="activateRoom" @delete="deleteLocalRoom" @create="createRoomFromDialog" @error="playSound('error')" />
-    <VersionSearch v-if="searchOpen" :versions="versions" :action-for-version="(version) => versionAction(version).label" @close="searchOpen = false"
+    <VersionSearch v-if="searchOpen" :versions="versions" :room="currentRoomName" :action-for-version="(version) => versionAction(version).label" @close="searchOpen = false"
       @focus="activateAndFocusVersion($event); searchOpen = false" />
     <VersionTags v-if="tagsOpen" :versions="versions" :editing="tagVersion"
       @close="tagsOpen = false; tagVersionId = null" @save="saveTag($event)" @remove="saveTag()"

@@ -18,8 +18,8 @@ const { useVersionComparison } = await vite.ssrLoadModule('/src/composables/useV
 const { useVersionHistory } = await vite.ssrLoadModule('/src/composables/useVersionHistory.ts')
 const { changedEntryIds } = await vite.ssrLoadModule('/src/utils/versionDifferences.ts')
 const { reflowVersionLayout, allocateVersionNumber, assignMissingVersionNumbers, assignVersionSuffixes, displayVersionId, isLatestOnBranch, retireVersionNumbers } = await vite.ssrLoadModule('/src/utils/versions.ts')
-const { layoutTileLabel, tilesForForest, tilesFor, fitMapViewAfterDrag, outOfViewDirections, positionsAfterMoves,
-  positionsAfterDetach, outerTreemapDimensions, nearestPositionIsFree, CARD_WIDTH, TREE_MAP_HEIGHT, MAP_GAP } = await vite.ssrLoadModule('/src/utils/treemap.ts')
+const { layoutTileLabel, tilesForForest, tilesFor, fitMapViewAfterDrag, outOfViewDirections, positionsAfterMove, overlappingTreemapIds, resolveTreemapExpansion, positionsAfterAttachment, outerTreemapDimensions, CARD_WIDTH
+} = await vite.ssrLoadModule('/src/utils/treemap.ts')
 const { duplicateLinks } = await vite.ssrLoadModule('/src/utils/duplicateLinks.ts')
 const { nodeParentIds } = await vite.ssrLoadModule('/src/utils/tree.ts')
 const { useGraphCamera } = await vite.ssrLoadModule('/src/composables/useGraphCamera.ts')
@@ -158,6 +158,13 @@ test('dataset validation rejects invalid root entries, views and connectors', ()
   invalid.state.versions[1].mapView = null
   assert.throws(() => parseDataset(invalid), /map view/)
   delete invalid.state.versions[1].mapView
+  for (const width of [0, 1.1, NaN]) {
+    invalid.state.versions[1].windowScale = { width, height: 0.5 }
+    assert.throws(() => parseDataset(invalid), /Invalid or unsupported/)
+  }
+  invalid.state.versions[1].windowScale = { width: 0.5, height: 0.5 }
+  assert.deepEqual(parseDataset(invalid), invalid)
+  delete invalid.state.versions[1].windowScale
   invalid.state.copyLinks.push({ sourceVersionId: 'v1', sourceNodeId: 'missing', targetVersionId: 'v1', targetNodeId: 'a' })
   assert.throws(() => parseDataset(invalid), /connector/)
 })
@@ -510,13 +517,13 @@ test('entry labels wrap at word boundaries and truncate without breaking words a
   assert.ok(wrapped.fontSize > parent.fontSize && parent.fontSize > 14)
 })
 
-test('drag layout makes room and keeps previously visible content in view', () => {
+test('drag layout preserves overlapping positions and keeps previously visible content in view', () => {
   const before = [node('parent', [node('child')]), node('other')]
   const after = [node('parent'), node('other'), node('child')]
   const oldPositions = { parent: { x: 0.1, y: 0.1 }, other: { x: 1.4, y: 0.1 } }
-  const positions = positionsAfterMoves(after, { ...oldPositions, child: { x: 0.4, y: 0.1 } }, ['child'])
+  const positions = positionsAfterMove(after, oldPositions, 'child', { x: 0.4, y: 0.1 })
   assert.deepEqual(positions.child, { x: 0.4, y: 0.1 })
-  assert.notDeepEqual(positions.parent, oldPositions.parent)
+  assert.deepEqual(positions.parent, oldPositions.parent)
   const view = { zoom: 0.35, panX: 24, panY: 28, manual: true }
   const viewport = { width: 400, height: 240 }
   const nextView = fitMapViewAfterDrag(before, oldPositions, after, positions, view, viewport)
@@ -529,6 +536,91 @@ test('drag layout makes room and keeps previously visible content in view', () =
   }
   const unchanged = fitMapViewAfterDrag(before, oldPositions, before, oldPositions, view, viewport)
   assert.deepEqual(unchanged, view)
+})
+
+test('attachment expansion pushes only projected conflicts, preserving group positions in all directions', () => {
+  const box = (id, left, top, right, bottom) => ({ id, left, top, right, bottom })
+  const transform = (item, direction) => {
+    const point = (x, y) => direction === 'right' ? [x, y] : direction === 'left' ? [-x, y]
+      : direction === 'down' ? [y, x] : [y, -x]
+    const points = [point(item.left, item.top), point(item.right, item.bottom)]
+    return box(item.id, Math.min(points[0][0], points[1][0]), Math.min(points[0][1], points[1][1]),
+      Math.max(points[0][0], points[1][0]), Math.max(points[0][1], points[1][1]))
+  }
+  const before = box('target', 0, 0, 100, 40)
+  const after = box('target', 0, 0, 130, 40)
+  const others = [
+    box('first', 110, 0, 120, 20), box('parallel', 125, 25, 135, 35),
+    box('second', 135, 0, 145, 20), box('third', 160, 0, 170, 20),
+    box('unrelated', 110, 60, 120, 80),
+    box('manual-a', 500, 60, 520, 80), box('manual-b', 510, 60, 530, 80),
+    box('old-overlap', 10, 0, 50, 20),
+  ]
+  for (const direction of ['right', 'left', 'down', 'up']) {
+    const moved = resolveTreemapExpansion(transform(before, direction), transform(after, direction),
+      [after, ...others].map((item) => transform(item, direction)))
+    const delta = direction === 'right' ? { x: 20, y: 0 } : direction === 'left' ? { x: -20, y: 0 }
+      : direction === 'down' ? { x: 0, y: 20 } : { x: 0, y: -20 }
+    assert.deepEqual([...moved.keys()].sort(), ['first', 'parallel', 'second', 'third'])
+    for (const value of moved.values()) assert.deepEqual(value, delta)
+  }
+})
+
+test('attachment expansion chooses a single minimum direction for diagonal conflicts', () => {
+  const before = { id: 'target', left: 0, top: 0, right: 100, bottom: 100 }
+  const after = { ...before, right: 120, bottom: 115 }
+  const corner = { id: 'corner', left: 110, top: 105, right: 130, bottom: 125 }
+  const below = { id: 'below', left: 10, top: 110, right: 20, bottom: 120 }
+  const moved = resolveTreemapExpansion(before, after, [after, corner, below])
+  assert.deepEqual(moved.get('corner'), { x: 10, y: 0 })
+  assert.deepEqual(moved.get('below'), { x: 0, y: 5 })
+  assert.equal(moved.size, 2)
+})
+
+test('attachment expansion terminates after moving each conflicting treemap once', () => {
+  const before = { id: 'target', left: 0, top: 0, right: 100, bottom: 100 }
+  const after = { ...before, right: 120, bottom: 120 }
+  const right = { id: 'right', left: 118, top: 115, right: 135, bottom: 130 }
+  const below = { id: 'below', left: 90, top: 105, right: 121, bottom: 115 }
+  const moved = resolveTreemapExpansion(before, after, [after, right, below])
+  assert.deepEqual([...moved], [['right', { x: 2, y: 0 }], ['below', { x: 0, y: 15 }]])
+  assert.equal(resolveTreemapExpansion(before, before, [before, right, below]).size, 0)
+})
+
+test('attaching an entry preserves positions except for treemaps in the expanded area', () => {
+  const target = node('target')
+  const source = node('source')
+  const blocker = node('blocker')
+  const unrelated = node('unrelated')
+  const previous = [target, source, blocker, unrelated]
+  const next = [node('target', [node('source')]), blocker, unrelated]
+  const oldSize = outerTreemapDimensions(target)
+  const newSize = outerTreemapDimensions(next[0])
+  const previousPositions = {
+    target: { x: 0, y: 0 }, source: { x: -1, y: 0 },
+    blocker: { x: (oldSize.width + newSize.width) / 2 / CARD_WIDTH, y: 0 },
+    unrelated: { x: 0, y: 5 },
+  }
+  const positions = positionsAfterAttachment(previous, next, previousPositions, 'target')
+  assert.deepEqual(positions.target, previousPositions.target)
+  assert.deepEqual(positions.unrelated, previousPositions.unrelated)
+  assert.ok(Math.abs(positions.blocker.x * CARD_WIDTH - newSize.width) < 1e-8)
+  assert.equal(positions.blocker.y, previousPositions.blocker.y)
+  assert.ok(newSize.height > oldSize.height)
+})
+
+test('treemap stacking outlines only roots above an overlapping root', () => {
+  const data = [node('one', [node('child')]), node('two'), node('three'), node('separate')]
+  const positions = { one: { x: 0, y: 0 }, two: { x: 0, y: 0 }, three: { x: 0, y: 0 }, separate: { x: 5, y: 0 } }
+  const tiles = tilesForForest(data, positions, ['three', 'one', 'two'])
+  assert.deepEqual(tiles.filter((tile) => tile.depth === 0).map((tile) => tile.id), ['three', 'one', 'two', 'separate'])
+  assert.deepEqual([...overlappingTreemapIds(tiles)].sort(), ['one', 'two'])
+  assert.deepEqual(data.map((item) => item.id), ['one', 'two', 'three', 'separate'])
+  const touching = [
+    { id: 'a', x: 0, y: 0, width: 10, height: 10, depth: 0 },
+    { id: 'b', x: 10, y: 0, width: 10, height: 10, depth: 0 },
+  ]
+  assert.deepEqual([...overlappingTreemapIds(touching)], [])
 })
 
 test('out-of-view indicators combine entries by the eight actual directions', () => {
@@ -547,43 +639,6 @@ test('out-of-view indicators combine entries by the eight actual directions', ()
   assert.deepEqual(outOfViewDirections([tile(-10, 40), tile(100, 40), tile(40, -10), tile(40, 100)], view, viewport),
     ['up', 'right', 'down', 'left'])
   assert.deepEqual(outOfViewDirections([tile(95, 95), tile(110, 110)], view, viewport), ['down-right'])
-})
-
-test('detached entries use the nearest free position, preferring the parent in a tie', () => {
-  const parent = node('parent')
-  const child = node('child')
-  const blocker = node('blocker')
-  const size = outerTreemapDimensions(child)
-  const data = [parent, blocker, child]
-  const preferred = { x: 130 / CARD_WIDTH, y: 0 }
-  const positions = { parent: { x: 0, y: 0 }, blocker: { x: 400 / CARD_WIDTH, y: 0 }, child: preferred }
-  const resolved = positionsAfterDetach(data, positions, [{ id: 'child', parentId: 'parent' }])
-  assert.deepEqual(resolved.parent, positions.parent)
-  assert.deepEqual(resolved.blocker, positions.blocker)
-  assert.ok(Math.abs(resolved.child.x * CARD_WIDTH - (size.width + MAP_GAP)) < 1e-8)
-  assert.equal(resolved.child.y, 0)
-  assert.ok(nearestPositionIsFree(resolved.child, size, [parent, blocker], resolved))
-  const free = { ...positions, child: { x: 250 / CARD_WIDTH, y: 250 / TREE_MAP_HEIGHT } }
-  assert.deepEqual(positionsAfterDetach(data, free, [{ id: 'child', parentId: 'parent' }]).child, free.child)
-
-  const top = -size.height - MAP_GAP
-  const tie = {
-    parent: { x: -400 / CARD_WIDTH, y: (top + 30) / TREE_MAP_HEIGHT },
-    blocker: { x: 0, y: 0 },
-    child: { x: (-size.width - MAP_GAP + 30) / CARD_WIDTH, y: (top + 30) / TREE_MAP_HEIGHT },
-  }
-  const tied = positionsAfterDetach(data, tie, [{ id: 'child', parentId: 'parent' }])
-  assert.ok(Math.abs(tied.child.x * CARD_WIDTH - (-size.width - MAP_GAP)) < 1e-8)
-  assert.ok(Math.abs(tied.child.y - tie.child.y) < 1e-8)
-
-  const second = node('second')
-  const groupPositions = { ...positions, child: preferred, second: preferred }
-  const group = positionsAfterDetach([...data, second], groupPositions, [
-    { id: 'child', parentId: 'parent' }, { id: 'second', parentId: 'parent' },
-  ])
-  assert.deepEqual(group.parent, positions.parent)
-  assert.deepEqual(group.blocker, positions.blocker)
-  assert.ok(nearestPositionIsFree(group.second, size, [parent, blocker, child], group))
 })
 
 test('treemap layout reuses subtree geometry and reflects later edits', () => {

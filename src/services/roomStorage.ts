@@ -1,6 +1,6 @@
 import type { StoredState } from '../types/workspace'
 import { findNode } from '../utils/tree'
-import { defaultPositions, MAP_ZOOM_MAX, MAP_ZOOM_MIN, positionsAfterMove } from '../utils/treemap'
+import { defaultPositions, MAP_ZOOM_MAX, MAP_ZOOM_MIN } from '../utils/treemap'
 import { assignMissingVersionNumbers, assignVersionSuffixes, compareCopyLinks } from '../utils/versions'
 import { hasRootEntries, isStoredState, RootNotEmptyError } from '../utils/validation'
 
@@ -101,7 +101,6 @@ export function createRoomStorage() {
   function normalizeState(value: Partial<StoredState>): StoredState {
     const normalizedVersions = (value.versions ?? clone(seed.versions)).map((version) => {
       const positions = version.positions ?? {}
-      const firstRoot = version.data[0]
       const savedView = version.mapView
       const validView = savedView && Number.isFinite(savedView.zoom) && savedView.zoom > 0
         && Number.isFinite(savedView.panX) && Number.isFinite(savedView.panY)
@@ -112,9 +111,7 @@ export function createRoomStorage() {
           ...savedView,
           zoom: Math.min(MAP_ZOOM_MAX, Math.max(MAP_ZOOM_MIN, savedView.zoom)),
         } : undefined,
-        positions: firstRoot
-          ? positionsAfterMove(version.data, positions, firstRoot.id, positions[firstRoot.id] ?? defaultPositions(version.data, positions)[firstRoot.id]!)
-          : positions,
+        positions: { ...defaultPositions(version.data, positions), ...positions },
       }
     })
     const versionsById = new Map(normalizedVersions.map((version) => [version.id, version]))
