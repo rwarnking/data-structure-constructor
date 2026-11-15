@@ -15,10 +15,13 @@ after(() => vite.close())
 
 const { useHierarchyEditor } = await vite.ssrLoadModule('/src/composables/useHierarchyEditor.ts')
 const { useVersionComparison } = await vite.ssrLoadModule('/src/composables/useVersionComparison.ts')
-const { reflowVersionLayout, allocateVersionNumber, assignMissingVersionNumbers, assignVersionSuffixes, displayVersionId, retireVersionNumbers } = await vite.ssrLoadModule('/src/utils/versions.ts')
+const { useVersionHistory } = await vite.ssrLoadModule('/src/composables/useVersionHistory.ts')
+const { changedEntryIds } = await vite.ssrLoadModule('/src/utils/versionDifferences.ts')
+const { reflowVersionLayout, allocateVersionNumber, assignMissingVersionNumbers, assignVersionSuffixes, displayVersionId, isLatestOnBranch, retireVersionNumbers } = await vite.ssrLoadModule('/src/utils/versions.ts')
 const { layoutTileLabel, tilesForForest, tilesFor } = await vite.ssrLoadModule('/src/utils/treemap.ts')
 const { useGraphCamera } = await vite.ssrLoadModule('/src/composables/useGraphCamera.ts')
 const { parseDataset } = await vite.ssrLoadModule('/src/services/dataset.ts')
+const { isStoredState, isVersion } = await vite.ssrLoadModule('/src/utils/validation.ts')
 const { shortcutAction, shortcuts } = await vite.ssrLoadModule('/src/config/hotkeys.ts')
 const { actionIcons, actionSymbols } = await vite.ssrLoadModule('/src/config/icons.ts')
 
@@ -92,19 +95,25 @@ test('adding one parent preserves selected entries and uses the first entry pare
 })
 
 test('dataset validation rejects invalid root entries, views and connectors', () => {
-  const root = version('v0', [node('a')])
+  const root = version('v0', [])
+  const child = version('v1', [node('a')], 'v0', 1)
   const dataset = { format: 'canopy-dataset', version: 1, room: 'Room', state: {
-    versions: [root], activeId: 'v0', nextNode: 1, nextVersion: 1, nextLane: 1, copyLinks: [],
+    versions: [root, child], activeId: 'v1', nextNode: 1, nextVersion: 2, nextLane: 1, copyLinks: [],
   }, interactions: [] }
   assert.deepEqual(parseDataset(dataset), dataset)
   const invalid = structuredClone(dataset)
   invalid.state.versions[0].data.push(node('a'))
-  assert.throws(() => parseDataset(invalid), /identifier/)
+  assert.throws(() => parseDataset(invalid), /root version must be empty/i)
+  assert.equal(isVersion(invalid.state.versions[0]), false)
+  assert.equal(isStoredState(invalid.state), false)
   invalid.state.versions[0].data.pop()
-  invalid.state.versions[0].mapView = null
+  invalid.state.versions[1].data.push(node('a'))
+  assert.throws(() => parseDataset(invalid), /Invalid or unsupported|identifier/)
+  invalid.state.versions[1].data.pop()
+  invalid.state.versions[1].mapView = null
   assert.throws(() => parseDataset(invalid), /map view/)
-  delete invalid.state.versions[0].mapView
-  invalid.state.copyLinks.push({ sourceVersionId: 'v0', sourceNodeId: 'missing', targetVersionId: 'v0', targetNodeId: 'a' })
+  delete invalid.state.versions[1].mapView
+  invalid.state.copyLinks.push({ sourceVersionId: 'v1', sourceNodeId: 'missing', targetVersionId: 'v1', targetNodeId: 'a' })
   assert.throws(() => parseDataset(invalid), /connector/)
 })
 
@@ -151,8 +160,7 @@ test('comparison and merge retain differences and prevent cyclic parents', () =>
       version('target', [node('a'), node('c')]),
     ])
     const comparison = useVersionComparison(versions, () => ({ zoom: 1, panX: 0, panY: 0, manual: false }), () => ({ width: 246, height: 213 }))
-    comparison.startVersionSelection('merge')
-    comparison.chooseCompare('source')
+    comparison.startVersionSelection('merge', 'source')
     comparison.chooseCompare('target')
     assert.deepEqual(comparison.comparison.value.map(({ id, kind }) => [id, kind]), [['b', 'Removed'], ['c', 'Added']])
     assert.deepEqual(comparison.mergeResult.value.data.map((item) => item.id), ['a', 'c'])
@@ -162,6 +170,142 @@ test('comparison and merge retain differences and prevent cyclic parents', () =>
     assert.equal(comparison.mergeResult.value.data.find((item) => item.id === 'a').children.length, 0)
   })
   scope.stop()
+})
+
+test('parent-relative differences identify added, modified, relocated and replacement entries', () => {
+  const parent = version('parent', [node('a', [node('child')]), node('b'), node('removed')])
+  parent.positions = { a: { x: 0.1, y: 0.1 }, b: { x: 0.5, y: 0.1 } }
+  const next = version('next', [
+    { ...node('a'), description: 'Edited' },
+    node('b', [node('child')]), node('merge-result'), node('split-one'), node('split-two'),
+  ], parent.id, 1)
+  next.positions = { a: { x: 0.1, y: 0.1 }, b: { x: 0.7, y: 0.1 } }
+  assert.deepEqual([...changedEntryIds(next, parent)], ['a', 'child', 'merge-result', 'split-one', 'split-two'])
+  assert.deepEqual([...changedEntryIds(parent)], [])
+
+  const insertion = version('insertion', [node('new'), node('a'), node('b')])
+  assert.deepEqual([...changedEntryIds(insertion, version('old', [node('a'), node('b')]))], ['new'])
+  const reordered = version('reordered', [node('b'), node('a')])
+  assert.deepEqual(new Set(changedEntryIds(reordered, version('old', [node('a'), node('b')]))), new Set(['a', 'b']))
+})
+
+test('parent-relative differences ignore treemap layout changes', () => {
+  const parent = version('parent', [node('a', [node('child')]), node('b')])
+  parent.positions = { a: { x: 0, y: 0 }, b: { x: 1, y: 0 } }
+  const next = version('next', [node('a', [node('child')]), node('b'), node('added')], parent.id, 1)
+  next.positions = { a: { x: 0.4, y: 0.1 }, b: { x: 1.5, y: 0.4 }, added: { x: 0, y: 2 } }
+  assert.deepEqual([...changedEntryIds(next, parent)], ['added'])
+  next.data.pop()
+  assert.deepEqual([...changedEntryIds(next, parent)], [])
+})
+
+test('merges continue the latest target, otherwise the latest source, otherwise a new lane', () => {
+  for (const [sourceLatest, targetLatest] of [[true, true], [true, false], [false, true], [false, false]]) {
+    const root = version('v0', [])
+    const source = { ...version('source', [node('s')], 'v0', 2), branch: 'B1' }
+    const target = { ...version('target', [node('t')], 'v0', 2), branch: 'B2' }
+    const graph = [root, source, target]
+    if (!sourceLatest) graph.push({ ...version('source-next', source.data, source.id, 3), branch: source.branch })
+    if (!targetLatest) graph.push({ ...version('target-next', target.data, target.id, 3), branch: target.branch })
+    if (sourceLatest && targetLatest) {
+      graph.push({ ...version('target-fork', target.data, target.id, 3), branch: 'B2.1' })
+      graph.push({ ...version('target-fork-next', target.data, 'target-fork', 4), branch: 'B2.1' })
+    }
+    const state = ref({ versions: graph, activeId: target.id, nextNode: 1, nextVersion: 10, nextLane: 1, copyLinks: [] })
+    const versions = computed(() => state.value.versions)
+    const comparison = {
+      mergeResult: ref({ source, target, data: [node('s'), node('t')], positions: {} }),
+      compareMode: ref(false), compareIds: ref([]), mergeMode: ref(true), showOverview: ref(true),
+      mergeDecisions: ref({}), mergeParentOverrides: ref({}), mergePositionOverrides: ref({}),
+    }
+    const history = useVersionHistory({
+      clientId: 'test', state, versions, active: computed(() => target), selectedNode: ref(null),
+      windowDimensions: computed(() => ({ width: 200, height: 150 })), comparison,
+      camera: { isVersionCentered: () => false, cardPosition: () => ({ x: 0, y: 0 }),
+        cardHeight: () => 150, startVersionArrival: () => {}, panToVersion: () => {} },
+      treemaps: { compactVersionTreemaps: () => {} },
+      reflowLayout: () => reflowVersionLayout(state.value), setSelectedNodes: () => {}, notify: () => {}, logInteraction: () => {},
+    })
+    history.confirmMerge()
+    const merged = state.value.versions.find((item) => item.id === state.value.activeId)
+    const expectedParent = targetLatest ? target : sourceLatest ? source : target
+    assert.equal(merged.parentId, expectedParent.id)
+    assert.equal(merged.branch === expectedParent.branch, sourceLatest || targetLatest)
+    const savedParent = state.value.versions.find((item) => item.id === expectedParent.id)
+    if (sourceLatest || targetLatest) assert.equal(merged.lane, savedParent.lane)
+    else assert.notEqual(merged.lane, savedParent.lane)
+    const lanes = [...new Set(state.value.versions.map((item) => item.lane))].sort((a, b) => a - b)
+    assert.deepEqual(lanes, lanes.map((_, index) => index))
+    assert.equal(new Set(state.value.versions.map((item) => `${item.step}:${item.lane}`)).size, state.value.versions.length)
+    const layout = state.value.versions.map(({ id, lane }) => [id, lane])
+    reflowVersionLayout(state.value)
+    assert.deepEqual(state.value.versions.map(({ id, lane }) => [id, lane]), layout)
+  }
+})
+
+test('merge continuation ignores unrelated histories sharing a legacy branch name', () => {
+  const numbered = (id, parentId, step, branch, subbranch) => ({
+    ...version(id, [node(id)], parentId, step), branch,
+    number: { step, branch: 1, subbranch, origin: id, owner: 'writer', scheme: 2 },
+  })
+  const root = version('v0', [])
+  const target = numbered('target', 'v0', 15, 'B1.2', 5)
+  const other = numbered('other', 'v0', 16, 'B1.2', 8)
+  const source = numbered('source', 'v0', 15, 'B1.2.1', 9)
+  const sourceNext = numbered('source-next', 'source', 16, 'B1.2.1', 9)
+  const state = ref({ versions: [root, target, other, source, sourceNext], activeId: target.id,
+    nextNode: 1, nextVersion: 152, nextLane: 1, copyLinks: [] })
+  reflowVersionLayout(state.value)
+  const comparison = {
+    mergeResult: ref({ source, target, data: [node('merged')], positions: {} }),
+    compareMode: ref(false), compareIds: ref([]), mergeMode: ref(true), showOverview: ref(true),
+    mergeDecisions: ref({}), mergeParentOverrides: ref({}), mergePositionOverrides: ref({}),
+  }
+  const history = useVersionHistory({
+    clientId: 'test', state, versions: computed(() => state.value.versions),
+    active: computed(() => state.value.versions.find((item) => item.id === state.value.activeId)),
+    selectedNode: ref(null), windowDimensions: computed(() => ({ width: 200, height: 150 })), comparison,
+    camera: { isVersionCentered: () => false, cardPosition: () => ({ x: 0, y: 0 }),
+      cardHeight: () => 150, startVersionArrival: () => {}, panToVersion: () => {} },
+    treemaps: { compactVersionTreemaps: () => {} },
+    reflowLayout: () => reflowVersionLayout(state.value), setSelectedNodes: () => {}, notify: () => {}, logInteraction: () => {},
+  })
+  history.confirmMerge()
+  const result = state.value.versions.find((item) => item.id === state.value.activeId)
+  const savedTarget = state.value.versions.find((item) => item.id === target.id)
+  assert.equal(result.parentId, target.id)
+  assert.equal(result.lane, savedTarget.lane)
+  assert.equal(result.number.subbranch, 5)
+  assert.equal(result.number.step, 16)
+})
+
+test('reflow repairs an existing incorrectly split merge lane without renumbering history', () => {
+  const number = (step, subbranch) => ({ step, branch: 1, subbranch, origin: `origin-${subbranch}`, owner: 'writer', scheme: 2 })
+  const root = version('v0', [])
+  const target = { ...version('target', [], 'v0', 15), branch: 'B1.2', number: number(15, 5) }
+  const other = { ...version('other', [], 'v0', 16), branch: 'B1.2', number: number(16, 8) }
+  const source = { ...version('source', [], 'v0', 15), branch: 'B1.2.1', number: number(15, 9) }
+  const sourceNext = { ...version('source-next', [], 'source', 16), branch: source.branch, number: number(16, 9) }
+  const merge = { ...version('merge', [], 'target', 16), branch: 'B1.2.M152', mergeSourceId: 'source',
+    number: number(16, 20), numberSuffix: 1 }
+  const state = { versions: [root, target, other, source, sourceNext, merge], activeId: merge.id,
+    nextNode: 1, nextVersion: 153, nextLane: 1, copyLinks: [] }
+  const savedNumber = structuredClone(merge.number)
+  reflowVersionLayout(state)
+  assert.equal(merge.lane, target.lane)
+  assert.notEqual(merge.lane, sourceNext.lane)
+  assert.deepEqual(merge.number, savedNumber)
+  assert.equal(merge.numberSuffix, 1)
+  assert.equal(new Set(state.versions.map((item) => `${item.step}:${item.lane}`)).size, state.versions.length)
+  assert.equal(isLatestOnBranch(state.versions, target), false)
+  const layout = state.versions.map(({ id, lane }) => [id, lane])
+  reflowVersionLayout(state)
+  assert.deepEqual(state.versions.map(({ id, lane }) => [id, lane]), layout)
+
+  const continuation = { ...version('target-next', [], 'target', 16), branch: target.branch, number: number(16, 5) }
+  state.versions.push(continuation)
+  reflowVersionLayout(state)
+  assert.notEqual(merge.lane, target.lane)
 })
 
 test('version layout keeps the main chain together and separates branches', () => {

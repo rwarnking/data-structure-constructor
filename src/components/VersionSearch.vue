@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, ref } from 'vue'
 import { actionIcons } from '../config/icons'
 import type { Version } from '../types/workspace'
-import { displayVersionId } from '../utils/versions'
+import { displayVersionChange, displayVersionId } from '../utils/versions'
 
 const props = defineProps<{ versions: Version[] }>()
 const { search: Search, close: X } = actionIcons
@@ -73,7 +73,7 @@ onMounted(() => {
         <span class="section-label">RESULTS</span>
         <button v-for="{ version, reasons } in matches" :key="version.id" type="button" @click="choose(version)">
           <strong>{{ displayVersionId(version) }}<template v-if="version.tag"> · {{ version.tag.title }}</template></strong>
-          <span>{{ reasons.join(', ') }} · {{ version.tag?.description || version.change }}</span>
+          <span>{{ reasons.join(', ') }} · {{ version.tag?.description || displayVersionChange(version) }}</span>
         </button>
         <span v-if="!matches.length" class="interaction-empty">No matching versions</span>
       </div>

@@ -30,8 +30,8 @@ export type VersionCardModel = {
   cardData: (version: Version) => TreeNode[]
   mapViewport: (version: Version) => { width: number; height: number }
   mapTransform: (version: Version) => string
-  tileStrokeColor: (versionId: string, nodeId: string) => string
-  tileStrokeWidth: (versionId: string, nodeId: string) => number
+  changedEntries: Map<string, Set<string>>
+  tileSelectionColor: (versionId: string, nodeId: string) => string | undefined
   dragOverlayTiles: (version: Version) => Tile[]
   handleVersionClick: (version: Version, event: MouseEvent) => void
   handleVersionDoubleClick: (version: Version) => void

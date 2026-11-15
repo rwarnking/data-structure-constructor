@@ -1,7 +1,7 @@
 import {
   Check, ChevronDown, ChevronLeft, ChevronRight, ClipboardPaste, Copy, Download,
   GitBranch, GitCompareArrows, Layers3, Maximize, Moon, MoreHorizontal, Pencil, Plus,
-  Radio, RotateCcw, Search, Settings, Sun, Tag, Trash2, Unlink, Upload, X, ZoomIn, ZoomOut,
+  Radio, RotateCcw, Search, Settings, Sun, Tag, Trash2, Unlink, Upload, X,
   CircleAlert,
 } from '@lucide/vue'
 
@@ -11,7 +11,7 @@ export const actionIcons = {
   compare: GitCompareArrows, layers: Layers3, focus: Maximize, darkMode: Moon,
   menu: MoreHorizontal, edit: Pencil, add: Plus, ping: Radio, reset: RotateCcw,
   search: Search, settings: Settings, lightMode: Sun, tag: Tag, delete: Trash2,
-  detach: Unlink, import: Upload, close: X, zoomIn: ZoomIn, zoomOut: ZoomOut,
+  detach: Unlink, import: Upload, close: X,
   tutorial: CircleAlert,
 } as const
 

@@ -4,6 +4,8 @@ import type { StoredState, Version } from '../types/workspace'
 const GRAPH_GAP_X = 300
 const GRAPH_GAP_Y = 72
 const ZOOM_MAX = 4
+type PresetMode = 'all' | 'height' | 'neighborhood' | 'version'
+const PRESET_ORDER: PresetMode[] = ['all', 'height', 'neighborhood', 'version']
 
 export function useGraphCamera(options: {
   versions: ComputedRef<Version[]>
@@ -19,7 +21,8 @@ export function useGraphCamera(options: {
 }) {
   const { versions, active, state, compareIds, draggedVersionId, zoom, pan, canvasSize, windowDimensions, suppressClicks } = options
   const focusedVersionId = ref<string | null>(null)
-  const preset = ref<{ mode: 'version' | 'neighborhood' | 'height' | 'all'; versionId?: string } | null>(null)
+  const preset = ref<{ mode: PresetMode; versionId?: string } | null>(null)
+  let lastPresetMode: PresetMode = 'all'
   const versionArrival = ref<{ versionId: string; from: { x: number; y: number }; progress: number } | null>(null)
   let versionArrivalFrame = 0
   let panAnimationFrame: number | null = null
@@ -122,8 +125,14 @@ export function useGraphCamera(options: {
     pan.value = { x: x - (x - pan.value.x) * ratio, y: y - (y - pan.value.y) * ratio }
     zoom.value = next
   }
-  function zoomIn() { zoomAt(zoom.value * 1.25) }
-  function zoomOut() { zoomAt(zoom.value / 1.25) }
+  function stepPreset(direction: 1 | -1) {
+    const index = PRESET_ORDER.indexOf(lastPresetMode)
+    const next = PRESET_ORDER[Math.max(0, Math.min(PRESET_ORDER.length - 1, index + direction))]
+    if (next === 'all') fitGraph()
+    else if (next === 'height') fitHeight()
+    else if (next === 'neighborhood') focusNeighborhood()
+    else focusActive()
+  }
   function fitBounds(bounds: { left: number; top: number; right: number; bottom: number }, targetZoom: number, animate: boolean, preserveX = false) {
     const target = {
       x: preserveX ? canvasSize.value.width / 2 - (canvasSize.value.width / 2 - pan.value.x) / zoom.value * targetZoom
@@ -136,11 +145,13 @@ export function useGraphCamera(options: {
   function fitGraph(animate = true) {
     focusedVersionId.value = null
     preset.value = { mode: 'all' }
+    lastPresetMode = 'all'
     fitBounds(boundsFor(versions.value, true), fitZoom.value, animate)
   }
   function fitHeight(animate = true) {
     focusedVersionId.value = null
     preset.value = { mode: 'height' }
+    lastPresetMode = 'height'
     const bounds = boundsFor(versions.value)
     const targetZoom = Math.max(0.005, Math.min(ZOOM_MAX, Math.max(1, canvasSize.value.height - 100) / (bounds.bottom - bounds.top)))
     fitBounds(bounds, targetZoom, animate, true)
@@ -148,6 +159,7 @@ export function useGraphCamera(options: {
   function focusNeighborhood(version = active.value, animate = true) {
     focusedVersionId.value = null
     preset.value = { mode: 'neighborhood', versionId: version.id }
+    lastPresetMode = 'neighborhood'
     const ids = new Set([version.id, version.parentId, version.mergeSourceId])
     for (const candidate of versions.value) {
       if (candidate.parentId === version.id || candidate.mergeSourceId === version.id
@@ -163,7 +175,8 @@ export function useGraphCamera(options: {
     const target = event.target as HTMLElement
     const card = target.closest<HTMLElement>('.version-card')
     if (event.button !== 0 || target.closest('button, .tree-tile, .copy-link-hit')
-      || (card && (card.dataset.version !== focusedVersionId.value || !target.closest('.mini-map')))) return
+      || (card && (card.dataset.version !== focusedVersionId.value
+        || !target.closest('.mini-map, .root-version .overview-map')))) return
     cancelPanAnimation()
     draggingCanvas.value = true
     dragOrigin.value = { x: event.clientX, y: event.clientY, panX: pan.value.x, panY: pan.value.y, moved: false }
@@ -190,6 +203,7 @@ export function useGraphCamera(options: {
   function focusVersion(version: Version, animate = true) {
     focusedVersionId.value = version.id
     preset.value = { mode: 'version', versionId: version.id }
+    lastPresetMode = 'version'
     const position = cardPosition(version)
     const availableWidth = Math.max(1, canvasSize.value.width - 100)
     const availableHeight = Math.max(1, canvasSize.value.height - 100)
@@ -333,8 +347,8 @@ export function useGraphCamera(options: {
     if (versionArrivalFrame) cancelAnimationFrame(versionArrivalFrame)
   }
 
-  return { focusedVersionId, cardPosition, cardHeight, rootLabelOffset, rootLabelX, displayCardPosition, startVersionArrival, graphBounds,
-    visibleVersions, visibleConnectionVersions, visibleMergeConnectionVersions, intersectsViewport, zoomAt, zoomIn, zoomOut, fitGraph, fitHeight, focusNeighborhood,
+  return { focusedVersionId, versionArrival, cardPosition, cardHeight, rootLabelOffset, rootLabelX, displayCardPosition, startVersionArrival, graphBounds,
+    visibleVersions, visibleConnectionVersions, visibleMergeConnectionVersions, intersectsViewport, zoomAt, stepPreset, fitGraph, fitHeight, focusNeighborhood,
     startCanvasPan, moveCanvasPan, endCanvasPan, onWheel, focusVersion, focusActive, animateCamera,
     isVersionCentered, panToVersion, stopGraphAnimations }
 }

@@ -27,13 +27,15 @@ import tutorial from '../content/tutorial.json'
 import type { CopyLink, StoredState, Tile, TreeNode, Version, VersionTag } from '../types/workspace'
 import { countNodes, findNode, findParent, flattenNodes, nodeParentIds, removeNode } from '../utils/tree'
 import { compareCopyLinks, displayVersionId, reflowVersionLayout } from '../utils/versions'
+import { changedEntryIds } from '../utils/versionDifferences'
+import { RootNotEmptyError } from '../utils/validation'
 import { CARD_WIDTH, TREE_MAP_HEIGHT, tilesForForest, tileForNode } from '../utils/treemap'
 import { shortcutAction, shortcutLabel } from '../config/hotkeys'
 import { actionIcons, actionSymbols } from '../config/icons'
 const { hierarchy: GitBranch, compare: GitCompareArrows, add: Plus, focus: Maximize,
   copy: Copy, delete: Trash2, previous: ChevronLeft, next: ChevronRight, edit: Pencil,
   detach: Unlink, close: X, layers: Layers3, paste: ClipboardPaste,
-  zoomIn: ZoomIn, zoomOut: ZoomOut, ping: Radio, tutorial: TutorialIcon, tag: TagIcon } = actionIcons
+  ping: Radio, tutorial: TutorialIcon, tag: TagIcon } = actionIcons
 
 type ClipboardEntry = { sourceVersionId: string; nodes: TreeNode[]; cut: boolean }
 const CLIENT_ID = getClientId()
@@ -46,7 +48,16 @@ const { seed, roomDataKey, persistLocalRooms, initializeLocalRooms, readRoomStat
 const initialRooms = initializeLocalRooms()
 const localRooms = ref(initialRooms.rooms)
 const currentRoomName = ref(initialRooms.currentRoom)
-const state = ref<StoredState>(readRoomState(currentRoomName.value, initialRooms.canMigrateLegacy))
+let initialRoomError = ''
+let initialState: StoredState
+try {
+  initialState = readRoomState(currentRoomName.value, initialRooms.canMigrateLegacy)
+} catch (error) {
+  if (!(error instanceof RootNotEmptyError)) throw error
+  initialRoomError = error.message
+  initialState = structuredClone(seed)
+}
+const state = ref<StoredState>(initialState)
 const versions = computed(() => state.value.versions)
 const versionsById = computed(() => new Map(versions.value.map((version) => [version.id, version])))
 const active = computed(() => versions.value.find((version) => version.id === state.value.activeId) ?? versions.value[0]!)
@@ -142,8 +153,8 @@ watch([compareMode, mergeMode], () => {
 
 const graphCamera = useGraphCamera({ versions, active, state, compareIds, draggedVersionId: () => treeDrag.value?.versionId,
   zoom, pan, canvasSize, windowDimensions, suppressClicks: suppressGraphClicks })
-const { cardPosition, cardHeight, rootLabelOffset, rootLabelX, displayCardPosition, graphBounds,
-  visibleVersions, visibleConnectionVersions, visibleMergeConnectionVersions, zoomIn, zoomOut, fitGraph, fitHeight, focusNeighborhood,
+const { versionArrival, cardPosition, cardHeight, rootLabelOffset, rootLabelX, displayCardPosition, graphBounds,
+  visibleVersions, visibleConnectionVersions, visibleMergeConnectionVersions, stepPreset, fitGraph, fitHeight, focusNeighborhood,
   startCanvasPan, moveCanvasPan, endCanvasPan, onWheel, focusVersion, focusActive, animateCamera,
   stopGraphAnimations,
 } = graphCamera
@@ -369,6 +380,13 @@ async function activateRoom(room: string, createEmpty = false) {
     notify('Room names must contain 1–80 characters')
     return
   }
+  let nextState: StoredState
+  try { nextState = createEmpty ? clone(seed) : readRoomState(name) }
+  catch (error) {
+    if (!(error instanceof RootNotEmptyError)) throw error
+    notify(`Cannot open room "${name}": ${error.message}`)
+    return
+  }
   peerRoom.send({ type: 'presence-leave', userId: CLIENT_ID })
   peerRoom.close()
   remoteUsers.value = {}
@@ -388,7 +406,6 @@ async function activateRoom(room: string, createEmpty = false) {
   const url = new URL(location.href)
   url.searchParams.set('room', name)
   history.replaceState(null, '', url)
-  const nextState = createEmpty ? clone(seed) : readRoomState(name)
   clipboard.value = readClipboard(name)
   setObservedState(nextState)
   state.value = nextState
@@ -476,6 +493,14 @@ function createRoomFromDialog() {
   }
   newRoomName.value = ''
   void activateRoom(name, !localRooms.value.includes(name))
+}
+
+function switchFromBlockedRoom(room: string) {
+  const name = room.trim()
+  if (!name || name.length > 80) return
+  const url = new URL(location.href)
+  url.searchParams.set('room', name)
+  location.assign(url.toString())
 }
 
 async function initializeCurrentRoom() {
@@ -635,15 +660,6 @@ function connectionPath(version: Version) {
   if (!parent) return ''
   return versionConnectionPath(parent, version)
 }
-function connectorLabelPosition(source: Version, destination: Version) {
-  const from = displayCardPosition(source)
-  const to = displayCardPosition(destination)
-  return {
-    x: (from.x + windowDimensions.value.width + to.x) / 2,
-    y: source.id === 'v0' ? to.y + cardHeight(destination) / 2
-      : (from.y + cardHeight(source) / 2 + to.y + cardHeight(destination) / 2) / 2,
-  }
-}
 function versionConnectionPath(source: Version, destination: Version, endOffsetY = 0) {
   const from = displayCardPosition(source)
   const to = displayCardPosition(destination)
@@ -664,19 +680,9 @@ function mergeConnectionPath(version: Version) {
   if (!source) return ''
   return versionConnectionPath(source, version)
 }
-function mergeConnectorLabelPosition(version: Version) {
-  const source = version.mergeSourceId ? versionsById.value.get(version.mergeSourceId) : undefined
-  return connectorLabelPosition(source ?? version, version)
-}
 function mergeConnectionColor(version: Version) {
   const source = version.mergeSourceId ? versionsById.value.get(version.mergeSourceId) : undefined
   return versionColor(source ?? version)
-}
-function isBranchCurve(version: Version) {
-  const parent = version.parentId ? versionsById.value.get(version.parentId) : undefined
-  if (!parent || parent.id === 'v0') return false
-  return Math.abs(cardPosition(parent).y + cardHeight(parent) / 2
-    - cardPosition(version).y - cardHeight(version) / 2) >= 1
 }
 function connectionWidth(version: Version) {
   const parent = version.parentId ? versionsById.value.get(version.parentId) : undefined
@@ -687,7 +693,7 @@ function terminalTailEnd(version: Version) {
 }
 function versionAuthorColor(version: Version) {
   const author = version.createdBy ?? version.id.match(/-([a-f0-9]{12})$/)?.[1]
-  return author ? userColor(author) : '#7b8580'
+  return author ? userColor(author) : 'var(--theme-branch-root)'
 }
 function activeUsersFor(versionId: string) {
   const users = []
@@ -710,21 +716,12 @@ function tileSelectionHighlights(versionId: string, nodeId: string) {
   }
   return highlights
 }
-function tileStrokeColor(versionId: string, nodeId: string) {
-  const selectedColor = tileSelectionHighlights(versionId, nodeId)[0]?.color
-  if (selectedColor) return selectedColor
-  if ((hoveredNode.value?.versionId === versionId && hoveredNode.value.nodeId === nodeId)
-    || (versionId === active.value.id && overNode.value === nodeId)) return '#00a8ff'
-  return darkMode.value ? '#101713' : '#fff'
+function tileSelectionColor(versionId: string, nodeId: string) {
+  return tileSelectionHighlights(versionId, nodeId)[0]?.color
 }
-function tileStrokeWidth(versionId: string, nodeId: string) {
-  const isHighlighted = (hoveredNode.value?.versionId === versionId && hoveredNode.value.nodeId === nodeId)
-    || (versionId === active.value.id && overNode.value === nodeId)
-    || tileSelectionHighlights(versionId, nodeId).length > 0
-  if (!isHighlighted) return 3
-  const normalizedZoom = Math.max(0.35, Math.min(1, zoom.value))
-  return 3 + (1 - normalizedZoom) * (7 / 0.65)
-}
+const changedEntries = computed(() => new Map(visibleVersions.value.map((version) => [
+  version.id, changedEntryIds(version, version.parentId ? versionsById.value.get(version.parentId) : undefined),
+])))
 function descendantsCount(nodes: TreeNode[]) { return countNodes(nodes) }
 function versionAction(version: Version) {
   const previous = version.parentId ? versionsById.value.get(version.parentId) : undefined
@@ -987,7 +984,7 @@ function handleAppClickCapture(event: MouseEvent) {
   if (menu.value && !(event.target as HTMLElement).closest('.context-menu')) menu.value = null
 }
 function startMapTileGesture(event: PointerEvent, version: Version, nodeId: string) {
-  if (isReadOnly.value) return
+  if (isReadOnly.value || compareMode.value || mergeMode.value) return
   if (event.shiftKey) {
     startMapPan(event, version)
     return
@@ -1042,7 +1039,7 @@ function onKeydown(event: KeyboardEvent) {
   switch (action) {
     case 'search': searchOpen.value = true; break
     case 'ping': pingMode.value = !pingMode.value; break
-    case 'merge': if (mergeMode.value) closeVersionSelection(); else startVersionSelection('merge'); break
+    case 'merge': if (mergeMode.value) closeVersionSelection(); else startVersionSelection('merge', active.value.id); break
     case 'previous': navigateVersion('left'); break
     case 'next': navigateVersion('right'); break
     case 'up': navigateVersion('up'); break
@@ -1050,11 +1047,11 @@ function onKeydown(event: KeyboardEvent) {
     case 'newEntry': createFreeEntry(); break
     case 'addChild': addChildren(); break
     case 'detach': if (selectedNode.value) detachEntry(selectedNode.value); break
-    case 'compare': if (compareMode.value) closeVersionSelection(); else startVersionSelection('compare'); break
+    case 'compare': if (compareMode.value) closeVersionSelection(); else startVersionSelection('compare', active.value.id); break
     case 'focus': focusActive(); break
     case 'fitAll': fitGraph(); break
-    case 'zoomIn': zoomIn(); break
-    case 'zoomOut': zoomOut(); break
+    case 'zoomIn': stepPreset(1); break
+    case 'zoomOut': stepPreset(-1); break
     case 'selectAll': setSelectedNodes([...flattenNodes(active.value.data).keys()]); break
     case 'copy': case 'cut': copyEntries(selectedNodes.value, action === 'cut'); break
     case 'paste': pasteEntry(); break
@@ -1066,6 +1063,7 @@ function measureCanvas() {
   if (graphCanvas.value) canvasSize.value = { width: graphCanvas.value.clientWidth, height: graphCanvas.value.clientHeight }
 }
 onMounted(() => {
+  if (initialRoomError) return
   canvasObserver = new ResizeObserver(measureCanvas)
   if (graphCanvas.value) canvasObserver.observe(graphCanvas.value)
   measureCanvas()
@@ -1212,8 +1210,8 @@ const cardModel: VersionCardModel = reactive({
   cardData,
   mapViewport,
   mapTransform,
-  tileStrokeColor,
-  tileStrokeWidth,
+  changedEntries,
+  tileSelectionColor,
   dragOverlayTiles,
   handleVersionClick,
   handleVersionDoubleClick,
@@ -1233,7 +1231,16 @@ const cardModel: VersionCardModel = reactive({
 </script>
 
 <template>
-  <main class="app-shell" :class="{ dark: darkMode }" @click.capture="handleAppClickCapture">
+  <main v-if="initialRoomError" class="app-shell blocked-room" :class="{ dark: darkMode }">
+    <section class="entry-editor" role="alert">
+      <h1>Cannot open room "{{ currentRoomName }}"</h1>
+      <p>{{ initialRoomError }}. The saved room data has not been changed.</p>
+      <button type="button" class="primary-button" @click="roomDialogOpen = true">Choose another room</button>
+    </section>
+    <RoomManager v-if="roomDialogOpen" v-model="newRoomName" :local-rooms="localRooms" :current-room-name="currentRoomName"
+      @close="roomDialogOpen = false" @activate="switchFromBlockedRoom" @delete="deleteLocalRoom" @create="switchFromBlockedRoom(newRoomName)" />
+  </main>
+  <main v-else class="app-shell" :class="{ dark: darkMode }" @click.capture="handleAppClickCapture">
     <div class="workspace" :inert="mergeMode && compareIds.length === 2">
       <WorkspaceSidebar :sidebar-collapsed="sidebarCollapsed" :dark-mode="darkMode" :current-room-name="currentRoomName"
         :room-status="roomStatus" :local-only="isLocalOnlyRoom(currentRoomName)" :connected-users="connectedUsers" :client-id="CLIENT_ID" :versions="versions"
@@ -1253,16 +1260,15 @@ const cardModel: VersionCardModel = reactive({
             <VersionConnections :graph-bounds="graphBounds" :window-dimensions="windowDimensions" :versions="versions"
               :visible-versions="visibleVersions" :visible-connection-versions="visibleConnectionVersions"
               :visible-merge-connection-versions="visibleMergeConnectionVersions" :active-id="active.id"
-              :connection-path="connectionPath" :connection-width="connectionWidth" :is-branch-curve="isBranchCurve"
+              :connection-path="connectionPath" :connection-width="connectionWidth"
               :merge-connection-path="mergeConnectionPath" :merge-connection-color="mergeConnectionColor"
               :card-position="cardPosition" :display-card-position="displayCardPosition" :card-height="cardHeight" :terminal-tail-end="terminalTailEnd"
-              :connector-label-position="connectorLabelPosition" :merge-connector-label-position="mergeConnectorLabelPosition"
-              :version-action="versionAction" />
+              :arriving-version-id="versionArrival?.versionId" />
 
             <VersionCard v-for="version in visibleVersions" :key="version.id" :version="version" :model="cardModel" />
             <svg class="copy-connection-layer" :width="graphBounds.width + 260" :height="graphBounds.height">
               <g v-for="({ link, path }, index) in visibleCopyLinks" :key="`copy-${index}`" class="copy-link-group">
-                <path :d="path" class="copy-link" fill="none" stroke="#cf7b32"
+                <path :d="path" class="copy-link" fill="none" stroke="var(--theme-copy-connector)"
                   stroke-width="3" vector-effect="non-scaling-stroke" stroke-dasharray="7 4"
                   pointer-events="none" />
                 <path :d="path" class="copy-link-hit" fill="none" stroke="transparent"
@@ -1284,13 +1290,13 @@ const cardModel: VersionCardModel = reactive({
           </div>
 
           <template v-for="lane in visibleLanes" :key="lane.lane">
-            <button type="button" class="lane-navigation lane-navigation-left" :data-lane="lane.lane"
+            <button type="button" class="lane-navigation lane-navigation-left" :class="{ 'active-lane': active.id !== 'v0' && active.lane === lane.lane }" :data-lane="lane.lane"
               :aria-label="`Go to beginning of lane ${lane.lane + 1}`" title="Go to beginning of lane"
-              :style="{ top: `${lane.top}px`, height: `${lane.height}px`, '--lane-color': versionColor(lane.first) }"
+              :style="{ top: `${lane.top}px`, height: `${lane.height}px`, '--lane-color': versionColor(lane.first), '--user-color': userColor(CLIENT_ID) }"
               @pointerdown.stop @click.stop="navigateLane(lane.first)"><ChevronLeft :size="Math.min(18, lane.height)" /></button>
-            <button type="button" class="lane-navigation lane-navigation-right" :data-lane="lane.lane"
+            <button type="button" class="lane-navigation lane-navigation-right" :class="{ 'active-lane': active.id !== 'v0' && active.lane === lane.lane }" :data-lane="lane.lane"
               :aria-label="`Go to end of lane ${lane.lane + 1}`" title="Go to end of lane"
-              :style="{ top: `${lane.top}px`, height: `${lane.height}px`, '--lane-color': versionColor(lane.last) }"
+              :style="{ top: `${lane.top}px`, height: `${lane.height}px`, '--lane-color': versionColor(lane.last), '--user-color': userColor(CLIENT_ID) }"
               @pointerdown.stop @click.stop="navigateLane(lane.last)"><ChevronRight :size="Math.min(18, lane.height)" /></button>
           </template>
 
@@ -1300,16 +1306,13 @@ const cardModel: VersionCardModel = reactive({
             <button data-action="new-entry" :title="`Create a free entry · ${shortcutLabel('newEntry')}`" :aria-label="`New free entry, ${shortcutLabel('newEntry', true)}`" @click="createFreeEntry"><Plus :size="16" /><span>New entry</span><kbd>{{ shortcutLabel('newEntry') }}</kbd></button>
             <button :title="`Add a child to selected entries · ${shortcutLabel('addChild')}`" :aria-label="`Add child, ${shortcutLabel('addChild', true)}`" :disabled="isReadOnly || !selectedNode" @click="addChildren"><GitBranch :size="16" /><span>Add child</span><kbd>{{ shortcutLabel('addChild') }}</kbd></button>
             <button :title="`Detach the selected entry · ${shortcutLabel('detach')}`" :aria-label="`Detach selected, ${shortcutLabel('detach', true)}`" :disabled="isReadOnly || !selectedNode" @click="selectedNode && detachEntry(selectedNode)"><Unlink :size="16" /><span>Detach</span><kbd>{{ shortcutLabel('detach') }}</kbd></button>
-            <button :title="`Compare two versions · ${shortcutLabel('compare')}`" :aria-label="`Compare versions, ${shortcutLabel('compare', true)}`" :class="{ selected: compareMode }" @click="compareMode ? closeVersionSelection() : startVersionSelection('compare')"><GitCompareArrows :size="16" /><span>Compare</span><kbd>{{ shortcutLabel('compare') }}</kbd></button>
-            <button :title="`Merge two versions · ${shortcutLabel('merge')}`" :aria-label="`Merge versions, ${shortcutLabel('merge', true)}`" :class="{ selected: mergeMode }" @click="mergeMode ? closeVersionSelection() : startVersionSelection('merge')"><GitCompareArrows :size="16" /><span>Merge</span><kbd>{{ shortcutLabel('merge') }}</kbd></button>
+            <button :title="`Compare two versions · ${shortcutLabel('compare')}`" :aria-label="`Compare versions, ${shortcutLabel('compare', true)}`" :class="{ selected: compareMode }" @click="compareMode ? closeVersionSelection() : startVersionSelection('compare', active.id)"><GitCompareArrows :size="16" /><span>Compare</span><kbd>{{ shortcutLabel('compare') }}</kbd></button>
+            <button :title="`Merge two versions · ${shortcutLabel('merge')}`" :aria-label="`Merge versions, ${shortcutLabel('merge', true)}`" :class="{ selected: mergeMode }" @click="mergeMode ? closeVersionSelection() : startVersionSelection('merge', active.id)"><GitCompareArrows :size="16" /><span>Merge</span><kbd>{{ shortcutLabel('merge') }}</kbd></button>
             <button :title="`Focus the active version · ${shortcutLabel('focus')}`" :aria-label="`Focus active version, ${shortcutLabel('focus', true)}`" @click="focusActive"><Maximize :size="16" /><span>Focus</span><kbd>{{ shortcutLabel('focus') }}</kbd></button>
             <button title="Focus the active version and its neighbors" aria-label="Focus neighborhood" @click="focusNeighborhood()"><GitBranch :size="16" /><span>Neighborhood</span></button>
             <button title="Fit all lanes vertically" aria-label="Fit height" @click="fitHeight()"><Maximize :size="16" /><span>Fit height</span></button>
             <button :title="`Fit all versions in view · ${shortcutLabel('fitAll')}`" :aria-label="`Fit all versions, ${shortcutLabel('fitAll', true)}`" @click="fitGraph()"><Layers3 :size="16" /><span>Fit all</span><kbd>{{ shortcutLabel('fitAll') }}</kbd></button>
             <button :title="`Toggle Ping Mode · ${shortcutLabel('ping')}`" :aria-label="`Toggle Ping Mode, ${shortcutLabel('ping', true)}`" :aria-pressed="pingMode" :class="{ selected: pingMode }" @click="pingMode = !pingMode"><Radio :size="16" /><span>{{ pingMode ? 'Ping mode on' : 'Ping' }}</span><kbd>{{ shortcutLabel('ping') }}</kbd></button>
-            <span class="hotbar-divider" aria-hidden="true"></span>
-            <button :title="`Zoom out · ${shortcutLabel('zoomOut')}`" :aria-label="`Zoom out, ${shortcutLabel('zoomOut') === '-' ? 'minus' : shortcutLabel('zoomOut', true)}`" @click="zoomOut"><ZoomOut :size="16" /><kbd>{{ shortcutLabel('zoomOut') }}</kbd></button>
-            <button :title="`Zoom in · ${shortcutLabel('zoomIn')}`" :aria-label="`Zoom in, ${shortcutLabel('zoomIn') === '+' ? 'plus' : shortcutLabel('zoomIn', true)}`" @click="zoomIn"><ZoomIn :size="16" /><kbd>{{ shortcutLabel('zoomIn') }}</kbd></button>
             </div>
           </div>
         </div>

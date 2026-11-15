@@ -1,11 +1,12 @@
 import type { InteractionEntry } from '../types/collaboration'
 import type { StoredState } from '../types/workspace'
 import { findNode } from '../utils/tree'
-import { isInteractionEntry, isRecord, isStoredState } from '../utils/validation'
+import { hasRootEntries, isInteractionEntry, isRecord, isStoredState, RootNotEmptyError } from '../utils/validation'
 
 export type Dataset = { format: 'canopy-dataset'; version: 1; room: string; state: StoredState; interactions: InteractionEntry[] }
 
 export function parseDataset(value: unknown): Dataset {
+  if (isRecord(value) && hasRootEntries(value.state)) throw new RootNotEmptyError()
   if (!isRecord(value) || value.format !== 'canopy-dataset' || value.version !== 1
     || typeof value.room !== 'string' || !value.room.trim() || value.room.length > 80
     || !isStoredState(value.state) || !Array.isArray(value.interactions)

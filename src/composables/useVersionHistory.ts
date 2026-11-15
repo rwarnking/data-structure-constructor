@@ -4,7 +4,7 @@ import type { useVersionComparison } from './useVersionComparison'
 import type { useGraphCamera } from './useGraphCamera'
 import type { useTreemapViews } from './useTreemapViews'
 import { findNode, flattenPaths } from '../utils/tree'
-import { allocateVersionNumber, assignVersionSuffixes, displayVersionId, retireVersionNumbers, structureSignature } from '../utils/versions'
+import { allocateVersionNumber, assignVersionSuffixes, displayVersionId, isLatestOnBranch, retireVersionNumbers, structureSignature } from '../utils/versions'
 import { fitMapViewToLayout, positionsForData } from '../utils/treemap'
 
 export function useVersionHistory(options: {
@@ -116,15 +116,9 @@ export function useVersionHistory(options: {
   function confirmMerge() {
     const result = mergeResult.value
     if (!result) return
-    const isLatestOnBranch = (candidate: Version) => !versions.value.some((version) =>
-      version.branch === candidate.branch && version.step > candidate.step)
-    const sourceIsLatest = isLatestOnBranch(result.source)
-    const targetIsLatest = isLatestOnBranch(result.target)
-    const laneParent = sourceIsLatest && targetIsLatest
-      ? result.source.lane <= result.target.lane ? result.source : result.target
-      : sourceIsLatest ? result.source
-        : targetIsLatest ? result.target
-          : result.target
+    const sourceIsLatest = isLatestOnBranch(versions.value, result.source)
+    const targetIsLatest = isLatestOnBranch(versions.value, result.target)
+    const laneParent = targetIsLatest ? result.target : sourceIsLatest ? result.source : result.target
     const mergeSource = laneParent.id === result.source.id ? result.target : result.source
     const parentPosition = cardPosition(laneParent)
     const arrivalFrom = {

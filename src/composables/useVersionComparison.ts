@@ -33,10 +33,10 @@ export function useVersionComparison(
   }
 
   const showOverview = ref(false)
-  function startVersionSelection(mode: 'compare' | 'merge') {
+  function startVersionSelection(mode: 'compare' | 'merge', firstVersionId: string) {
     compareMode.value = mode === 'compare'
     mergeMode.value = mode === 'merge'
-    compareIds.value = []
+    compareIds.value = [firstVersionId]
     mergeDecisions.value = {}
     mergeParentOverrides.value = {}
     mergePositionOverrides.value = {}

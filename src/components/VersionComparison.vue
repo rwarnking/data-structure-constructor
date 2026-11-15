@@ -9,7 +9,7 @@ import { displayVersionId } from '../utils/versions'
 
 const props = defineProps<{ model: UnwrapNestedRefs<ReturnType<typeof useVersionComparison>>; versions: Version[] }>()
 const emit = defineEmits<{ confirm: [] }>()
-const { compareMode, mergeMode, showOverview, compareIds, closeVersionSelection, resetMerge, mergePreviewTiles, mergePreviewViewBox, moveMergeDrag, finishMergeDrag, cancelMergeDrag, mergeDropTarget, startMergeDrag, onMergeTileClick, mergeResult, mergeRows, setMergePicked, onMergeParentChange, mergeParentOptions, differentEntryCount, comparison, showDifferenceColors, comparisonPanels, comparisonViewBox, comparisonGhosts, comparisonSelectedNode, selectComparedNode, comparisonKinds } = toRefs(props.model)
+const { compareMode, mergeMode, showOverview, compareIds, chooseCompare, closeVersionSelection, resetMerge, mergePreviewTiles, mergePreviewViewBox, moveMergeDrag, finishMergeDrag, cancelMergeDrag, mergeDropTarget, startMergeDrag, onMergeTileClick, mergeResult, mergeRows, setMergePicked, onMergeParentChange, mergeParentOptions, differentEntryCount, comparison, showDifferenceColors, comparisonPanels, comparisonViewBox, comparisonGhosts, comparisonSelectedNode, selectComparedNode, comparisonKinds } = toRefs(props.model)
 function versionLabel(id: string) {
   const version = props.versions.find((item) => item.id === id)
   return version ? displayVersionId(version) : id
@@ -47,7 +47,7 @@ function versionLabel(id: string) {
                   <g v-for="tile in mergePreviewTiles" :key="tile.id">
                     <rect :x="tile.x" :y="tile.y" :width="tile.width" :height="tile.height"
                       :class="['merge-preview-tile', `depth-${tile.depth}`, { 'drop-target': mergeDropTarget === tile.id }]"
-                      :data-node="tile.id" :fill="tile.depth === 0 ? '#deebe4' : tile.depth % 2 ? '#c1d9cc' : '#a9cab9'"
+                      :data-node="tile.id" :fill="tile.depth === 0 ? 'var(--theme-entry-root)' : tile.depth === 3 ? 'var(--theme-entry-deep)' : tile.depth % 2 ? 'var(--theme-entry-odd)' : 'var(--theme-entry-even)'"
                       @pointerdown.stop="startMergeDrag($event, tile.id)" @click.stop="onMergeTileClick(tile.id)" />
                     <TileLabel :tile="tile" class="merge-preview-label" />
                   </g>
@@ -166,7 +166,17 @@ function versionLabel(id: string) {
         </div>
       </div>
     </div>
-    <div v-else class="drawer-empty"><Search :size="18" /><span>Select the first version, then the second.</span></div>
+    <div v-else class="drawer-empty">
+      <Search :size="18" />
+      <div>
+        <span>{{ compareIds.length ? 'Select the second version.' : 'Select the first version, then the second.' }}</span>
+        <div v-if="compareIds[0]" class="drawer-first-version">
+          <span>{{ mergeMode ? 'Source' : 'First version' }}: <strong>{{ versionLabel(compareIds[0]) }}</strong></span>
+          <button type="button" class="quiet-icon" :aria-label="`Deselect first version ${versionLabel(compareIds[0])}`"
+            title="Deselect first version" @click="chooseCompare(compareIds[0])"><X :size="14" /></button>
+        </div>
+      </div>
+    </div>
   </div>
   </div>
 

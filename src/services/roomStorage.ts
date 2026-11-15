@@ -2,7 +2,7 @@ import type { StoredState } from '../types/workspace'
 import { findNode } from '../utils/tree'
 import { defaultPositions, MAP_ZOOM_MAX, MAP_ZOOM_MIN, positionsAfterMove } from '../utils/treemap'
 import { assignMissingVersionNumbers, assignVersionSuffixes, compareCopyLinks } from '../utils/versions'
-import { isStoredState } from '../utils/validation'
+import { hasRootEntries, isStoredState, RootNotEmptyError } from '../utils/validation'
 
 const STORAGE_KEY = 'canopy-data-structure-v1'
 const ROOMS_KEY = 'canopy-local-rooms-v1'
@@ -20,13 +20,16 @@ export function createRoomStorage() {
   }
 
   function readState(): StoredState {
+    let value: Partial<StoredState> | undefined
     try {
       const saved = localStorage.getItem(STORAGE_KEY)
-      if (saved) {
-        return normalizeState(JSON.parse(saved) as Partial<StoredState>)
-      }
+      if (!saved) return structuredClone(seed)
+      value = JSON.parse(saved) as Partial<StoredState>
     } catch { /* Start with a clean graph if saved data is unreadable. */ }
-    return structuredClone(seed)
+    if (!value) return structuredClone(seed)
+    if (hasRootEntries(value)) throw new RootNotEmptyError()
+    try { return normalizeState(value) }
+    catch { return structuredClone(seed) }
   }
 
   function roomDataKey(room: string) {
@@ -71,11 +74,16 @@ export function createRoomStorage() {
   function readRoomState(room: string, migrateLegacy = false): StoredState {
     const savedRoomState = localStorage.getItem(roomDataKey(room))
     if (savedRoomState) {
+      let parsed: unknown
       try {
-        const parsed: unknown = JSON.parse(savedRoomState)
-        if (isStoredState(parsed)) return normalizeState(parsed)
+        parsed = JSON.parse(savedRoomState) as unknown
       } catch {
         console.warn(`Could not load saved data for room "${room}"`)
+      }
+      if (hasRootEntries(parsed)) throw new RootNotEmptyError()
+      if (isStoredState(parsed)) {
+        try { return normalizeState(parsed) }
+        catch { console.warn(`Could not load saved data for room "${room}"`) }
       }
     }
     if (migrateLegacy && localStorage.getItem(LEGACY_MIGRATION_KEY) !== 'true') {

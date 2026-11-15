@@ -12,6 +12,18 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
 }
 
+export class RootNotEmptyError extends Error {
+  constructor() {
+    super('The root version must be empty')
+    this.name = 'RootNotEmptyError'
+  }
+}
+
+export function hasRootEntries(value: unknown): boolean {
+  return isRecord(value) && Array.isArray(value.versions) && value.versions.some((version) =>
+    isRecord(version) && version.id === 'v0' && Array.isArray(version.data) && version.data.length > 0)
+}
+
 export function isInteractionEntry(value: unknown): value is InteractionEntry {
   if (!isRecord(value) || typeof value.id !== 'string' || typeof value.actorId !== 'string'
     || typeof value.actorName !== 'string' || typeof value.action !== 'string'
@@ -66,7 +78,7 @@ export function isVersion(value: unknown): value is Version {
     || typeof value.branch !== 'string' || typeof value.change !== 'string'
     || (value.createdBy !== undefined && typeof value.createdBy !== 'string')
     || !Number.isFinite(value.createdAt) || !Array.isArray(value.data)
-    || !value.data.every(isTreeNode)) return false
+    || !value.data.every(isTreeNode) || (value.id === 'v0' && value.data.length > 0)) return false
   if (value.positions !== undefined
     && (!isRecord(value.positions) || !Object.values(value.positions).every((position) =>
       isRecord(position) && Number.isFinite(position.x) && Number.isFinite(position.y)))) return false

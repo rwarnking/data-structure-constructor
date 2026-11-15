@@ -7,7 +7,7 @@ import type { InteractionEntry } from '../types/collaboration'
 import type { Version } from '../types/workspace'
 import { userColor, versionColor } from '../utils/colors'
 import { findNode } from '../utils/tree'
-import { displayVersionId } from '../utils/versions'
+import { displayVersionChange, displayVersionId } from '../utils/versions'
 
 const props = defineProps<{
   sidebarCollapsed: boolean; darkMode: boolean; currentRoomName: string; roomStatus: RoomStatus; localOnly: boolean
@@ -121,7 +121,7 @@ const emit = defineEmits<{
       <div class="section-label">YOUR ACTIVE VERSION</div>
       <button type="button" class="active-version-card" :title="`Focus active version · ${shortcutLabel('focus')}`" @click="emit('focus-active')">
         <div class="active-version-top"><span class="version-pip" :style="{ background: versionColor(active) }"></span><span :title="displayVersionId(active)">{{ displayVersionId(active) }}</span></div>
-        <strong>{{ active.change }}</strong>
+        <strong>{{ displayVersionChange(active) }}</strong>
         <div class="active-meta"><span>Entries</span><strong>{{ activeNodes }}</strong></div>
         <div class="active-meta"><span>Current step</span><strong>{{ String(active.number?.step ?? 0).padStart(2, '0') }}</strong></div>
         <div class="active-meta"><span>Paths from here</span><strong>{{ activeChildren }}</strong></div>

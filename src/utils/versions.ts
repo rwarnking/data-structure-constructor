@@ -12,6 +12,10 @@ export function displayVersionId(version: Version) {
   return version.numberSuffix ? `${base}.${version.numberSuffix}` : base
 }
 
+export function displayVersionChange(version: Version) {
+  return version.id === 'v0' ? 'Root: Empty' : version.change
+}
+
 export function assignVersionSuffixes(versions: Version[], retired: RetiredVersionNumber[] = []) {
   const groups = new Map<string, { id: string; createdAt: number; suffix?: number; version?: Version }[]>()
   const liveIds = new Set(versions.map((version) => version.id))
@@ -95,6 +99,29 @@ export function assignMissingVersionNumbers(versions: Version[]) {
     numbered.push(version)
   }
 }
+
+export function isLatestOnBranch(versions: Version[], candidate: Version, excludedSubtreeId?: string) {
+  const children = new Map<string, Version[]>()
+  for (const version of versions) {
+    if (!version.parentId || version.id === excludedSubtreeId) continue
+    const siblings = children.get(version.parentId) ?? []
+    siblings.push(version)
+    children.set(version.parentId, siblings)
+  }
+  const pending = [...(children.get(candidate.id) ?? [])]
+  while (pending.length) {
+    const version = pending.pop()!
+    const sameBranch = candidate.number && version.number
+      ? candidate.number.branch === version.number.branch && candidate.number.subbranch === version.number.subbranch
+      : candidate.branch === version.branch
+    const continuedMerge = version.parentId === candidate.id && !!version.mergeSourceId
+      && version.lane === candidate.lane && version.branch.startsWith(`${candidate.branch}.M`)
+    if ((sameBranch || continuedMerge) && version.step > candidate.step) return false
+    pending.push(...(children.get(version.id) ?? []))
+  }
+  return true
+}
+
 export function reflowVersionLayout(state: StoredState) {
   const graph = state.versions
   const root = graph.find((version) => version.parentId === null)
@@ -105,6 +132,13 @@ export function reflowVersionLayout(state: StoredState) {
     if (!version.parentId) continue
     children.set(version.parentId, [...(children.get(version.parentId) ?? []), version])
   }
+  const recoverableMerges = new Set<string>()
+  for (const version of graph) {
+    const parent = version.parentId ? byId.get(version.parentId) : undefined
+    if (!parent?.number || !version.mergeSourceId) continue
+    const suffix = version.branch.startsWith(`${parent.branch}.M`) ? version.branch.slice(parent.branch.length + 2) : ''
+    if (/^\d+$/.test(suffix) && isLatestOnBranch(graph, parent, version.id)) recoverableMerges.add(version.id)
+  }
   const lengthCache = new Map<string, number>()
   const branchLength = (version: Version): number => {
     const cached = lengthCache.get(version.id)
@@ -113,8 +147,22 @@ export function reflowVersionLayout(state: StoredState) {
     lengthCache.set(version.id, length)
     return length
   }
-  const orderedChildren = (version: Version) => [...(children.get(version.id) ?? [])]
-    .sort((left, right) => branchLength(right) - branchLength(left) || left.createdAt - right.createdAt || left.id.localeCompare(right.id))
+  const maxStepCache = new Map<string, number>()
+  const branchMaxStep = (version: Version): number => {
+    const cached = maxStepCache.get(version.id)
+    if (cached !== undefined) return cached
+    const step = Math.max(version.step, ...(children.get(version.id) ?? []).map(branchMaxStep))
+    maxStepCache.set(version.id, step)
+    return step
+  }
+  const orderedChildren = (version: Version) => {
+    const siblings = [...(children.get(version.id) ?? [])]
+    const needsMergeLane = (child: Version) => !!child.mergeSourceId
+      && (child.branch === version.branch || recoverableMerges.has(child.id))
+      && siblings.some((other) => other.id !== child.id && branchMaxStep(other) >= child.step)
+    return siblings.sort((left, right) => Number(needsMergeLane(right)) - Number(needsMergeLane(left))
+      || branchLength(right) - branchLength(left) || left.createdAt - right.createdAt || left.id.localeCompare(right.id))
+  }
   const pending: { parent: Version; root: Version }[] = []
 
   const placeMainChain = (first: Version, lane: number) => {
@@ -159,7 +207,9 @@ export function reflowVersionLayout(state: StoredState) {
       current = orderedChildren(current)[0]
     }
     const mergeLineIds = new Set(mergeLine.map((item) => item.id))
-    if (version.branch === parent.branch) {
+    const hasCollision = graph.some((other) => other.lane === parent.lane && !mergeLineIds.has(other.id)
+      && mergeLine.some((lineVersion) => lineVersion.step === other.step))
+    if (version.branch === parent.branch || (recoverableMerges.has(version.id) && !hasCollision)) {
       mergeLine.forEach((lineVersion) => { lineVersion.lane = parent.lane })
       continue
     }
