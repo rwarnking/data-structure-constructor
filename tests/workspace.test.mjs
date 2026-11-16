@@ -824,6 +824,18 @@ test('squarified sibling subtrees fill their parent without overlapping', () => 
   assert.ok(area / ((root.width - 16) * (root.height - 60)) > 0.95)
 })
 
+test('deep treemap nodes retain at least 30 by 30 layout dimensions', () => {
+  const forest = [node('a', [
+    node('b'),
+    node('c', [node('d', [node('e')])]),
+  ])]
+  const tiles = tilesForForest(forest)
+  for (const tile of tiles) {
+    assert.ok(tile.width >= 30, `${tile.id} width was ${tile.width}`)
+    assert.ok(tile.height >= 30, `${tile.id} height was ${tile.height}`)
+  }
+})
+
 test('duplicate connectors retain the original choices across ties and nested duplicate groups', () => {
   function originalChoices(data, tiles) {
     const parents = nodeParentIds(data)

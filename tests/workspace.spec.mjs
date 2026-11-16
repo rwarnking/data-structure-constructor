@@ -422,6 +422,23 @@ test('low zoom summaries place action and tag above large entry and treemap coun
   await summary.locator('.overview-tag').hover()
   await expect(page.locator('.overview-preview')).toContainText((await page.locator(`.version-card[data-version="${id}"] .version-header-id`).getAttribute('title')))
   await expect(page.locator('.overview-preview svg')).toBeVisible()
+  const previewGeometry = await page.locator('.overview-preview').evaluate((element, versionId) => {
+    const preview = element.getBoundingClientRect()
+    const card = document.querySelector(`.version-card[data-version="${versionId}"]`).getBoundingClientRect()
+    return {
+      preview: { left: preview.left, top: preview.top, right: preview.right, bottom: preview.bottom },
+      card: { left: card.left, top: card.top, right: card.right, bottom: card.bottom },
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+    }
+  }, id)
+  expect(previewGeometry.preview.left).toBeGreaterThanOrEqual(0)
+  expect(previewGeometry.preview.top).toBeGreaterThanOrEqual(0)
+  expect(previewGeometry.preview.right).toBeLessThanOrEqual(previewGeometry.viewport.width)
+  expect(previewGeometry.preview.bottom).toBeLessThanOrEqual(previewGeometry.viewport.height)
+  expect(previewGeometry.preview.right <= previewGeometry.card.left
+    || previewGeometry.preview.left >= previewGeometry.card.right
+    || previewGeometry.preview.bottom <= previewGeometry.card.top
+    || previewGeometry.preview.top >= previewGeometry.card.bottom).toBe(true)
   const head = page.locator(`.version-card[data-version="${id}"] .version-card-head`)
   await expect(head.locator(':scope > *')).toHaveCount(2)
   expect(await head.evaluate((element) => getComputedStyle(element).backgroundColor))
@@ -650,7 +667,11 @@ test('camera presets fit the available canvas and refocus after resizing', async
 
       }, horizontal)).toBe(true)
     }
+    await page.getByRole('button', { name: 'Fit all versions, 4' }).click()
+    await page.getByRole('button', { name: 'Fit height' }).click()
+    await expectCentered(page, active)
     await page.getByRole('button', { name: 'Focus neighborhood' }).click()
+    await expectCentered(page, active)
     await expect(page.locator(`.version-card[data-version="${active}"]`)).toBeInViewport()
   }
   await focusActive(page)
@@ -3722,6 +3743,24 @@ test('long unbroken labels truncate and expose their complete text on hover', as
   await tile.hover()
   await expect(page.getByRole('tooltip')).toContainText(label)
   expect(await text.evaluate((element) => getComputedStyle(element).fontFamily)).not.toMatch(/mono/i)
+})
+
+test('low-zoom treemap tooltips do not cover their source version', async ({ page }) => {
+  const room = await openRoom(page)
+  for (let index = 0; index < 7; index++) await addEntries(page, [`Tooltip entry ${index}`])
+  await page.getByRole('button', { name: 'Fit all versions, 4' }).click()
+  const activeVersion = (await state(page, room)).activeId
+  const card = page.locator(`.version-card[data-version="${activeVersion}"]`)
+  await expect(card).toHaveClass(/compact/)
+  await (await activeTile(page, room, 'Tooltip entry 6')).hover({ force: true })
+  const tooltip = page.getByRole('tooltip')
+  await expect(tooltip).toBeVisible()
+  const overlapsSource = await tooltip.evaluate((element, versionId) => {
+    const tip = element.getBoundingClientRect()
+    const card = document.querySelector(`.version-card[data-version="${versionId}"]`).getBoundingClientRect()
+    return tip.left < card.right && tip.right > card.left && tip.top < card.bottom && tip.bottom > card.top
+  }, activeVersion)
+  expect(overlapsSource).toBe(false)
 })
 
 test('room switching, persistence and deletion keep room data independent', async ({ page }) => {

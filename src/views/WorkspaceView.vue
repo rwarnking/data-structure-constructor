@@ -514,6 +514,23 @@ function leaveTile(versionId: string, nodeId: string) {
   if (entryTooltip.value?.versionId === versionId && entryTooltip.value.nodeId === nodeId) entryTooltip.value = null
   window.clearTimeout(tileTooltipTimer)
 }
+function entryTooltipStyle() {
+  const tooltip = entryTooltip.value
+  if (!tooltip) return {}
+  const card = [...document.querySelectorAll<HTMLElement>('.version-card')]
+    .find((element) => element.dataset.version === tooltip.versionId)
+  const left = Math.min(tooltip.x + 14, window.innerWidth - 300)
+  const top = Math.min(tooltip.y + 16, window.innerHeight - 100)
+  if (!card?.classList.contains('compact')) return { left: `${left}px`, top: `${top}px` }
+  const bounds = card.getBoundingClientRect()
+  const gap = 8
+  const leftSpace = Math.max(0, bounds.left - gap)
+  const rightSpace = Math.max(0, window.innerWidth - bounds.right - gap)
+  const placeRight = rightSpace >= leftSpace
+  const width = Math.min(280, placeRight ? rightSpace : leftSpace)
+  const tooltipLeft = placeRight ? bounds.right + gap : bounds.left - gap - width
+  return { left: `${tooltipLeft}px`, top: `${top}px`, width: `${width}px` }
+}
 async function activateRoom(room: string, createEmpty = false, replayStartup = false) {
   const name = room.trim()
   if (!name || name.length > 80) {
@@ -1714,8 +1731,7 @@ const cardModel: VersionCardModel = reactive({
       @close="tagsOpen = false; tagVersionId = null" @save="saveTag($event)" @remove="saveTag()"
       @focus="activateAndFocusVersion($event); tagsOpen = false" />
     <StoryGuide v-if="tutorialOpen" :story="tutorial" :right-inset="(actionSidebarCollapsed ? 48 : 270) + 16" @close="tutorialOpen = false" />
-    <div v-if="entryTooltip" class="entry-tooltip" role="tooltip"
-      :style="{ left: `${Math.min(entryTooltip.x + 14, window.innerWidth - 300)}px`, top: `${Math.min(entryTooltip.y + 16, window.innerHeight - 100)}px` }">
+    <div v-if="entryTooltip" class="entry-tooltip" role="tooltip" :style="entryTooltipStyle()">
       {{ entryTooltip.description }}
     </div>
     <div v-if="toast" class="toast"><span></span>{{ toast }}</div>

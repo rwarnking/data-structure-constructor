@@ -176,8 +176,23 @@ export function useGraphCamera(options: {
     preset.value = { mode: 'height' }
     lastPresetMode = 'height'
     const bounds = boundsFor(versions.value)
-    const targetZoom = Math.max(0.005, Math.min(ZOOM_MAX, Math.max(1, canvasSize.value.height - 100) / (bounds.bottom - bounds.top)))
-    fitBounds(bounds, targetZoom, animate, true)
+    if (active.value.id === 'v0') {
+      const targetZoom = Math.max(0.005, Math.min(ZOOM_MAX,
+        Math.max(1, canvasSize.value.height - 100) / (bounds.bottom - bounds.top)))
+      fitBounds(bounds, targetZoom, animate, true)
+      return
+    }
+    const position = cardPosition(active.value)
+    const centerY = position.y + cardHeight(active.value) / 2
+    const verticalRadius = Math.max(centerY - bounds.top, bounds.bottom - centerY)
+    const targetZoom = Math.max(0.005, Math.min(ZOOM_MAX,
+      Math.max(1, canvasSize.value.height - 100) / (verticalRadius * 2)))
+    const target = {
+      x: canvasSize.value.width / 2 - (position.x + cardWidth(active.value) / 2) * targetZoom,
+      y: canvasSize.value.height / 2 - centerY * targetZoom,
+    }
+    if (animate) animateCamera(targetZoom, target, 360, true)
+    else { cancelPanAnimation(); zoom.value = targetZoom; pan.value = target }
   }
   function focusNeighborhood(version = active.value, animate = true) {
     focusedVersionId.value = null
@@ -192,7 +207,17 @@ export function useGraphCamera(options: {
     const targetZoom = Math.max(0.005, Math.min(ZOOM_MAX,
       Math.max(1, canvasSize.value.width - 100) / (bounds.right - bounds.left),
       Math.max(1, canvasSize.value.height - 100) / (bounds.bottom - bounds.top)))
-    fitBounds(bounds, targetZoom, animate)
+    if (version.id === 'v0') {
+      fitBounds(bounds, targetZoom, animate)
+      return
+    }
+    const position = cardPosition(version)
+    const target = {
+      x: canvasSize.value.width / 2 - (position.x + cardWidth(version) / 2) * targetZoom,
+      y: canvasSize.value.height / 2 - (position.y + cardHeight(version) / 2) * targetZoom,
+    }
+    if (animate) animateCamera(targetZoom, target, 360, true)
+    else { cancelPanAnimation(); zoom.value = targetZoom; pan.value = target }
   }
   function startCanvasPan(event: PointerEvent) {
     const target = event.target as HTMLElement

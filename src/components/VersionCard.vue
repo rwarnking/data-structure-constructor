@@ -13,7 +13,7 @@ const { menu: MoreHorizontal, tag: TagIcon } = actionIcons
 const { active, compareIds, compareMode, zoom, overNode, hoveredNode, selectedNodes, draggedSubtreeIds, draggedOriginalTile, selectionBox, clientId, colorForUser, isReadOnly, versionTiles, duplicateValueLinks, displayCardPosition, cardWidth, cardHeight, rootLabelOffset, rootLabelX, rootLabelWidth, versionAuthorColor, activeUsersFor, descendantsCount, isPreviewing, previewLabel, versionAction, cardData, mapViewport, cardMapView, mapTransform, changedEntries, tileSelectionColor, dragOverlayTiles, handleVersionClick, handleVersionDoubleClick, onVersionContext, onVersionMenu, startMapPan, zoomMap, startMapTileGesture, enterTile, moveTileTooltip, leaveTile, onTileClick, onTileDoubleClick, onTileContext } = toRefs(props.model)
 const overlayTiles = computed(() => dragOverlayTiles.value(props.version))
 const overviewHover = ref(false)
-const previewPosition = ref({ left: 0, top: 0 })
+const previewPosition = ref({ left: 8, top: 8, width: 280, height: 240 })
 const previewTiles = computed(() => versionTiles.value.get(props.version.id) ?? [])
 const offscreenDirections = computed(() => outOfViewDirections(previewTiles.value, cardMapView.value(props.version), mapViewport.value(props.version)))
 const directionAngles: Record<MapDirection, number> = {
@@ -32,9 +32,38 @@ const previewViewBox = computed(() => {
 function showOverviewPreview(event: PointerEvent) {
   if (!isReadOnly.value) return
   const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect()
+  const gap = 8
+  const edge = 8
+  const width = Math.min(280, Math.max(1, window.innerWidth - edge * 2))
+  const height = Math.min(240, Math.max(1, window.innerHeight - edge * 2))
+  const leftSpace = Math.max(0, bounds.left - gap - edge)
+  const rightSpace = Math.max(0, window.innerWidth - bounds.right - gap - edge)
+  let previewWidth = width
+  let previewHeight = height
+  let left: number
+  let top: number
+  if (rightSpace >= width) left = bounds.right + gap
+  else if (leftSpace >= width) left = bounds.left - gap - width
+  else if (rightSpace >= leftSpace && rightSpace > 0) {
+    previewWidth = rightSpace
+    left = bounds.right + gap
+  } else if (leftSpace > 0) {
+    previewWidth = leftSpace
+    left = bounds.left - gap - previewWidth
+  } else {
+    const aboveSpace = Math.max(0, bounds.top - gap - edge)
+    const belowSpace = Math.max(0, window.innerHeight - bounds.bottom - gap - edge)
+    previewHeight = Math.min(height, Math.max(1, Math.max(aboveSpace, belowSpace)))
+    top = belowSpace >= previewHeight ? bounds.bottom + gap : bounds.top - gap - previewHeight
+    previewPosition.value = { left: edge, top, width, height: previewHeight }
+    overviewHover.value = true
+    return
+  }
   previewPosition.value = {
-    left: Math.max(8, Math.min(window.innerWidth - 288, bounds.right + 8)),
-    top: Math.max(8, Math.min(window.innerHeight - 248, bounds.top)),
+    left,
+    top: Math.max(edge, Math.min(window.innerHeight - previewHeight - edge, bounds.top)),
+    width: previewWidth,
+    height: previewHeight,
   }
   overviewHover.value = true
 }
@@ -162,7 +191,10 @@ const dropTarget = computed(() => props.version.id === active.value.id
     </div>
   </article>
   <Teleport to=".app-shell">
-    <div v-if="overviewHover && isReadOnly" class="overview-preview" :style="{ left: `${previewPosition.left}px`, top: `${previewPosition.top}px` }">
+    <div v-if="overviewHover && isReadOnly" class="overview-preview" :style="{
+      left: `${previewPosition.left}px`, top: `${previewPosition.top}px`,
+      width: `${previewPosition.width}px`, height: `${previewPosition.height}px`,
+    }">
       <strong>{{ displayVersionId(version) }}</strong>
       <svg v-if="previewTiles.length" :viewBox="previewViewBox" role="img" :aria-label="`Treemap preview for ${displayVersionId(version)}`">
         <rect v-for="tile in previewTiles" :key="tile.id" :x="tile.x" :y="tile.y" :width="tile.width" :height="tile.height"

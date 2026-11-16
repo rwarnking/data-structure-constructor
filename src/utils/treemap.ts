@@ -555,7 +555,22 @@ function tilesForWithCache(
     .paddingRight(TREE_PADDING)
     .paddingBottom(TREE_PADDING)
     .paddingInner(TREE_PADDING)
-  return layout(tree).descendants().map((node) => ({
+  const descendants = layout(tree).descendants()
+  if (descendants.some((node) => node.x1 - node.x0 < 30 || node.y1 - node.y0 < 30)) {
+    const tiles: Tile[] = []
+    const addTile = (node: TreeNode, x: number, y: number, width: number, height: number, depth: number) => {
+      tiles.push({
+        id: node.id, label: node.value, x: offsetX + x, y: offsetY + y,
+        width, height, depth, hasChildren: node.children.length > 0,
+      })
+      for (const child of childLayouts(node, undefined, cache)) {
+        addTile(child.node, x + child.x, y + child.y, child.width, child.height, depth + 1)
+      }
+    }
+    addTile(root, 0, 0, size.width, size.height, 0)
+    return tiles
+  }
+  return descendants.map((node) => ({
     id: node.data.id, label: node.data.value,
     x: offsetX + node.x0, y: offsetY + node.y0,
     width: node.x1 - node.x0, height: node.y1 - node.y0,

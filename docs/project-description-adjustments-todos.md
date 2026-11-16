@@ -9,3 +9,6 @@
 - rollercoaster
 - jobs
 - farytales
+
+- drop sound delayed
+- when adding a parent around a treemap the treemap is sometimes moved randomly
