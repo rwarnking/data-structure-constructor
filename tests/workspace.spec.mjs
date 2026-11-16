@@ -1247,6 +1247,67 @@ test('comparison and merge preselect the active version and allow replacing it',
   }
 })
 
+test('rapid version and treemap clicks are applied before starting comparison or merge', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['First'])
+  const first = (await state(page, room)).activeId
+  await addEntries(page, ['Second'])
+  const second = (await state(page, room)).activeId
+  await page.keyboard.press('4')
+  const firstCard = page.locator(`.version-card[data-version="${first}"]`)
+  const firstLabel = await firstCard.locator('.version-header-id').getAttribute('title')
+  const drawer = page.locator('.compare-drawer')
+
+  for (const [target, shortcut] of [['', 'C'], [' .tree-tile', 'M']]) {
+    await expect(firstCard.locator(target || '.version-header-id').first()).toBeAttached()
+    await page.evaluate(({ first, target, shortcut }) => {
+      const element = document.querySelector(`.version-card[data-version="${first}"]${target}`)
+      if (!element) throw new Error('Version click target is missing')
+      element.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }))
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: shortcut, shiftKey: true, bubbles: true }))
+    }, { first, target, shortcut })
+    await expect(drawer.locator('.drawer-first-version')).toContainText(`First version: ${firstLabel}`)
+    await expect(firstCard).toHaveClass(/active/)
+    await drawer.getByRole('button', { name: 'Abort and close' }).click()
+    await expect(drawer).toHaveCount(0)
+    await page.locator(`.version-card[data-version="${second}"]`).dispatchEvent('click')
+    await expect(page.locator(`.version-card[data-version="${second}"]`)).toHaveClass(/active/)
+  }
+})
+
+test('a pending treemap click cannot reactivate an old version after a merge', async ({ page }) => {
+  await page.clock.install()
+  const room = await openRoom(page)
+  await addEntries(page, ['First'])
+  const low = (await state(page, room)).activeId
+  await addEntries(page, ['Second'])
+  const high = (await state(page, room)).activeId
+  await page.keyboard.press('4')
+  const lowCard = page.locator(`.version-card[data-version="${low}"]`)
+  const highCard = page.locator(`.version-card[data-version="${high}"]`)
+  await expect(lowCard.locator('.tree-tile').first()).toBeAttached()
+  await expect(highCard.locator('.tree-tile').first()).toBeAttached()
+  await lowCard.dispatchEvent('click')
+  await expect(lowCard).toHaveClass(/active/)
+
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 100))
+  await lowCard.locator('.tree-tile').first().dispatchEvent('click')
+  await page.keyboard.press('Shift+m')
+  await highCard.locator('.tree-tile').first().dispatchEvent('click')
+  const dialog = page.getByRole('dialog', { name: 'Branch merge' })
+  await expect(dialog).toBeVisible()
+  const previousCount = (await state(page, room)).versions.length
+  await page.clock.fastForward(10)
+  await dialog.getByRole('button', { name: 'Confirm merge' }).click()
+  await expect(dialog).toHaveCount(0)
+  await page.clock.fastForward(250)
+  await expect.poll(async () => {
+    const saved = await state(page, room)
+    const merge = saved.versions.find((item) => item.id === saved.activeId)
+    return { count: saved.versions.length, parentId: merge?.parentId, mergeSourceId: merge?.mergeSourceId }
+  }).toEqual({ count: previousCount + 1, parentId: low, mergeSourceId: high })
+})
+
 test('merge dialog and committed history put the higher step into the lower step in either selection order', async ({ page }) => {
   const room = await openRoom(page)
   await addEntries(page, ['First'])
@@ -1259,7 +1320,9 @@ test('merge dialog and committed history put the higher step into the lower step
   for (const [first, second] of [[low, high], [high, low]]) {
     await page.keyboard.press('4')
     await page.locator(`.version-card[data-version="${first}"]`).click()
+    await expect(page.locator(`.version-card[data-version="${first}"]`)).toHaveClass(/active/)
     await page.keyboard.press('Shift+m')
+    await expect(page.locator('.drawer-first-version')).toContainText(`First version: ${first === low ? lowLabel : highLabel}`)
     await page.locator(`.version-card[data-version="${second}"]`).click()
     const dialog = page.getByRole('dialog', { name: 'Branch merge' })
     await expect(dialog.locator('.drawer-head strong')).toHaveText(`${highLabel} → ${lowLabel}`)

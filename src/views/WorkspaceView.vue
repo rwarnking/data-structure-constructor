@@ -96,7 +96,9 @@ let suppressTileClick = false
 let suppressCanvasClick = false
 let versionClickTimer = 0
 let pendingCompareVersion: Version | null = null
+let pendingVersionClick: Version | null = null
 let tileClickTimer = 0
+let pendingTileClick: (() => void) | null = null
 let suppressPingClick = false
 let pingPointer: { id: number; x: number; y: number; moved: boolean } | null = null
 const menu = ref<{
@@ -160,6 +162,9 @@ let leaveRecorded = false
 watch([compareMode, mergeMode], () => {
   window.clearTimeout(versionClickTimer)
   pendingCompareVersion = null
+  pendingVersionClick = null
+  window.clearTimeout(tileClickTimer)
+  pendingTileClick = null
 })
 
 const graphCamera = useGraphCamera({ versions, active, state, compareIds, draggedVersionId: () => treeDrag.value?.versionId,
@@ -344,7 +349,9 @@ function suppressGraphClicks() {
   suppressCanvasClick = true
   window.clearTimeout(versionClickTimer)
   pendingCompareVersion = null
+  pendingVersionClick = null
   window.clearTimeout(tileClickTimer)
+  pendingTileClick = null
   window.setTimeout(() => { suppressVersionClick = false; suppressTileClick = false; suppressCanvasClick = false }, 0)
 }
 
@@ -767,12 +774,19 @@ function handleVersionClick(version: Version, event: MouseEvent) {
   }
   window.clearTimeout(versionClickTimer)
   pendingCompareVersion = null
-  versionClickTimer = window.setTimeout(() => selectVersion(version), 220)
+  window.clearTimeout(tileClickTimer)
+  pendingTileClick = null
+  pendingVersionClick = version
+  versionClickTimer = window.setTimeout(() => {
+    pendingVersionClick = null
+    selectVersion(version)
+  }, 220)
 }
 
 function handleVersionDoubleClick(version: Version) {
   window.clearTimeout(versionClickTimer)
   pendingCompareVersion = null
+  pendingVersionClick = null
   playSound('focus')
   activateAndFocusVersion(version)
 }
@@ -791,10 +805,12 @@ function onTileClick(version: Version, nodeId: string, event: MouseEvent) {
     chooseCompare(version.id)
     return
   }
+  window.clearTimeout(versionClickTimer)
+  pendingVersionClick = null
   const additive = event.shiftKey
   const sameVersion = version.id === active.value.id
   window.clearTimeout(tileClickTimer)
-  tileClickTimer = window.setTimeout(() => {
+  pendingTileClick = () => {
     if (state.value.activeId !== version.id) playSound('tick')
     state.value.activeId = version.id
     if (isReadOnly.value) {
@@ -808,14 +824,35 @@ function onTileClick(version: Version, nodeId: string, event: MouseEvent) {
       setSelectedNodes([nodeId])
     }
     menu.value = null
+  }
+  tileClickTimer = window.setTimeout(() => {
+    const click = pendingTileClick
+    pendingTileClick = null
+    click?.()
   }, 220)
 }
 
 function onTileDoubleClick(version: Version, nodeId: string) {
   window.clearTimeout(tileClickTimer)
+  pendingTileClick = null
   if (compareMode.value || mergeMode.value || isReadOnly.value) return
   state.value.activeId = version.id
   renameEntry(nodeId)
+}
+
+function finishPendingSelection() {
+  if (pendingVersionClick) {
+    window.clearTimeout(versionClickTimer)
+    const version = pendingVersionClick
+    pendingVersionClick = null
+    selectVersion(version)
+  }
+  if (pendingTileClick) {
+    window.clearTimeout(tileClickTimer)
+    const click = pendingTileClick
+    pendingTileClick = null
+    click()
+  }
 }
 
 function onCanvasClick(event: MouseEvent) {
@@ -1228,7 +1265,10 @@ function performAction(action: ShortcutAction) {
     case 'undo': undoVersion(); break
     case 'redo': redoVersion(); break
     case 'ping': pingMode.value = !pingMode.value; break
-    case 'merge': if (mergeMode.value) closeVersionSelection(); else startVersionSelection('merge', active.value.id); break
+    case 'merge':
+      if (mergeMode.value) closeVersionSelection()
+      else { finishPendingSelection(); startVersionSelection('merge', active.value.id) }
+      break
     case 'previous': navigateVersion('left'); break
     case 'next': navigateVersion('right'); break
     case 'up': navigateVersion('up'); break
@@ -1243,7 +1283,10 @@ function performAction(action: ShortcutAction) {
     case 'tag': editTag(active.value.id); break
     case 'mergeEntries': openMergeEntries(); break
     case 'split': if (selectedNode.value) openSplitEntry(selectedNode.value); break
-    case 'compare': if (compareMode.value) closeVersionSelection(); else startVersionSelection('compare', active.value.id); break
+    case 'compare':
+      if (compareMode.value) closeVersionSelection()
+      else { finishPendingSelection(); startVersionSelection('compare', active.value.id) }
+      break
     case 'compact': compactVersionTreemaps(active.value.id); break
     case 'center': centerVersionTreemaps(active.value.id); break
     case 'focus': focusActive(); break
