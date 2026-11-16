@@ -2,7 +2,7 @@ import { computed, nextTick, ref, toRaw, watch, type ComputedRef, type Ref } fro
 import { PeerRoom, type RoomStatus } from '../collaboration'
 import type { CollaborationMetadata, Revision, StoredState, Version } from '../types/workspace'
 import type { InteractionEntry, Ping, RemoteUser, SyncDelta, SyncSnapshot, VersionChange, VersionRemoval } from '../types/collaboration'
-import { hasValidVersionStep, isCollaborationMetadata, isCopyLink, isInteractionEntry, isRecord, isRetiredVersionNumber, isRevision, isStoredState, isVersion } from '../utils/validation'
+import { hasValidVersionStep, isCollaborationMetadata, isCopyLink, isInteractionEntry, isRecord, isRetiredVersionNumber, isRevision, isStoredState, isVersion, revisionIsNewer } from '../utils/validation'
 import { findNode } from '../utils/tree'
 import { assignMissingVersionNumbers, assignVersionSuffixes, compareCopyLinks, retireVersionNumbers } from '../utils/versions'
 import { collaboratorColors, userColor } from '../utils/colors'
@@ -23,6 +23,11 @@ export function useCollaboration(options: {
   followVersion: (version: Version) => void
   notify: (message: string, error?: boolean) => void
   playPing: () => void
+  onLocalChanges?: (before: StoredState, after: StoredState, delta?: SyncDelta) => void
+  onLocalInteraction?: (entry: InteractionEntry) => void
+  onRemoteDeparture?: (entry: InteractionEntry) => void
+  onSessionMessage?: (message: unknown) => boolean
+  onSyncRequest?: (reply: (message: unknown) => void) => void
 }) {
   const { clientId: CLIENT_ID, state, active, selectedNodes, currentRoomName, graphCanvas, pan, zoom, normalizeState, roomDataKey, reflowLayout, fitGraph, followVersion, notify } = options
   const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
@@ -41,6 +46,7 @@ export function useCollaboration(options: {
   }
   localStorage.setItem('canopy-user-name', userName.value)
   const interactions = ref<InteractionEntry[]>([])
+  const roomInteractions = new Map<string, InteractionEntry[]>()
   const pings = ref<Ping[]>([])
   const roomStatus = ref<RoomStatus>({ state: 'idle', peers: 0, message: 'Not connected' })
   const peerRoom = new PeerRoom()
@@ -69,20 +75,16 @@ export function useCollaboration(options: {
   watch(userName, (name) => {
     localStorage.setItem('canopy-user-name', name.trim().slice(0, 32) || animalForUser(CLIENT_ID))
   })
-  watch(interactions, (entries) => {
-    if (collaborationRoom) localStorage.setItem(interactionStorageKey(collaborationRoom), JSON.stringify(entries))
-  }, { deep: true })
   watch(state, (value) => {
     const snapshot = JSON.stringify(toRaw(value))
     localStorage.setItem(roomDataKey(currentRoomName.value), snapshot)
-    if (!applyingRemoteState && snapshot !== lastObservedState) publishLocalChanges(value)
+    if (!applyingRemoteState && snapshot !== lastObservedState) {
+      const before = JSON.parse(lastObservedState) as StoredState
+      const delta = publishLocalChanges(value)
+      options.onLocalChanges?.(before, clone(value), delta)
+    }
     lastObservedState = snapshot
   }, { deep: true })
-
-  function revisionIsNewer(candidate: Revision | undefined, current: Revision | undefined) {
-    return !!candidate && (!current || candidate.clock > current.clock
-      || (candidate.clock === current.clock && candidate.actor.localeCompare(current.actor) > 0))
-  }
 
   function metadataKey(room: string) {
     return `canopy-collaboration-${room}`
@@ -100,17 +102,36 @@ export function useCollaboration(options: {
 
   function addInteraction(entry: InteractionEntry, broadcast = true) {
     if (interactions.value.some((item) => item.id === entry.id)) return
-    interactions.value = [...interactions.value, entry]
+    if (collaborationRoom) setRoomInteractions(collaborationRoom, [...interactions.value, entry])
+    else interactions.value = [...interactions.value, entry].slice(-10)
+    if (broadcast && collaborationRoom) peerRoom.send({ type: 'interaction', entry })
+  }
+
+  function setRoomInteractions(room: string, entries: InteractionEntry[]) {
+    const saved = clone(entries)
       .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))
       .slice(-10)
-    if (broadcast && collaborationRoom) peerRoom.send({ type: 'interaction', entry })
+    roomInteractions.set(room, saved)
+    if (collaborationRoom === room) interactions.value = saved
+    try {
+      localStorage.setItem(interactionStorageKey(room), JSON.stringify(saved))
+      return true
+    } catch {
+      notify(`Could not save recent interactions for room "${room}"`, true)
+      return false
+    }
+  }
+
+  function removeRoomInteractions(room: string) {
+    localStorage.removeItem(interactionStorageKey(room))
+    roomInteractions.delete(room)
   }
 
   function logInteraction(
     action: string,
     reference: { versionId?: string; nodeId?: string; nodeLabel?: string; ping?: { x: number; y: number } } = {},
   ) {
-    addInteraction({
+    const entry: InteractionEntry = {
       id: `${CLIENT_ID}-${Date.now()}-${++interactionSequence}`,
       actorId: CLIENT_ID,
       actorName: userName.value.trim() || animalForUser(CLIENT_ID),
@@ -118,7 +139,18 @@ export function useCollaboration(options: {
       action,
       createdAt: Date.now(),
       ...reference,
-    })
+    }
+    options.onLocalInteraction?.(entry)
+    addInteraction(entry)
+  }
+
+  function recordRemoteDeparture(id: string, user: RemoteUser) {
+    if (interactions.value.some((entry) => entry.actorId === id && entry.action === 'Left room'
+      && Date.now() - entry.createdAt < 5000)) return
+    const entry: InteractionEntry = { id: `departure-${id}-${Date.now()}`, actorId: id,
+      actorName: user.name, actorColor: user.color, action: 'Left room', createdAt: Date.now() }
+    addInteraction(entry, false)
+    options.onRemoteDeparture?.(entry)
   }
 
   function newRevision(clock: number): Revision {
@@ -127,13 +159,20 @@ export function useCollaboration(options: {
 
   function initializeCollaborationMetadata(room: string) {
     collaborationRoom = room
-    try {
-      const savedInteractions: unknown = JSON.parse(localStorage.getItem(interactionStorageKey(room)) ?? '[]')
-      interactions.value = Array.isArray(savedInteractions) && savedInteractions.every(isInteractionEntry)
-        ? savedInteractions.slice(-10)
-        : []
-    } catch {
-      interactions.value = []
+    const cached = roomInteractions.get(room)
+    if (cached) interactions.value = cached
+    else {
+      const saved = localStorage.getItem(interactionStorageKey(room))
+      if (saved) {
+        let entries: unknown
+        try {
+          entries = JSON.parse(saved) as unknown
+        } catch {
+          entries = null
+        }
+        if (Array.isArray(entries) && entries.every(isInteractionEntry)) setRoomInteractions(room, entries)
+        else { interactions.value = []; notify(`Could not load recent interactions for room "${room}"`, true) }
+      } else interactions.value = []
     }
     const raw = localStorage.getItem(metadataKey(room))
     if (raw) {
@@ -206,6 +245,7 @@ export function useCollaboration(options: {
     }
     persistCollaborationMetadata()
     peerRoom.send(delta)
+    return delta
   }
 
   function sendSyncSnapshot(reply: (message: unknown) => void) {
@@ -244,7 +284,9 @@ export function useCollaboration(options: {
     }
     const localActiveId = state.value.activeId
     state.value = normalizeState(message.state)
-    interactions.value = (message.interactions ?? []).slice(-10)
+    const combined = new Map([...interactions.value, ...(message.interactions ?? [])].map((entry) => [entry.id, entry]))
+    if (collaborationRoom) setRoomInteractions(collaborationRoom, [...combined.values()])
+    else interactions.value = [...combined.values()].slice(-10)
     state.value.activeId = state.value.versions.some((version) => version.id === localActiveId)
       ? localActiveId
       : state.value.versions.find((version) => version.id === 'v0')!.id
@@ -448,10 +490,13 @@ export function useCollaboration(options: {
     const packet = message as { type?: string }
     if (packet.type === 'sync-request') {
       sendSyncSnapshot(reply)
+      options.onSyncRequest?.(reply)
       reply(presenceMessage(CLIENT_ID, userName.value, localColor.value, active.value.id, selectedNodes.value))
       for (const [id, user] of Object.entries(remoteUsers.value)) {
         reply(presenceMessage(id, user.name, user.color, user.activeVersionId, user.selectedNodeIds))
       }
+    } else if (packet.type === 'session-interaction' || packet.type === 'session-log') {
+      if (!options.onSessionMessage?.(message)) return false
     } else if (packet.type === 'sync-snapshot') {
       applySyncSnapshot(packet as SyncSnapshot)
     } else if (packet.type === 'sync-delta') {
@@ -497,6 +542,8 @@ export function useCollaboration(options: {
     } else if (packet.type === 'presence-leave') {
       const userId = (message as { userId?: unknown }).userId
       if (typeof userId === 'string' && userId !== CLIENT_ID) {
+        const user = remoteUsers.value[userId]
+        if (user) recordRemoteDeparture(userId, user)
         const { [userId]: _leaving, ...remainingUsers } = remoteUsers.value
         remoteUsers.value = remainingUsers
       }
@@ -565,12 +612,17 @@ export function useCollaboration(options: {
   }
 
   function onRoomStatus(status: RoomStatus) {
+    const wasOnline = roomStatus.value.state === 'connected' || roomStatus.value.state === 'hosting'
     roomStatus.value = status
-    if (status.state === 'connected' || status.state === 'hosting') publishPresence()
+    if (status.state === 'connected' || status.state === 'hosting') {
+      if (!wasOnline) logInteraction('Joined room')
+      publishPresence()
+    }
     if (status.state === 'idle') remoteUsers.value = {}
   }
   function expireRemoteUsers() {
     const cutoff = Date.now() - 15000
+    for (const [id, user] of Object.entries(remoteUsers.value)) if (user.lastSeen < cutoff) recordRemoteDeparture(id, user)
     remoteUsers.value = Object.fromEntries(Object.entries(remoteUsers.value)
       .filter(([, user]) => user.lastSeen >= cutoff))
     publishPresence()
@@ -601,7 +653,8 @@ export function useCollaboration(options: {
   function setObservedState(value: StoredState) { lastObservedState = JSON.stringify(toRaw(value)) }
   function finishRoomSwitch() { applyingRemoteState = false }
 
-  return { remoteUsers, interactions, pings, roomStatus, peerRoom, connectedUsers, recentInteractions, colorForUser,
-    metadataKey, interactionStorageKey, logInteraction, initializeCollaborationMetadata, sendPingAt,
+  return { remoteUsers, interactions, pings, roomStatus, peerRoom, connectedUsers, recentInteractions, colorForUser, userName,
+    addReplayInteraction: (entry: InteractionEntry) => addInteraction(entry, false), showPing,
+    metadataKey, logInteraction, setRoomInteractions, removeRoomInteractions, initializeCollaborationMetadata, sendPingAt,
     expireRemoteUsers, connectAutomatically, resetRoomTracking, setObservedState, finishRoomSwitch, setBranching }
 }

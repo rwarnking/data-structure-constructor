@@ -58,11 +58,17 @@ export function useVersionComparison(
     mergeDropTarget.value = null
     comparisonSelectedNode.value = null
   }
+  const comparedVersions = computed(() => {
+    if (compareIds.value.length !== 2) return null
+    const first = versions.value.find((item) => item.id === compareIds.value[0])
+    const second = versions.value.find((item) => item.id === compareIds.value[1])
+    if (!first || !second) return null
+    return mergeMode.value && first.step < second.step ? [second, first] as const : [first, second] as const
+  })
   const comparison = computed(() => {
-    if (compareIds.value.length !== 2) return []
-    const left = versions.value.find((item) => item.id === compareIds.value[0])
-    const right = versions.value.find((item) => item.id === compareIds.value[1])
-    if (!left || !right) return []
+    const pair = comparedVersions.value
+    if (!pair) return []
+    const [left, right] = pair
     const a = flattenNodes(left.data)
     const b = flattenNodes(right.data)
     const changes: { id: string; kind: string; label: string }[] = []
@@ -95,10 +101,10 @@ export function useVersionComparison(
     return statuses
   })
   const mergeResult = computed(() => {
-    if (!mergeMode.value || compareIds.value.length !== 2) return null
-    const source = versions.value.find((item) => item.id === compareIds.value[0])
-    const target = versions.value.find((item) => item.id === compareIds.value[1])
-    if (!source || !target || source.id === target.id) return null
+    const pair = comparedVersions.value
+    if (!mergeMode.value || !pair) return null
+    const [source, target] = pair
+    if (source.id === target.id) return null
     const sourceNodes = flattenNodes(source.data)
     const targetNodes = flattenNodes(target.data)
     const values = new Map<string, { value: string; description?: string; parentId: string | null; order: number }>()
@@ -254,10 +260,9 @@ export function useVersionComparison(
     mergeDragOffset.value = null
   }
   const comparisonPanels = computed(() => {
-    if (compareIds.value.length !== 2) return []
-    const source = versions.value.find((item) => item.id === compareIds.value[0])
-    const target = versions.value.find((item) => item.id === compareIds.value[1])
-    if (!source || !target) return []
+    const pair = comparedVersions.value
+    if (!pair) return []
+    const [source, target] = pair
     const panels = [
       { id: source.id, label: 'Source', version: source, data: source.data, positions: source.positions, role: 'source' },
       { id: target.id, label: 'Target', version: target, data: target.data, positions: target.positions, role: 'target' },

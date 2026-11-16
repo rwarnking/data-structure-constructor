@@ -164,7 +164,7 @@ test('tags can be edited, searched, listed, exported and removed', async ({ page
   await expect(search).toContainText('Tag title')
   await page.keyboard.press('Escape')
   await page.getByRole('button', { name: 'Settings' }).click()
-  await page.getByRole('button', { name: 'All tags' }).click()
+  await page.getByRole('button', { name: 'Show tagged versions' }).click()
   const tags = page.getByRole('dialog', { name: 'All tags' })
   await expect(tags).toContainText('Important release')
   await tags.getByRole('button', { name: /Milestone/ }).click()
@@ -226,7 +226,7 @@ test('version tags synchronize between collaborators and stay in their room', as
     await guest.goto(`/?room=${separateRoom}`)
     await expect(guest.getByRole('status').first()).toHaveText('Hosting')
     await guest.getByRole('button', { name: 'Settings' }).click()
-    await guest.getByRole('button', { name: 'All tags' }).click()
+    await guest.getByRole('button', { name: 'Show tagged versions' }).click()
     await expect(guest.getByRole('dialog', { name: 'All tags' })).toContainText('No tags in this room')
   } finally {
     await hostContext.close()
@@ -686,15 +686,413 @@ test('settings export and import create an isolated local room without overwriti
   await page.locator('input[type=file]').setInputFiles({ name: 'dataset.json', mimeType: 'application/json', buffer })
   await expect(page.getByRole('status').first()).toHaveText('Local only')
   await expect.poll(async () => !!(await state(page, `${room}_1`))).toBe(true)
+  await expect(page.locator('.interaction-section')).toContainText('Exported')
+  expect(await page.evaluate((name) => JSON.parse(localStorage.getItem(`canopy-interactions-${encodeURIComponent(name)}`))
+    .some((entry) => entry.action.includes('Exported')), `${room}_1`)).toBe(true)
   expect(await state(page, room)).toEqual(source)
   expect((await state(page, `${room}_1`)).versions.map(({ id, parentId, data, number }) => ({ id, parentId, data, number })))
     .toEqual(source.versions.map(({ id, parentId, data, number }) => ({ id, parentId, data, number })))
   await page.reload()
   await expect(page.getByRole('status').first()).toHaveText('Local only')
+  await expect(page.locator('.interaction-section')).toContainText('Exported')
   await page.getByRole('button', { name: 'Settings' }).click()
   await page.locator('input[type=file]').setInputFiles({ name: 'invalid.json', mimeType: 'application/json', buffer: Buffer.from('{}') })
   await expect(page.getByText(/Import failed/)).toBeVisible()
   expect(await state(page, room)).toEqual(source)
+})
+
+test('interaction logs export, replay, reset, and show analysis without changing the source room', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['Recorded entry'], true)
+  await focusActive(page)
+  await page.keyboard.press('Control+z')
+  await page.keyboard.press('Control+y')
+  await expect.poll(async () => (await activeData(page, room)).some((entry) => entry.value === 'Recorded entry')).toBe(true)
+  await page.keyboard.press('4')
+  await page.waitForTimeout(500)
+  const original = await state(page, room)
+  await page.getByRole('button', { name: 'Settings' }).click()
+  const downloadPromise = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Export Interaction Log' }).click()
+  const buffer = await readFile(await (await downloadPromise).path())
+  const log = JSON.parse(buffer.toString())
+  expect(log.format).toBe('canopy-interaction-log')
+  expect(log.events.some((event) => event.category === 'state' && event.patch.versions.some((version) =>
+    findNode(version.data, 'Recorded entry')))).toBe(true)
+  expect(log.events.some((event) => event.method === 'hotkey' && event.action === 'undo')).toBe(true)
+  expect(log.events.some((event) => event.method === 'hotkey' && event.action === 'redo')).toBe(true)
+  expect(log.events.some((event) => event.category === 'viewport')).toBe(true)
+  expect(log.events.every((event) => event.actor.id && event.actor.name && event.inputTime <= event.changeTime)).toBe(true)
+  expect(await page.evaluate(() => Object.keys(localStorage).some((key) => key.includes('session-interaction')))).toBe(false)
+  const chooserPromise = page.waitForEvent('filechooser')
+  await page.getByRole('button', { name: 'Replay Interaction Log' }).click()
+  await (await chooserPromise).setFiles({ name: 'interaction.json', mimeType: 'application/json', buffer })
+  await expect(page.locator('.current-room-name')).toHaveText('Interaction Log Replay')
+  await page.getByRole('button', { name: 'Settings' }).click()
+  await page.getByRole('button', { name: 'Jump to end' }).click()
+  await expect.poll(async () => (await activeData(page, 'Interaction Log Replay')).some((entry) => entry.value === 'Recorded entry')).toBe(true)
+  await expect(page.locator('.interaction-section')).toContainText('Recorded entry')
+  expect((await state(page, 'Interaction Log Replay')).versions.map((version) => version.id)).toEqual(original.versions.map((version) => version.id))
+  await page.getByRole('button', { name: 'Analyze Interaction Log' }).click()
+  const analysis = page.getByRole('dialog', { name: 'Interaction log analysis' })
+  await expect(analysis).toContainText('Session overview')
+  await expect(analysis).toContainText('User contributions')
+  await expect(analysis).toContainText('Navigation and viewport')
+  await analysis.getByRole('button', { name: 'Close' }).click()
+  await page.getByRole('button', { name: 'Jump to beginning' }).click()
+  await expect.poll(async () => (await state(page, 'Interaction Log Replay')).versions.length).toBe(1)
+  await expect(page.locator('.interaction-section')).not.toContainText('Recorded entry')
+  await page.getByRole('button', { name: 'Jump to end' }).click()
+  await expect.poll(async () => (await state(page, 'Interaction Log Replay')).versions.length).toBe(original.versions.length)
+  expect(await state(page, room)).toEqual(original)
+  await page.getByRole('button', { name: 'Exit replay' }).click()
+  await expect(page.locator('.current-room-name')).toHaveText(room)
+  expect((await state(page, room)).versions.map(({ id, data }) => ({ id, data })))
+    .toEqual(original.versions.map(({ id, data }) => ({ id, data })))
+})
+
+test('interaction analysis visualizes and inspects user, flow, viewport and version activity', async ({ page }) => {
+  const room = await openRoom(page)
+  const initialState = await state(page, room)
+  const alice = { id: 'alice', name: 'Alice', color: '#123456' }
+  const bob = { id: 'bob', name: 'Bob', color: '#654321' }
+  const event = (id, actor, action, time, extra = {}) => ({
+    id, actor, action, category: 'input', method: 'mouse', inputTime: time, changeTime: time, ...extra,
+  })
+  const log = { format: 'canopy-interaction-log', version: 1, room, initialState,
+    initialViewport: { zoom: 1, panX: 0, panY: 0 }, events: [
+      event('1', alice, 'Graph zoom', 1000, { category: 'viewport', viewport: { zoom: 1, panX: 0, panY: 0 } }),
+      event('2', alice, 'Ping', 2000, { parameters: { versionId: 'v0' } }),
+      event('3', bob, 'Ping', 2500),
+      event('4', alice, 'Navigate', 3000, { category: 'selection', selection: { versionId: 'v0', nodeIds: [] } }),
+      event('5', alice, 'Redo', 5000),
+    ] }
+  await page.getByRole('button', { name: 'Settings' }).click()
+  const chooser = page.waitForEvent('filechooser')
+  await page.getByRole('button', { name: 'Replay Interaction Log' }).click()
+  await (await chooser).setFiles({ name: 'analysis.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(log)) })
+  await expect(page.locator('.current-room-name')).toHaveText('Interaction Log Replay')
+  await page.getByRole('button', { name: 'Settings' }).click()
+  await page.getByRole('button', { name: 'Analyze Interaction Log' }).click()
+  const analysis = page.getByRole('dialog', { name: 'Interaction log analysis' })
+  await expect(analysis.getByRole('heading', { name: 'User × action matrix' })).toBeVisible()
+  await analysis.getByRole('button', { name: 'Alice: Ping, 1 events' }).click()
+  await expect(analysis).toContainText('Showing 1 events: Alice · Ping')
+  await analysis.getByRole('button', { name: /Ping → Navigate/ }).click()
+  await expect(analysis).toContainText('Showing 2 events: Ping → Navigate')
+  await analysis.getByRole('button', { name: 'Graph area 1, 1: 4.0s' }).click()
+  await expect(analysis).toContainText('Viewport area 1, 1')
+  await analysis.getByRole('button', { name: 'Version 00.00.000: 2 events' }).click()
+  await expect(analysis).toContainText('Showing 2 events: Version 00.00.000')
+  await analysis.getByRole('button', { name: 'Show all' }).click()
+  await expect(analysis.locator('.analysis-raw li')).toHaveCount(5)
+})
+
+test('new recordings combine committed sidebar actions and abstract their triggering button', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['One', 'Two', 'Three', 'Four'])
+  await contextAction(page, room, 'Two', 'Add child')
+  await fillEntries(page, ['Child'])
+  await contextAction(page, room, 'Two', 'Delete selected entry, keep children')
+  await expect.poll(async () => !!findNode(await activeData(page, room), 'Two')).toBe(false)
+  await page.getByRole('button', { name: 'Settings' }).click()
+  const download = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Export Interaction Log' }).click()
+  const buffer = await readFile(await (await download).path())
+  const log = JSON.parse(buffer.toString())
+  expect(log.events.filter((event) => event.action === 'Button: Add 4 entries')).toHaveLength(1)
+  const created = log.events.filter((event) => /Created .* · Created 4 items/.test(event.action))
+  expect(created).toHaveLength(1)
+  expect(created[0].category).toBe('state')
+  expect(created[0].parameters.meaningful).toBe(true)
+  expect(log.events.filter((event) => event.action === 'Button: Delete selected entry, keep children')).toHaveLength(1)
+  const chooser = page.waitForEvent('filechooser')
+  await page.getByRole('button', { name: 'Replay Interaction Log' }).click()
+  await (await chooser).setFiles({ name: 'recording.json', mimeType: 'application/json', buffer })
+  await expect(page.locator('.current-room-name')).toHaveText('Interaction Log Replay')
+  await page.getByRole('button', { name: 'Settings' }).click()
+  await page.getByRole('button', { name: 'Analyze Interaction Log' }).click()
+  const analysis = page.getByRole('dialog', { name: 'Interaction log analysis' })
+  await analysis.getByLabel('Abstract interactions').check()
+  await expect(analysis.locator('.analysis-raw')).not.toContainText('Button: Add 4 entries')
+  await expect(analysis.locator('.analysis-raw')).not.toContainText('Button: Delete selected entry, keep children')
+  await expect(analysis.locator('.analysis-raw')).toContainText('Create entries')
+  await expect(analysis.locator('.analysis-raw')).toContainText('Delete entries')
+  await analysis.locator('.analysis-raw').getByRole('button', { name: /Create entries/ }).first().click()
+  await expect(analysis.locator('.analysis-raw pre')).toContainText('Created 4 items')
+  await analysis.getByLabel('Abstract interactions').uncheck()
+  await expect(analysis.locator('.analysis-raw')).toContainText('Button: Add 4 entries')
+})
+
+test('analysis starts at the first event, shows numbered versions and displays three-digit steps', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['Version reference'])
+  const initialState = await state(page, room)
+  const version = initialState.versions.find((item) => item.id === initialState.activeId)
+  const label = `${String(version.number.step).padStart(2, '0')}.${String(version.number.branch).padStart(2, '0')}.${String(version.number.subbranch).padStart(3, '0')}`
+  const actor = { id: 'alice', name: 'Alice', color: '#123456' }
+  const events = Array.from({ length: 120 }, (_, index) => ({
+    id: `step-${index}`, actor, action: 'Navigate', category: 'selection', method: 'mouse',
+    inputTime: index ? 240000 + index * 1000 : 1000, changeTime: 240000 + index * 1000,
+    selection: { versionId: version.id, nodeIds: [] },
+  }))
+  const log = { format: 'canopy-interaction-log', version: 1, room, initialState,
+    initialViewport: { zoom: 1, panX: 0, panY: 0 }, events }
+  await page.getByRole('button', { name: 'Settings' }).click()
+  const chooser = page.waitForEvent('filechooser')
+  await page.getByRole('button', { name: 'Replay Interaction Log' }).click()
+  await (await chooser).setFiles({ name: 'steps.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(log)) })
+  await expect(page.locator('.current-room-name')).toHaveText('Interaction Log Replay')
+  await page.getByRole('button', { name: 'Settings' }).click()
+  await expect(page.locator('.settings-section button').first()).toHaveText('Show tagged versions')
+  const controls = page.locator('.replay-controls')
+  const controlLabels = await controls.locator('small, button').allTextContents()
+  expect(controlLabels[0]).toMatch(/^\d+ \/ 120$/)
+  expect(controlLabels.slice(1)).toEqual(['Pause', 'Skip to next step', 'Jump to beginning', 'Jump to end', 'Exit replay'])
+  await page.getByRole('button', { name: 'Analyze Interaction Log' }).click()
+  const analysis = page.getByRole('dialog', { name: 'Interaction log analysis' })
+  await expect(analysis.locator('.analysis-header')).toContainText('119s')
+  const navigation = analysis.locator('section').filter({ has: page.getByRole('heading', { name: 'Navigation and viewport' }) })
+  await expect(navigation).toContainText(`${label} (120)`)
+  await expect(navigation).not.toContainText(version.id)
+  await expect(analysis.getByRole('button', { name: `Version ${label}: 120 events` })).toBeVisible()
+  await expect(analysis.locator('.analysis-version-map')).not.toContainText(version.id)
+  const last = analysis.locator('.analysis-raw li').last()
+  await last.scrollIntoViewIfNeeded()
+  await expect(last.locator('.analysis-step')).toHaveText('120.')
+  const inspector = analysis.locator('section').filter({ has: page.getByRole('heading', { name: 'Inspect interactions' }) })
+  const contributions = analysis.locator('section').filter({ has: page.getByRole('heading', { name: 'User contributions' }) })
+  const [navigationBox, inspectorBox, contributionsBox] = await Promise.all([navigation.boundingBox(), inspector.boundingBox(), contributions.boundingBox()])
+  expect(inspectorBox.y).toBe(navigationBox.y)
+  expect(inspectorBox.x).toBeGreaterThan(navigationBox.x)
+  expect(inspectorBox.y).toBeGreaterThan(contributionsBox.y)
+})
+
+test('replay pause, speed, and cursor interpolation follow recorded time', async ({ page }) => {
+  const room = await openRoom(page)
+  const initialState = await state(page, room)
+  const actor = { id: 'recorded-user', name: 'Recorded user', color: '#0075b8' }
+  const log = { format: 'canopy-interaction-log', version: 1, room, initialState,
+    initialViewport: { zoom: 1, panX: 0, panY: 0 }, events: [
+      { id: 'first', actor, action: 'Start', category: 'input', method: 'mouse',
+        inputTime: 1000, changeTime: 1000, cursor: { x: 100, y: 120 } },
+      { id: 'second', actor, action: 'Zoom', category: 'viewport', method: 'mouse',
+        inputTime: 3000, changeTime: 3000, cursor: { x: 300, y: 120 },
+        viewport: { zoom: 1.5, panX: 20, panY: 30 } },
+    ] }
+  await page.getByRole('button', { name: 'Settings' }).click()
+  const chooser = page.waitForEvent('filechooser')
+  await page.getByRole('button', { name: 'Replay Interaction Log' }).click()
+  await (await chooser).setFiles({ name: 'timed.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(log)) })
+  await expect(page.locator('.current-room-name')).toHaveText('Interaction Log Replay')
+  await page.getByRole('button', { name: 'Settings' }).click()
+  await page.getByRole('button', { name: 'Pause', exact: true }).click()
+  await expect(page.locator('.replay-controls small')).toHaveText('1 / 2')
+  const paused = await page.locator('.replay-cursor').getAttribute('style')
+  await page.waitForTimeout(300)
+  expect(await page.locator('.replay-cursor').getAttribute('style')).toBe(paused)
+  await page.getByLabel('Playback speed').selectOption('4')
+  await page.getByRole('button', { name: 'Play', exact: true }).click()
+  await expect.poll(async () => Number.parseFloat(await page.locator('.replay-cursor').evaluate((element) => element.style.left)))
+    .toBeGreaterThan(110)
+  await expect.poll(() => page.locator('.replay-controls small').textContent()).toBe('2 / 2')
+  await expect(page.locator('.graph-world')).toHaveAttribute('style', /translate\(20px, 30px\) scale\(1.5\)/)
+})
+
+test('skip to next step crosses idle gaps without changing playback or pause timing', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['Existing baseline'])
+  const initialState = await state(page, room)
+  const actor = { id: 'recorded-user', name: 'Recorded user', color: '#0075b8' }
+  const event = (id, time, extra = {}) => ({ id, actor, action: id, category: 'input', method: 'mouse',
+    inputTime: time, changeTime: time, ...extra })
+  const log = { format: 'canopy-interaction-log', version: 1, room, initialState,
+    initialViewport: { zoom: 1, panX: 0, panY: 0 }, events: [
+      event('one', 1000), event('two', 1001), event('three', 1002),
+      event('four', 355000, { category: 'viewport', viewport: { zoom: 1.5, panX: 20, panY: 30 }, cursor: { x: 120, y: 120 } }),
+      event('five', 365000), event('six', 375000),
+    ] }
+  await page.getByRole('button', { name: 'Settings' }).click()
+  const chooser = page.waitForEvent('filechooser')
+  await page.getByRole('button', { name: 'Replay Interaction Log' }).click()
+  await (await chooser).setFiles({ name: 'idle.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(log)) })
+  await expect(page.locator('.current-room-name')).toHaveText('Interaction Log Replay')
+  await page.getByRole('button', { name: 'Settings' }).click()
+  const counter = page.locator('.replay-controls small')
+  await expect(counter).toHaveText('3 / 6')
+  await page.getByRole('button', { name: 'Skip to next step' }).click()
+  await expect(counter).toHaveText('4 / 6')
+  await expect(page.locator('.graph-world')).toHaveAttribute('style', /translate\(20px, 30px\) scale\(1.5\)/)
+  await expect(page.locator('.replay-cursor')).toHaveCSS('left', '120px')
+  await expect(page.locator('.replay-cursor')).toHaveCSS('top', '120px')
+  await expect(page.getByRole('button', { name: 'Pause', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Pause', exact: true }).click()
+  await page.getByRole('button', { name: 'Skip to next step' }).click()
+  await expect(counter).toHaveText('5 / 6')
+  await expect(page.getByRole('button', { name: 'Play', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Play', exact: true }).click()
+  await page.waitForTimeout(300)
+  await expect(counter).toHaveText('5 / 6')
+  await page.getByRole('button', { name: 'Jump to beginning' }).click()
+  await expect(counter).toHaveText('0 / 6')
+  await expect.poll(async () => (await state(page, 'Interaction Log Replay')).versions.length).toBe(1)
+  await page.getByRole('button', { name: 'Skip to next step' }).click()
+  await expect(counter).toHaveText('1 / 6')
+  await expect.poll(async () => (await state(page, 'Interaction Log Replay')).versions.length).toBe(initialState.versions.length)
+  await expect(page.getByRole('button', { name: 'Play', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Skip to next step' }).click()
+  await expect(counter).toHaveText('2 / 6')
+  await page.getByRole('button', { name: 'Jump to end' }).click()
+  await expect(page.getByRole('button', { name: 'Skip to next step' })).toBeDisabled()
+})
+
+test('interaction exports remain isolated across room switches and recreation', async ({ page }) => {
+  const first = await openRoom(page)
+  const second = `test-${randomUUID()}`
+  const exportLog = async () => {
+    await page.getByRole('button', { name: 'Settings' }).click()
+    const download = page.waitForEvent('download')
+    await page.getByRole('button', { name: 'Export Interaction Log' }).click()
+    return JSON.parse((await readFile(await (await download).path())).toString())
+  }
+  await addEntries(page, ['First room entry'])
+  await page.getByRole('button', { name: 'Change Room', exact: true }).click()
+  await page.getByLabel('Create a new empty room').fill(second)
+  await page.getByRole('button', { name: 'Create room', exact: true }).click()
+  await expect(page.locator('.current-room-name')).toHaveText(second)
+  await expect(page.getByRole('status').first()).toHaveText('Hosting')
+  await addEntries(page, ['Second room entry'])
+  const secondLog = await exportLog()
+  expect(secondLog.room).toBe(second)
+  expect(JSON.stringify(secondLog)).toContain('Second room entry')
+  expect(JSON.stringify(secondLog)).not.toContain('First room entry')
+  await page.getByRole('button', { name: 'Settings' }).click()
+  await page.getByRole('button', { name: 'Change Room', exact: true }).click()
+  await page.getByRole('button', { name: first, exact: true }).click()
+  await expect(page.locator('.current-room-name')).toHaveText(first)
+  const firstLog = await exportLog()
+  expect(firstLog.room).toBe(first)
+  expect(JSON.stringify(firstLog)).toContain('First room entry')
+  expect(JSON.stringify(firstLog)).not.toContain('Second room entry')
+  await page.getByRole('button', { name: 'Settings' }).click()
+  await page.getByRole('button', { name: 'Change Room', exact: true }).click()
+  page.once('dialog', (dialog) => dialog.accept())
+  await page.getByRole('button', { name: `Delete locally saved room ${second}` }).click()
+  await page.getByLabel('Create a new empty room').fill(second)
+  await page.getByRole('button', { name: 'Create room', exact: true }).click()
+  await expect(page.locator('.current-room-name')).toHaveText(second)
+  await expect(page.getByRole('status').first()).toHaveText('Hosting')
+  const recreatedLog = await exportLog()
+  expect(recreatedLog.room).toBe(second)
+  expect(JSON.stringify(recreatedLog)).not.toContain('Second room entry')
+  expect(JSON.stringify(recreatedLog)).not.toContain('First room entry')
+})
+
+test('export flushes and replays a pending version viewport change', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['Zoomed entry'])
+  await focusActive(page)
+  const map = page.locator('.version-card.active .mini-map')
+  await map.hover()
+  await page.keyboard.down('Shift')
+  await page.mouse.wheel(0, -180)
+  await page.keyboard.up('Shift')
+  await page.getByRole('button', { name: 'Settings' }).click()
+  const download = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Export Interaction Log' }).click()
+  const buffer = await readFile(await (await download).path())
+  const log = JSON.parse(buffer.toString())
+  expect(log.events.some((event) => event.category === 'viewport' && event.parameters?.scope === 'version' && event.patch)).toBe(true)
+  const source = await state(page, room)
+  const sourceVersion = source.versions.find((version) => version.id === source.activeId)
+  const chooser = page.waitForEvent('filechooser')
+  await page.getByRole('button', { name: 'Replay Interaction Log' }).click()
+  await (await chooser).setFiles({ name: 'viewport.json', mimeType: 'application/json', buffer })
+  await expect(page.locator('.current-room-name')).toHaveText('Interaction Log Replay')
+  await page.getByRole('button', { name: 'Settings' }).click()
+  await page.getByRole('button', { name: 'Jump to end' }).click()
+  await expect.poll(async () => (await state(page, 'Interaction Log Replay')).versions
+    .find((version) => version.id === sourceVersion.id)?.mapView).toEqual(sourceVersion.mapView)
+})
+
+test('invalid replay files leave rooms untouched and valid uploads replace the active replay room', async ({ page }) => {
+  const room = 'Interaction Log Replay'
+  await openRoom(page, room)
+  await addEntries(page, ['Keep this room'])
+  const original = await state(page, room)
+  await page.getByRole('button', { name: 'Settings' }).click()
+  let chooser = page.waitForEvent('filechooser')
+  await page.getByRole('button', { name: 'Replay Interaction Log' }).click()
+  await (await chooser).setFiles({ name: 'invalid.json', mimeType: 'application/json', buffer: Buffer.from('{}') })
+  await expect(page.getByText(/Replay failed/)).toBeVisible()
+  expect(await state(page, room)).toEqual(original)
+  const empty = { ...original, versions: original.versions.filter((version) => version.id === 'v0'), activeId: 'v0', copyLinks: [] }
+  const log = { format: 'canopy-interaction-log', version: 1, room, initialState: empty,
+    initialViewport: { zoom: 1, panX: 0, panY: 0 }, events: [1000, 21000].map((time, index) => ({
+      id: `step-${index}`, actor: { id: 'user', name: 'User', color: '#0075b8' },
+      category: 'input', method: 'mouse', action: 'Wait', inputTime: time, changeTime: time,
+    })) }
+  await page.getByRole('button', { name: 'Settings' }).click()
+  chooser = page.waitForEvent('filechooser')
+  await page.getByRole('button', { name: 'Replay Interaction Log' }).click()
+  await (await chooser).setFiles({ name: 'valid.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(log)) })
+  await expect(page.locator('.current-room-name')).toHaveText(room)
+  await expect.poll(async () => (await state(page, room)).versions.length).toBe(1)
+  await page.getByRole('button', { name: 'Settings' }).click()
+  await expect(page.getByRole('button', { name: 'Pause', exact: true })).toBeVisible()
+  chooser = page.waitForEvent('filechooser')
+  await page.getByRole('button', { name: 'Replay Interaction Log' }).click()
+  await (await chooser).setFiles({ name: 'replacement.json', mimeType: 'application/json',
+    buffer: Buffer.from(JSON.stringify({ ...log, initialState: original })) })
+  await expect(page.locator('.current-room-name')).toHaveText(room)
+  await expect.poll(async () => (await state(page, room)).versions.length).toBe(original.versions.length)
+  expect((await activeData(page, room)).some((entry) => entry.value === 'Keep this room')).toBe(true)
+  await page.getByRole('button', { name: 'Settings' }).click()
+  await page.getByRole('button', { name: 'Exit replay' }).click()
+  await expect(page.getByRole('status').first()).toHaveText('Local only')
+  const download = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Export Interaction Log' }).click()
+  const freshLog = JSON.parse((await readFile(await (await download).path())).toString())
+  expect(freshLog.initialState.versions.length).toBe(original.versions.length)
+  expect(freshLog.events.some((event) => event.action.startsWith('Created '))).toBe(false)
+})
+
+test('shared interaction logs preserve each participant and replay their edits', async ({ browser }) => {
+  const hostContext = await browser.newContext()
+  const guestContext = await browser.newContext()
+  try {
+    const host = await hostContext.newPage()
+    const guest = await guestContext.newPage()
+    const room = await openRoom(host)
+    await addEntries(host, ['Host record'])
+    await guest.goto(`/?room=${room}`)
+    await expect(guest.getByRole('status').first()).toHaveText('Connected', { timeout: 20000 })
+    await expect.poll(async () => (await state(guest, room)).versions.some((version) => findNode(version.data, 'Host record'))).toBe(true)
+    await guest.keyboard.press('ArrowRight')
+    await expect.poll(async () => (await activeData(guest, room)).some((entry) => entry.value === 'Host record')).toBe(true)
+    await addEntries(guest, ['Guest record'])
+    await expect.poll(async () => (await state(host, room)).versions.some((version) => findNode(version.data, 'Guest record'))).toBe(true)
+    await host.getByRole('button', { name: 'Settings' }).click()
+    const download = host.waitForEvent('download')
+    await host.getByRole('button', { name: 'Export Interaction Log' }).click()
+    const buffer = await readFile(await (await download).path())
+    const log = JSON.parse(buffer.toString())
+    expect(new Set(log.events.filter((event) => event.category === 'state').map((event) => event.actor.id)).size).toBe(2)
+    const chooser = host.waitForEvent('filechooser')
+    await host.getByRole('button', { name: 'Replay Interaction Log' }).click()
+    await (await chooser).setFiles({ name: 'shared.json', mimeType: 'application/json', buffer })
+    await expect(host.locator('.current-room-name')).toHaveText('Interaction Log Replay')
+    await host.getByRole('button', { name: 'Settings' }).click()
+    await host.getByRole('button', { name: 'Jump to end' }).click()
+    await expect.poll(async () => (await state(host, 'Interaction Log Replay')).versions
+      .some((version) => findNode(version.data, 'Guest record'))).toBe(true)
+    expect((await state(host, 'Interaction Log Replay')).versions
+      .some((version) => findNode(version.data, 'Host record'))).toBe(true)
+    await expect(host.locator('.collaborator-list .collaborator')).toHaveCount(2)
+  } finally {
+    await hostContext.close()
+    await guestContext.close()
+  }
 })
 
 test('rooms and imports with root entries are rejected without overwriting saved data', async ({ page }) => {
@@ -831,20 +1229,51 @@ test('comparison and merge preselect the active version and allow replacing it',
   const secondLabel = await page.locator(`.version-card[data-version="${second}"] .version-header-id`).getAttribute('title')
   const drawer = page.locator('.compare-drawer')
 
-  for (const [shortcut, label] of [['Shift+c', 'First version'], ['Shift+m', 'Source']]) {
+  for (const shortcut of ['Shift+c', 'Shift+m']) {
     await page.keyboard.press(shortcut)
-    await expect(drawer.locator('.drawer-first-version')).toContainText(`${label}: ${secondLabel}`)
+    await expect(drawer.locator('.drawer-first-version')).toContainText(`First version: ${secondLabel}`)
     await expect(page.locator(`.version-card[data-version="${second}"]`)).toHaveClass(/compared/)
     await drawer.getByRole('button', { name: `Deselect first version ${secondLabel}` }).click()
     await expect(drawer).toContainText('Select the first version, then the second.')
     await expect(page.locator(`.version-card[data-version="${second}"]`)).not.toHaveClass(/compared/)
     await page.locator(`.version-card[data-version="${first}"]`).click()
-    await expect(drawer.locator('.drawer-first-version')).toContainText(`${label}: ${firstLabel}`)
+    await expect(drawer.locator('.drawer-first-version')).toContainText(`First version: ${firstLabel}`)
     await page.locator(`.version-card[data-version="${second}"]`).click()
     await expect(drawer.locator('.comparison-content')).toBeVisible()
-    await expect(drawer.locator('.drawer-head strong')).toContainText(`${firstLabel} ${shortcut === 'Shift+m' ? '→' : '↔'} ${secondLabel}`)
+    await expect(drawer.locator('.drawer-head strong')).toContainText(shortcut === 'Shift+m'
+      ? `${secondLabel} → ${firstLabel}` : `${firstLabel} ↔ ${secondLabel}`)
     await drawer.getByRole('button', { name: 'Abort and close' }).click()
     await expect(drawer).toHaveCount(0)
+  }
+})
+
+test('merge dialog and committed history put the higher step into the lower step in either selection order', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['First'])
+  const low = (await state(page, room)).activeId
+  await addEntries(page, ['Second'])
+  const high = (await state(page, room)).activeId
+  await page.keyboard.press('4')
+  const lowLabel = await page.locator(`.version-card[data-version="${low}"] .version-header-id`).getAttribute('title')
+  const highLabel = await page.locator(`.version-card[data-version="${high}"] .version-header-id`).getAttribute('title')
+  for (const [first, second] of [[low, high], [high, low]]) {
+    await page.keyboard.press('4')
+    await page.locator(`.version-card[data-version="${first}"]`).click()
+    await page.keyboard.press('Shift+m')
+    await page.locator(`.version-card[data-version="${second}"]`).click()
+    const dialog = page.getByRole('dialog', { name: 'Branch merge' })
+    await expect(dialog.locator('.drawer-head strong')).toHaveText(`${highLabel} → ${lowLabel}`)
+    await expect(dialog.locator('.merge-list-head')).toContainText(`${highLabel} source`)
+    await expect(dialog.locator('.merge-list-head')).toContainText(`${lowLabel} target`)
+    const previousCount = (await state(page, room)).versions.length
+    await dialog.getByRole('button', { name: 'Confirm merge' }).click()
+    await expect(dialog).toHaveCount(0)
+    await expect.poll(async () => (await state(page, room)).versions.length).toBe(previousCount + 1)
+    const saved = await state(page, room)
+    const merge = saved.versions.find((item) => item.id === saved.activeId)
+    expect(merge.parentId).toBe(low)
+    expect(merge.mergeSourceId).toBe(high)
+    expect(merge.change).toBe(`Merge ${highLabel} into ${lowLabel}`)
   }
 })
 
@@ -952,6 +1381,14 @@ test('branching, comparison and merge result controls update the graph', async (
   await expect.poll(async () => (await state(page, room)).activeId).toBe(merge.parentId)
   await page.keyboard.press('Control+y')
   await expect.poll(async () => (await state(page, room)).versions.find((version) => version.id === merge.id)?.mergeSourceId).toBe(merge.mergeSourceId)
+  await page.getByRole('button', { name: 'Settings' }).click()
+  const download = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Export Interaction Log' }).click()
+  const log = JSON.parse((await readFile(await (await download).path())).toString())
+  expect(log.events.filter((event) => event.action === 'Button: Confirm merge')).toHaveLength(1)
+  const merged = log.events.filter((event) => event.action.startsWith('Merged '))
+  expect(merged).toHaveLength(1)
+  expect(merged[0].category).toBe('state')
 })
 
 test('curved branch and merge connectors render above straight connectors and terminal arrows', async ({ page }) => {
@@ -1853,27 +2290,90 @@ test('collapsed sidebar retains room, user and interaction navigation', async ({
   const room = await openRoom(page)
   await addEntries(page, ['Compact log entry'])
   const version = (await state(page, room)).activeId
+  const userColor = await page.locator('.interaction-user').first().evaluate((element) => getComputedStyle(element).color)
   await page.getByRole('button', { name: 'Collapse sidebar', exact: true }).click()
   const sidebar = page.locator('.sidebar')
   await expect(sidebar.getByRole('button', { name: 'Change Room', exact: true })).toBeVisible()
   await expect(sidebar.getByRole('button', { name: /Focus .+ \(you\)/ })).toBeVisible()
   const interaction = sidebar.locator('.compact-interaction').first()
   await expect(interaction).toBeEnabled()
-  const savedLog = await page.evaluate((name) =>
-    JSON.parse(localStorage.getItem(`canopy-interactions-${encodeURIComponent(name)}`)), room)
-  expect(await interaction.evaluate((element) => getComputedStyle(element).color)).toBe(
-    await page.evaluate((color) => {
-      const element = document.createElement('span')
-      element.style.color = color
-      document.body.appendChild(element)
-      const value = getComputedStyle(element).color
-      element.remove()
-      return value
-    }, savedLog.at(-1).actorColor))
+  expect(await interaction.evaluate((element) => getComputedStyle(element).color)).toBe(userColor)
+  expect(await page.evaluate((name) => JSON.parse(localStorage.getItem(`canopy-interactions-${encodeURIComponent(name)}`))
+    .some((entry) => entry.action.includes('Compact log entry')), room)).toBe(true)
   await interaction.click()
   await expectCentered(page, version)
   await sidebar.getByRole('button', { name: 'Change Room', exact: true }).click()
   await expect(page.getByRole('dialog', { name: /room/i })).toBeVisible()
+})
+
+test('recent interactions persist per room across reloads', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['Room action'])
+  await expect(page.locator('.interaction-section')).toContainText('Room action')
+  const otherRoom = `test-${randomUUID()}`
+  await page.getByRole('button', { name: 'Change Room', exact: true }).click()
+  await page.getByLabel('Create a new empty room').fill(otherRoom)
+  await page.getByRole('button', { name: 'Create room', exact: true }).click()
+  await expect(page.locator('.current-room-name')).toHaveText(otherRoom)
+  await expect(page.locator('.interaction-action')).not.toContainText('Room action')
+  await page.getByRole('button', { name: 'Change Room', exact: true }).click()
+  await page.getByRole('button', { name: room, exact: true }).click()
+  await expect(page.locator('.interaction-section')).toContainText('Room action')
+  expect(await page.evaluate((name) => JSON.parse(localStorage.getItem(`canopy-interactions-${encodeURIComponent(name)}`))
+    .some((entry) => entry.action.includes('Room action')), room)).toBe(true)
+  await page.reload()
+  await expect(page.locator('.interaction-section')).toContainText('Room action')
+  expect((await activeData(page, room)).some((entry) => entry.value === 'Room action')).toBe(true)
+})
+
+test('sidebar restores and stores only the ten most recent interactions', async ({ page }) => {
+  const room = `test-${randomUUID()}`
+  await page.addInitScript((name) => {
+    const key = `canopy-interactions-${encodeURIComponent(name)}`
+    if (localStorage.getItem(key)) return
+    const entries = Array.from({ length: 12 }, (_, index) => ({
+      id: `entry-${index}`, actorId: 'actor', actorName: 'User', action: `Action ${index}`,
+      createdAt: index, versionId: 'v0',
+    }))
+    localStorage.setItem(key, JSON.stringify(entries))
+  }, room)
+  await openRoom(page, room)
+  await expect(page.locator('.interaction-list li')).toHaveCount(10)
+  await expect(page.locator('.interaction-list li').first()).toContainText('Joined room')
+  await expect(page.locator('.interaction-list li').last()).toContainText('Action 3')
+  const saved = await page.evaluate((name) => JSON.parse(localStorage.getItem(`canopy-interactions-${encodeURIComponent(name)}`)), room)
+  expect(saved).toHaveLength(10)
+  expect(saved.map((entry) => entry.action)).toEqual([...Array.from({ length: 9 }, (_, index) => `Action ${index + 3}`), 'Joined room'])
+  await addEntries(page, ['New action'])
+  const updated = await page.evaluate((name) => JSON.parse(localStorage.getItem(`canopy-interactions-${encodeURIComponent(name)}`)), room)
+  expect(updated).toHaveLength(10)
+  expect(updated[0].action).toBe('Action 4')
+  expect(updated.at(-1).action).toContain('New action')
+  await page.reload()
+  await expect(page.locator('.interaction-list li')).toHaveCount(10)
+  await expect(page.locator('.interaction-list')).toContainText('New action')
+})
+
+test('sidebar restores recent actions in a new browser session', async ({ browser }) => {
+  const first = await browser.newContext()
+  let reopened
+  try {
+    const page = await first.newPage()
+    const room = await openRoom(page)
+    await addEntries(page, ['Persisted action'])
+    const versionId = (await state(page, room)).activeId
+    const storageState = await first.storageState()
+    await first.close()
+    reopened = await browser.newContext({ storageState })
+    const nextPage = await reopened.newPage()
+    await openRoom(nextPage, room)
+    await expect(nextPage.locator('.interaction-section')).toContainText('Persisted action')
+    await nextPage.locator('.interaction-section .interaction-reference').last().click()
+    await expectCentered(nextPage, versionId)
+  } finally {
+    await first.close()
+    if (reopened) await reopened.close()
+  }
 })
 
 test('branching setting prevents edits from non-tip versions and persists', async ({ page }) => {
@@ -2285,7 +2785,7 @@ test('local editing shortcuts and version merge use their assigned scopes', asyn
   await expect(page.locator('.operation-editor')).toContainText('MERGE ENTRIES')
   await page.getByRole('button', { name: 'Cancel', exact: true }).click()
   await page.keyboard.press('Shift+m')
-  await expect(page.locator('.compare-drawer')).toContainText('Choose source')
+  await expect(page.locator('.compare-drawer')).toContainText('Choose two versions')
   await page.keyboard.press('Escape')
   await page.keyboard.press('c')
   await expect(page.locator('.compare-drawer')).toHaveCount(0)
@@ -2755,6 +3255,43 @@ test('root covers the visible graph and keeps its label vertically centered whil
   await checkRoot()
 })
 
+test('root label remains inside the box at maximum zoom near either edge', async ({ page }) => {
+  await openRoom(page)
+  const root = page.locator('.root-version')
+  const canvas = page.locator('.graph-canvas')
+  const label = root.locator('.root-overview-label')
+  for (const edge of ['left', 'right']) {
+    await page.keyboard.press('1')
+    await page.waitForTimeout(500)
+    const rootBounds = await root.boundingBox()
+    const canvasBounds = await canvas.boundingBox()
+    const centerX = canvasBounds.x + canvasBounds.width / 2
+    const edgeX = edge === 'left' ? rootBounds.x : rootBounds.x + rootBounds.width
+    const desiredEdge = centerX + (edge === 'left' ? -100 : 100)
+    const y = canvasBounds.y + canvasBounds.height * 0.3
+    await page.mouse.move(centerX, y)
+    await page.mouse.down()
+    await page.mouse.move(centerX + desiredEdge - edgeX, y, { steps: 6 })
+    await page.mouse.up()
+    await page.mouse.move(centerX, y)
+    await page.mouse.wheel(0, -3000)
+    await expect(page.locator('.graph-world')).toHaveAttribute('style', /scale\(4\)/)
+    const result = await root.evaluate((element) => {
+      const box = element.getBoundingClientRect()
+      const content = element.querySelector('.root-overview-label')
+      const text = content.getBoundingClientRect()
+      const viewport = element.closest('.graph-canvas').getBoundingClientRect()
+      return { left: box.left, right: box.right, labelLeft: text.left, labelRight: text.right,
+        viewportLeft: viewport.left, viewportRight: viewport.right, overflow: getComputedStyle(content).overflow }
+    })
+    expect(result[edge]).toBeGreaterThan(result.viewportLeft)
+    expect(result[edge]).toBeLessThan(result.viewportRight)
+    expect(result.labelLeft).toBeGreaterThanOrEqual(result.left - 1)
+    expect(result.labelRight).toBeLessThanOrEqual(result.right + 1)
+    expect(result.overflow).toBe('hidden')
+  }
+})
+
 test('dense lane controls follow visible lane bounds and colors without extra columns', async ({ page }) => {
   const room = `test-${randomUUID()}`
   const versions = [{ id: 'v0', parentId: null, step: 0, lane: 0, branch: 'ROOT', change: 'Empty structure', data: [], createdAt: 0 }]
@@ -3147,6 +3684,20 @@ test('simultaneous peer edits keep distinct stable version numbers', async ({ br
     const displayed = await labelsByVersion(host)
     const pair = childLabels.map((id) => displayed[id]).sort()
     expect(pair[1]).toBe(`${pair[0]}.1`)
+    await host.getByRole('button', { name: 'Settings' }).click()
+    const download = host.waitForEvent('download')
+    await host.getByRole('button', { name: 'Export Interaction Log' }).click()
+    const buffer = await readFile(await (await download).path())
+    const chooser = host.waitForEvent('filechooser')
+    await host.getByRole('button', { name: 'Replay Interaction Log' }).click()
+    await (await chooser).setFiles({ name: 'concurrent.json', mimeType: 'application/json', buffer })
+    await expect(host.locator('.current-room-name')).toHaveText('Interaction Log Replay')
+    await host.getByRole('button', { name: 'Settings' }).click()
+    await host.getByRole('button', { name: 'Jump to end' }).click()
+    await expect.poll(async () => (await state(host, 'Interaction Log Replay')).versions.filter((item) => item.parentId === parent).length).toBe(2)
+    const replayChildren = (await state(host, 'Interaction Log Replay')).versions.filter((item) => item.parentId === parent)
+    expect(replayChildren.map((item) => [item.id, item.lane, item.numberSuffix]).sort())
+      .toEqual(hostChildren.map((item) => [item.id, item.lane, item.numberSuffix]).sort())
   } finally {
     await Promise.all(contexts.map((context) => context.close()))
   }
@@ -3195,6 +3746,18 @@ test('simultaneous edits to one version converge and persist', async ({ browser 
     await guest.reload()
     await expect(guest.getByRole('status').first()).toHaveText('Connected', { timeout: 20000 })
     await expect.poll(() => tag(guest)).toEqual(winner)
+    await host.getByRole('button', { name: 'Settings' }).click()
+    const download = host.waitForEvent('download')
+    await host.getByRole('button', { name: 'Export Interaction Log' }).click()
+    const buffer = await readFile(await (await download).path())
+    const chooser = host.waitForEvent('filechooser')
+    await host.getByRole('button', { name: 'Replay Interaction Log' }).click()
+    await (await chooser).setFiles({ name: 'conflict.json', mimeType: 'application/json', buffer })
+    await expect(host.locator('.current-room-name')).toHaveText('Interaction Log Replay')
+    await host.getByRole('button', { name: 'Settings' }).click()
+    await host.getByRole('button', { name: 'Jump to end' }).click()
+    await expect.poll(async () => (await state(host, 'Interaction Log Replay')).versions.find((version) => version.id === id)?.tag)
+      .toEqual(winner)
   } finally {
     await Promise.all(contexts.map((context) => context.close()))
   }

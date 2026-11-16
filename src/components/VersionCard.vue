@@ -10,7 +10,7 @@ import { outOfViewDirections, overlappingTreemapIds, type MapDirection } from '.
 
 const props = defineProps<{ version: Version; model: VersionCardModel }>()
 const { menu: MoreHorizontal, tag: TagIcon } = actionIcons
-const { active, compareIds, compareMode, zoom, overNode, hoveredNode, selectedNodes, draggedSubtreeIds, draggedOriginalTile, selectionBox, clientId, colorForUser, isReadOnly, versionTiles, duplicateValueLinks, displayCardPosition, cardWidth, cardHeight, rootLabelOffset, rootLabelX, versionAuthorColor, activeUsersFor, descendantsCount, isPreviewing, previewLabel, versionAction, cardData, mapViewport, cardMapView, mapTransform, changedEntries, tileSelectionColor, dragOverlayTiles, handleVersionClick, handleVersionDoubleClick, onVersionContext, onVersionMenu, startMapPan, zoomMap, startMapTileGesture, enterTile, moveTileTooltip, leaveTile, onTileClick, onTileDoubleClick, onTileContext } = toRefs(props.model)
+const { active, compareIds, compareMode, zoom, overNode, hoveredNode, selectedNodes, draggedSubtreeIds, draggedOriginalTile, selectionBox, clientId, colorForUser, isReadOnly, versionTiles, duplicateValueLinks, displayCardPosition, cardWidth, cardHeight, rootLabelOffset, rootLabelX, rootLabelWidth, versionAuthorColor, activeUsersFor, descendantsCount, isPreviewing, previewLabel, versionAction, cardData, mapViewport, cardMapView, mapTransform, changedEntries, tileSelectionColor, dragOverlayTiles, handleVersionClick, handleVersionDoubleClick, onVersionContext, onVersionMenu, startMapPan, zoomMap, startMapTileGesture, enterTile, moveTileTooltip, leaveTile, onTileClick, onTileDoubleClick, onTileContext } = toRefs(props.model)
 const overlayTiles = computed(() => dragOverlayTiles.value(props.version))
 const overviewHover = ref(false)
 const previewPosition = ref({ left: 0, top: 0 })
@@ -88,7 +88,7 @@ const dropTarget = computed(() => props.version.id === active.value.id
     <div v-if="isReadOnly || version.id === 'v0'" class="overview-map"
       @pointerdown="version.id === 'v0' && !isReadOnly && startMapPan($event, version)"
       @wheel="version.id === 'v0' && !isReadOnly && zoomMap($event, version)">
-      <div class="overview-content" :class="{ 'root-overview-label': version.id === 'v0' }" :style="version.id === 'v0' ? { top: `${rootLabelOffset()}px`, left: `${rootLabelX()}px` } : undefined">
+      <div class="overview-content" :class="{ 'root-overview-label': version.id === 'v0' }" :style="version.id === 'v0' ? { top: `${rootLabelOffset()}px`, left: `${rootLabelX()}px`, width: `${rootLabelWidth()}px` } : undefined">
         <div class="overview-action" :class="{ 'has-tag': version.tag }">
           <span class="overview-action-symbol">{{ versionAction(version).symbol }}</span>
           <strong class="overview-action-detail">{{ displayVersionChange(version) || versionAction(version).label }}</strong>

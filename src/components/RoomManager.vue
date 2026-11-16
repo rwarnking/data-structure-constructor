@@ -42,7 +42,7 @@ function joinRoom() {
         <span id="room-manager-title" class="section-label">CHANGE ROOM</span>
         <button type="button" class="quiet-icon" title="Close" @click="emit('close')"><X :size="17" /></button>
       </div>
-      <p class="operation-note">Each room keeps its own branches, versions, entries, and interaction log on this device.</p>
+      <p class="operation-note">Each room keeps its own branches, versions, entries, and ten recent interactions on this device.</p>
       <div class="local-room-list">
         <div v-for="room in localRooms" :key="room" class="local-room-row">
           <button type="button" class="local-room-select" :disabled="room === currentRoomName"

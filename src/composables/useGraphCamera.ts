@@ -48,10 +48,19 @@ export function useGraphCamera(options: {
   function rootLabelOffset() {
     return (canvasSize.value.height / 2 - pan.value.y) / zoom.value - cardPosition(versionsById.value.get('v0')!).y
   }
+  function rootVisibleBounds() {
+    return {
+      left: Math.max(0, -pan.value.x / zoom.value),
+      right: Math.min(windowDimensions.value.width, (canvasSize.value.width - pan.value.x) / zoom.value),
+    }
+  }
   function rootLabelX() {
-    const left = Math.max(0, -pan.value.x / zoom.value)
-    const right = Math.min(windowDimensions.value.width, (canvasSize.value.width - pan.value.x) / zoom.value)
+    const { left, right } = rootVisibleBounds()
     return left < right ? (left + right) / 2 : windowDimensions.value.width / 2
+  }
+  function rootLabelWidth() {
+    const { left, right } = rootVisibleBounds()
+    return Math.max(0, Math.min(340, right - left - 4))
   }
   function displayCardPosition(version: Version) {
     const arrival = versionArrival.value
@@ -361,7 +370,7 @@ export function useGraphCamera(options: {
     if (versionArrivalFrame) cancelAnimationFrame(versionArrivalFrame)
   }
 
-  return { focusedVersionId, versionArrival, cardPosition, cardWidth, cardHeight, rootLabelOffset, rootLabelX, displayCardPosition, startVersionArrival, graphBounds,
+  return { focusedVersionId, versionArrival, cardPosition, cardWidth, cardHeight, rootLabelOffset, rootLabelX, rootLabelWidth, displayCardPosition, startVersionArrival, graphBounds,
     visibleVersions, visibleConnectionVersions, visibleMergeConnectionVersions, intersectsViewport, zoomAt, stepPreset, fitGraph, fitHeight, focusNeighborhood,
     startCanvasPan, moveCanvasPan, endCanvasPan, onWheel, focusVersion, focusActive, animateCamera,
     isVersionCentered, panToVersion, stopGraphAnimations }

@@ -21,6 +21,7 @@ export type VersionCardModel = {
   cardHeight: (version: Version) => number
   rootLabelOffset: () => number
   rootLabelX: () => number
+  rootLabelWidth: () => number
   versionAuthorColor: (version: Version) => string
   activeUsersFor: (id: string) => { id: string; color: string }[]
   descendantsCount: (nodes: TreeNode[]) => number

@@ -204,7 +204,8 @@ export function useVersionHistory(options: {
     }
     const sourceIsLatest = isLatestOnBranch(versions.value, result.source)
     const targetIsLatest = isLatestOnBranch(versions.value, result.target)
-    const laneParent = targetIsLatest ? result.target : sourceIsLatest ? result.source : result.target
+    const differentSteps = result.source.step !== result.target.step
+    const laneParent = differentSteps || targetIsLatest ? result.target : sourceIsLatest ? result.source : result.target
     const mergeSource = laneParent.id === result.source.id ? result.target : result.source
     const parentPosition = cardPosition(laneParent)
     const arrivalFrom = {
@@ -212,7 +213,7 @@ export function useVersionHistory(options: {
       y: parentPosition.y + (cardHeight(laneParent) - windowDimensions.value.height) / 2,
     }
     const nextVersionNumber = state.value.nextVersion++
-    const needsMergeLane = !sourceIsLatest && !targetIsLatest
+    const needsMergeLane = differentSteps ? !targetIsLatest : !sourceIsLatest && !targetIsLatest
     const branch = needsMergeLane ? `${result.target.branch}.M${nextVersionNumber}` : laneParent.branch
     const version: Version = {
       id: `v${nextVersionNumber}-${CLIENT_ID}-${crypto.randomUUID().replace(/-/g, '')}`,

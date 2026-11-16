@@ -8,6 +8,11 @@ export function isRevision(value: unknown): value is Revision {
     && typeof revision.actor === 'string' && revision.actor.length > 0
 }
 
+export function revisionIsNewer(candidate: Revision | undefined, current: Revision | undefined) {
+  return !!candidate && (!current || candidate.clock > current.clock
+    || (candidate.clock === current.clock && candidate.actor.localeCompare(current.actor) > 0))
+}
+
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
 }

@@ -86,8 +86,10 @@ function clickedEntry(event: MouseEvent) { if (event.button === 0 && !event.shif
       <div>
         <span class="section-label">{{ mergeMode ? 'BRANCH MERGE' : 'VERSION COMPARISON' }}</span>
         <strong>{{ compareIds.length === 2
-          ? `${versionLabel(compareIds[0]!)} ${mergeMode ? '→' : '↔'} ${versionLabel(compareIds[1]!)}`
-          : mergeMode ? 'Choose source, then target' : 'Choose two versions' }}</strong>
+          ? mergeMode && mergeResult
+            ? `${displayVersionId(mergeResult.source)} → ${displayVersionId(mergeResult.target)}`
+            : `${versionLabel(compareIds[0]!)} ↔ ${versionLabel(compareIds[1]!)}`
+          : 'Choose two versions' }}</strong>
         </div>
       <div v-if="compareIds.length === 2 && !mergeMode" class="compare-summary">
         <span class="compare-count">{{ differentEntryCount }}</span>
@@ -238,7 +240,7 @@ function clickedEntry(event: MouseEvent) { if (event.button === 0 && !event.shif
       <div>
         <span>{{ compareIds.length ? 'Select the second version.' : 'Select the first version, then the second.' }}</span>
         <div v-if="compareIds[0]" class="drawer-first-version">
-          <span>{{ mergeMode ? 'Source' : 'First version' }}: <strong>{{ versionLabel(compareIds[0]) }}</strong></span>
+          <span>First version: <strong>{{ versionLabel(compareIds[0]) }}</strong></span>
           <button type="button" class="quiet-icon" :aria-label="`Deselect first version ${versionLabel(compareIds[0])}`"
             title="Deselect first version" @click="chooseCompare(compareIds[0])"><X :size="14" /></button>
         </div>

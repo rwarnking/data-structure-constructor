@@ -10,6 +10,9 @@ import { useTreeDrag } from '../composables/useTreeDrag'
 import { useHierarchyEditor } from '../composables/useHierarchyEditor'
 import { useVersionHistory } from '../composables/useVersionHistory'
 import { useSounds } from '../composables/useSounds'
+import { useInteractionRecorder } from '../composables/useInteractionRecorder'
+import { useInteractionReplay } from '../composables/useInteractionReplay'
+import { applyInteractionPatch, newInteractionRevisions, parseInteractionLog, type InteractionEvent } from '../utils/interactionLog'
 import { createRoomStorage, LAST_ROOM_KEY } from '../services/roomStorage'
 import { parseDataset, type Dataset } from '../services/dataset'
 import VersionComparison from '../components/VersionComparison.vue'
@@ -25,6 +28,7 @@ import RoomManager from '../components/RoomManager.vue'
 import VersionSearch from '../components/VersionSearch.vue'
 import VersionTags from '../components/VersionTags.vue'
 import StoryGuide from '../components/StoryGuide.vue'
+import InteractionAnalysis from '../components/InteractionAnalysis.vue'
 import tutorial from '../content/tutorial.json'
 import type { CopyLink, StoredState, Tile, TreeNode, Version, VersionTag } from '../types/workspace'
 import { countNodes, findNode, findParent, flattenNodes, removeNode } from '../utils/tree'
@@ -151,6 +155,7 @@ let presenceTimer = 0
 let pingClickTimer = 0
 let tileTooltipTimer = 0
 let tilePointer = { x: 0, y: 0 }
+let leaveRecorded = false
 
 watch([compareMode, mergeMode], () => {
   window.clearTimeout(versionClickTimer)
@@ -159,7 +164,7 @@ watch([compareMode, mergeMode], () => {
 
 const graphCamera = useGraphCamera({ versions, active, state, compareIds, draggedVersionId: () => treeDrag.value?.versionId,
   zoom, pan, canvasSize, windowDimensions, suppressClicks: suppressGraphClicks })
-const { versionArrival, cardPosition, cardWidth, cardHeight, rootLabelOffset, rootLabelX, displayCardPosition, graphBounds,
+const { versionArrival, cardPosition, cardWidth, cardHeight, rootLabelOffset, rootLabelX, rootLabelWidth, displayCardPosition, graphBounds,
   visibleVersions, visibleConnectionVersions, visibleMergeConnectionVersions, fitGraph, fitHeight, focusNeighborhood,
   stepPreset,
   startCanvasPan, moveCanvasPan, endCanvasPan, onWheel, focusVersion, focusActive, animateCamera,
@@ -172,6 +177,7 @@ const { mapViewTimers, cardData, cardPositions, mapViewport, mapViewFor, zoomVer
   zoomMap, startMapPan, moveMapPan, endMapPan,
 } = treemapViews
 const selectionBox = ref<{ versionId: string; left: number; top: number; width: number; height: number } | null>(null)
+let recorder: ReturnType<typeof useInteractionRecorder> | undefined
 let boxDrag: { versionId: string; pointerId: number; x: number; y: number; map: HTMLElement; initial: string[] } | null = null
 function startMapGesture(event: PointerEvent, version: Version) {
   if ((event.ctrlKey || event.metaKey) && event.button === 0 && !isReadOnly.value) {
@@ -222,12 +228,18 @@ function endBoxSelection(event: PointerEvent, cancel = false) {
 function cancelBoxSelection(event: PointerEvent) { endBoxSelection(event, true) }
 
 const {
-  remoteUsers, pings, roomStatus, peerRoom, connectedUsers, recentInteractions, colorForUser, metadataKey,
-  interactionStorageKey, logInteraction, initializeCollaborationMetadata, sendPingAt,
+  remoteUsers, pings, roomStatus, peerRoom, connectedUsers, recentInteractions, colorForUser, userName, metadataKey,
+  addReplayInteraction, showPing,
+  logInteraction, setRoomInteractions, removeRoomInteractions, initializeCollaborationMetadata, sendPingAt,
   expireRemoteUsers, connectAutomatically, resetRoomTracking, setObservedState, finishRoomSwitch, setBranching,
 } = useCollaboration({
   clientId: CLIENT_ID, state, active, selectedNodes, currentRoomName, graphCanvas, pan, zoom,
   normalizeState, roomDataKey, reflowLayout, fitGraph, notify, playPing,
+  onLocalChanges: (before, after, delta) => recorder?.recordState(before, after, delta),
+  onLocalInteraction: (entry) => recorder?.recordAction(entry),
+  onRemoteDeparture: (entry) => recorder?.recordRemoteDeparture(entry),
+  onSessionMessage: (message) => recorder?.receive(message) ?? false,
+  onSyncRequest: (reply) => recorder?.sendLog(reply),
   followVersion: (version) => {
     const wasCentered = graphCamera.isVersionCentered(active.value)
     state.value.activeId = version.id
@@ -235,6 +247,74 @@ const {
     graphCamera.panToVersion(version, wasCentered)
   },
 })
+recorder = useInteractionRecorder({
+  state, room: currentRoomName, zoom, pan, selectedNodes,
+  actor: () => ({ id: CLIENT_ID, name: userName.value, color: colorForUser(CLIENT_ID) }),
+  send: (message) => peerRoom.send(message), notify,
+})
+const sessionRecorder = recorder
+const analysisOpen = ref(false)
+let replayRevisions = newInteractionRevisions()
+const replay = useInteractionReplay({
+  reset: () => {
+    stopGraphAnimations()
+    clearTransientMapViews()
+    remoteUsers.value = {}
+    pings.value = []
+    setRoomInteractions(currentRoomName.value, [])
+    replayRevisions = newInteractionRevisions()
+    setSelectedNodes([])
+    state.value = clone(seed)
+    zoom.value = 1
+    pan.value = { x: 40, y: 0 }
+  },
+  initialize: (log) => {
+    state.value = clone(log.initialState)
+    zoom.value = log.initialViewport.zoom
+    pan.value = { x: log.initialViewport.panX, y: log.initialViewport.panY }
+  },
+  apply: (event: InteractionEvent) => {
+    if (event.patch) {
+      state.value = applyInteractionPatch(state.value, event.patch, replayRevisions)
+      clearTransientMapViews()
+    }
+    if (event.viewport && event.parameters?.scope !== 'version') {
+      stopGraphAnimations()
+      zoom.value = event.viewport.zoom
+      pan.value = { x: event.viewport.panX, y: event.viewport.panY }
+    }
+    if (event.selection && state.value.versions.some((version) => version.id === event.selection!.versionId)) {
+      state.value.activeId = event.selection.versionId
+      setSelectedNodes(event.selection.nodeIds)
+    }
+    const previous = remoteUsers.value[event.actor.id]
+    remoteUsers.value = { ...remoteUsers.value, [event.actor.id]: {
+      name: event.actor.name, color: event.actor.color,
+      activeVersionId: event.selection?.versionId ?? event.patch?.activeId ?? previous?.activeVersionId ?? null,
+      selectedNodeIds: event.selection?.nodeIds ?? previous?.selectedNodeIds ?? [], lastSeen: Date.now(),
+    } }
+    if (event.parameters?.meaningful === true) {
+      const parameters = event.parameters
+      const ping = typeof parameters.x === 'number' && typeof parameters.y === 'number'
+        ? { x: parameters.x, y: parameters.y } : undefined
+      addReplayInteraction({ id: event.id, actorId: event.actor.id, actorName: event.actor.name,
+        actorColor: event.actor.color, action: event.action, createdAt: event.changeTime,
+        ...(typeof parameters.versionId === 'string' ? { versionId: parameters.versionId } : {}),
+        ...(typeof parameters.nodeId === 'string' ? { nodeId: parameters.nodeId } : {}),
+        ...(typeof parameters.nodeLabel === 'string' ? { nodeLabel: parameters.nodeLabel } : {}),
+        ...(ping ? { ping } : {}),
+      })
+      if (ping) showPing({ id: event.id, userId: event.actor.id, ...ping, createdAt: event.changeTime })
+      if (event.action === 'Left room') {
+        const { [event.actor.id]: _left, ...remaining } = remoteUsers.value
+        remoteUsers.value = remaining
+      }
+    }
+  },
+})
+const replayUsers = computed(() => Object.entries(remoteUsers.value).map(([id, user]) => ({
+  id, name: user.name, activeVersionId: user.activeVersionId,
+})))
 
 function canCreateFrom(version: Version) {
   return state.value.branching?.enabled !== false
@@ -411,7 +491,7 @@ function leaveTile(versionId: string, nodeId: string) {
   if (entryTooltip.value?.versionId === versionId && entryTooltip.value.nodeId === nodeId) entryTooltip.value = null
   window.clearTimeout(tileTooltipTimer)
 }
-async function activateRoom(room: string, createEmpty = false) {
+async function activateRoom(room: string, createEmpty = false, replayStartup = false) {
   const name = room.trim()
   if (!name || name.length > 80) {
     notify('Room names must contain 1–80 characters', true)
@@ -424,8 +504,17 @@ async function activateRoom(room: string, createEmpty = false) {
     notify(`Cannot open room "${name}": ${error.message}`, true)
     return
   }
+  for (const versionId of mapViewTimers.keys()) commitMapView(versionId)
+  await nextTick()
+  sessionRecorder.flushViewport()
+  recordRoomDeparture()
+  sessionRecorder.stopRoom()
+  if (!replayStartup && sessionRecorder.replaying.value) {
+    replay.close()
+    sessionRecorder.replaying.value = false
+    analysisOpen.value = false
+  }
   playSound('room')
-  peerRoom.send({ type: 'presence-leave', userId: CLIENT_ID })
   peerRoom.close()
   remoteUsers.value = {}
   clearTransientMapViews()
@@ -453,14 +542,25 @@ async function activateRoom(room: string, createEmpty = false) {
   localStorage.setItem(roomDataKey(name), JSON.stringify(state.value))
   reflowLayout()
   await nextTick(initializeMapViews)
+  if (!replayStartup) sessionRecorder.startRoom(name, createEmpty)
+  leaveRecorded = false
   roomDialogOpen.value = false
   fitGraph()
-  if (isLocalOnlyRoom(name)) roomStatus.value = { state: 'idle', peers: 1, message: 'Local only' }
+  if (isLocalOnlyRoom(name)) {
+    roomStatus.value = { state: 'idle', peers: 1, message: 'Local only' }
+    if (!replayStartup) logInteraction('Joined room')
+  }
   else await connectAutomatically(name)
 }
 
 function localOnlyRoomKey(room: string) { return `canopy-local-only-${encodeURIComponent(room)}` }
 function isLocalOnlyRoom(room: string) { return localStorage.getItem(localOnlyRoomKey(room)) === 'true' }
+function recordRoomDeparture() {
+  if (leaveRecorded || sessionRecorder.replaying.value || !sessionRecorder.current.value) return
+  leaveRecorded = true
+  logInteraction('Left room')
+  peerRoom.send({ type: 'presence-leave', userId: CLIENT_ID })
+}
 
 function exportData() {
   const dataset: Dataset = { format: 'canopy-dataset', version: 1, room: currentRoomName.value,
@@ -487,17 +587,61 @@ async function importData(file: File) {
   }
   try {
     localStorage.setItem(roomDataKey(name), JSON.stringify(dataset.state))
-    localStorage.setItem(interactionStorageKey(name), JSON.stringify(dataset.interactions))
     localStorage.setItem(localOnlyRoomKey(name), 'true')
+    if (!setRoomInteractions(name, dataset.interactions)) throw new Error('Could not save recent interactions')
   } catch (error) {
     localStorage.removeItem(roomDataKey(name))
-    localStorage.removeItem(interactionStorageKey(name))
     localStorage.removeItem(localOnlyRoomKey(name))
+    removeRoomInteractions(name)
     notify(error instanceof Error ? `Import failed: ${error.message}` : 'Import failed', true)
     return
   }
   await activateRoom(name)
   notify(`Imported into local room "${name}"`)
+}
+
+let roomBeforeReplay = ''
+async function replayInteractionLog(file: File) {
+  let log
+  try { log = parseInteractionLog(JSON.parse(await file.text()) as unknown) }
+  catch (error) {
+    notify(error instanceof Error ? `Replay failed: ${error.message}` : 'Replay failed', true)
+    return
+  }
+  if (!sessionRecorder.replaying.value) roomBeforeReplay = currentRoomName.value
+  else replay.pause()
+  const name = 'Interaction Log Replay'
+  try {
+    for (const versionId of mapViewTimers.keys()) commitMapView(versionId)
+    await nextTick()
+    sessionRecorder.flushViewport()
+    localStorage.removeItem(metadataKey(name))
+    removeRoomInteractions(name)
+    localStorage.setItem(localOnlyRoomKey(name), 'true')
+    recordRoomDeparture()
+    sessionRecorder.forgetRoom(name)
+    sessionRecorder.replaying.value = true
+    await activateRoom(name, true, true)
+    replay.load(log)
+    replay.play()
+  } catch (error) {
+    sessionRecorder.replaying.value = false
+    notify(error instanceof Error ? `Replay failed: ${error.message}` : 'Replay failed', true)
+  }
+}
+async function exportInteractionLog() {
+  for (const versionId of mapViewTimers.keys()) commitMapView(versionId)
+  await nextTick()
+  sessionRecorder.flushViewport()
+  if (!sessionRecorder.replaying.value && sessionRecorder.current.value?.room !== currentRoomName.value) {
+    notify('The interaction log for this room is not ready', true)
+    return
+  }
+  sessionRecorder.exportLog(sessionRecorder.replaying.value ? replay.log.value : sessionRecorder.current.value)
+}
+function exitReplay() {
+  if (!roomBeforeReplay) return
+  void activateRoom(roomBeforeReplay)
 }
 
 async function copySessionInvite() {
@@ -516,7 +660,8 @@ function deleteLocalRoom(room: string) {
   if (!window.confirm(`Delete room "${room}"? Its locally stored data will be removed.`)) return
   localStorage.removeItem(roomDataKey(room))
   localStorage.removeItem(metadataKey(room))
-  localStorage.removeItem(interactionStorageKey(room))
+  removeRoomInteractions(room)
+  sessionRecorder.forgetRoom(room)
   localStorage.removeItem(localOnlyRoomKey(room))
   sessionStorage.removeItem(clipboardStorageKey(room))
   localRooms.value = localRooms.value.filter((savedRoom) => savedRoom !== room)
@@ -550,8 +695,12 @@ async function initializeCurrentRoom() {
   localStorage.setItem(roomDataKey(currentRoomName.value), JSON.stringify(state.value))
   reflowLayout()
   await nextTick(initializeMapViews)
+  sessionRecorder.startRoom(currentRoomName.value)
   requestAnimationFrame(() => fitGraph())
-  if (isLocalOnlyRoom(currentRoomName.value)) roomStatus.value = { state: 'idle', peers: 1, message: 'Local only' }
+  if (isLocalOnlyRoom(currentRoomName.value)) {
+    roomStatus.value = { state: 'idle', peers: 1, message: 'Local only' }
+    logInteraction('Joined room')
+  }
   else {
     await connectAutomatically(currentRoomName.value)
     if (roomStatus.value.state === 'connected') playSound('room')
@@ -743,26 +892,29 @@ function terminalTailEnd(version: Version) {
 }
 function versionAuthorColor(version: Version) {
   const author = version.createdBy ?? version.id.match(/-([a-f0-9]{12})$/)?.[1]
-  return author ? colorForUser(author) : 'var(--theme-branch-root)'
+  return author ? displayColorForUser(author) : 'var(--theme-branch-root)'
+}
+function displayColorForUser(id: string) {
+  return sessionRecorder.replaying.value ? remoteUsers.value[id]?.color ?? colorForUser(id) : colorForUser(id)
 }
 function activeUsersFor(versionId: string) {
   const users = []
-  if (active.value.id === versionId) users.push({ id: CLIENT_ID, color: colorForUser(CLIENT_ID) })
+  if (!sessionRecorder.replaying.value && active.value.id === versionId) users.push({ id: CLIENT_ID, color: colorForUser(CLIENT_ID) })
   for (const [id, user] of Object.entries(remoteUsers.value)) {
-    if (user.activeVersionId === versionId) users.push({ id, color: colorForUser(id) })
+    if (user.activeVersionId === versionId) users.push({ id, color: displayColorForUser(id) })
   }
   return users
 }
 function tileSelectionHighlights(versionId: string, nodeId: string) {
   const highlights: { id: string; color: string }[] = []
-  if (active.value.id === versionId) {
+  if (!sessionRecorder.replaying.value && active.value.id === versionId) {
     const localIndex = selectedNodes.value.indexOf(nodeId)
     if (localIndex >= 0) highlights.push({ id: CLIENT_ID, color: localIndex > 0
       ? `color-mix(in srgb, ${colorForUser(CLIENT_ID)} 70%, white)` : colorForUser(CLIENT_ID) })
   }
   for (const [id, user] of Object.entries(remoteUsers.value)) {
     if (user.activeVersionId === versionId && user.selectedNodeIds.includes(nodeId)) {
-      highlights.push({ id, color: colorForUser(id) })
+      highlights.push({ id, color: displayColorForUser(id) })
     }
   }
   return highlights
@@ -1107,6 +1259,7 @@ function performAction(action: ShortcutAction) {
   }
 }
 function onKeydown(event: KeyboardEvent) {
+  if (sessionRecorder.replaying.value) return
   if (compareIds.value.length === 2 && event.shiftKey && event.key.toLowerCase() === 'a'
     && !event.ctrlKey && !event.metaKey && !event.altKey) return
   if (mergeMode.value && compareIds.value.length === 2) {
@@ -1135,6 +1288,7 @@ onMounted(() => {
   if (graphCanvas.value) canvasObserver.observe(graphCanvas.value)
   measureCanvas()
   window.addEventListener('resize', measureCanvas)
+  window.addEventListener('pagehide', recordRoomDeparture)
   window.addEventListener('keydown', onKeydown)
   window.addEventListener('pointermove', moveTreeDrag)
   window.addEventListener('pointermove', moveMapPan)
@@ -1144,10 +1298,13 @@ onMounted(() => {
   window.addEventListener('pointerup', endMapPan)
   window.addEventListener('pointerup', endBoxSelection)
   window.addEventListener('pointercancel', cancelBoxSelection)
-  presenceTimer = window.setInterval(expireRemoteUsers, 5000)
+  presenceTimer = window.setInterval(() => {
+    if (!sessionRecorder.replaying.value) expireRemoteUsers()
+  }, 5000)
   void initializeCurrentRoom()
 })
 onUnmounted(() => {
+  recordRoomDeparture()
   peerRoom.close()
   for (const versionId of mapViewTimers.keys()) commitMapView(versionId)
   stopGraphAnimations()
@@ -1156,6 +1313,7 @@ onUnmounted(() => {
   window.clearTimeout(tileTooltipTimer)
   canvasObserver?.disconnect()
   window.removeEventListener('resize', measureCanvas)
+  window.removeEventListener('pagehide', recordRoomDeparture)
   window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('pointermove', moveTreeDrag)
   window.removeEventListener('pointermove', moveMapPan)
@@ -1271,6 +1429,7 @@ const cardModel: VersionCardModel = reactive({
   cardHeight,
   rootLabelOffset,
   rootLabelX,
+  rootLabelWidth,
   versionAuthorColor,
   activeUsersFor,
   descendantsCount,
@@ -1298,7 +1457,7 @@ const cardModel: VersionCardModel = reactive({
   onTileDoubleClick,
   onTileContext,
   clientId: CLIENT_ID,
-  colorForUser,
+  colorForUser: displayColorForUser,
 })
 </script>
 
@@ -1316,16 +1475,22 @@ const cardModel: VersionCardModel = reactive({
     <div class="workspace" :inert="mergeMode && compareIds.length === 2">
       <WorkspaceSidebar :sidebar-collapsed="sidebarCollapsed" :dark-mode="darkMode" :current-room-name="currentRoomName"
         :volume="volume" :muted="muted" :branching-enabled="state.branching?.enabled !== false"
-        :room-status="roomStatus" :local-only="isLocalOnlyRoom(currentRoomName)" :connected-users="connectedUsers" :client-id="CLIENT_ID" :versions="versions"
-        :recent-interactions="recentInteractions" :branch-count="branchCount" :active="active" :color-for-user="colorForUser"
+        :room-status="roomStatus" :local-only="isLocalOnlyRoom(currentRoomName)" :connected-users="sessionRecorder.replaying.value ? replayUsers : connectedUsers" :client-id="CLIENT_ID" :versions="versions"
+        :recent-interactions="recentInteractions" :branch-count="branchCount" :active="active" :color-for-user="displayColorForUser"
         :active-nodes="activeNodes" :active-children="activeChildren"
+        :replay-mode="sessionRecorder.replaying.value" :replay-playing="replay.playing.value" :replay-speed="replay.speed.value"
+        :replay-index="replay.index.value" :replay-total="replay.log.value?.events.length ?? 0"
         @toggle-sidebar="sidebarCollapsed = !sidebarCollapsed" @toggle-theme="toggleTheme"
         @set-volume="changeVolume" @toggle-mute="toggleMute" @set-branching="changeBranching"
         @change-room="roomDialogOpen = true" @copy-invite="copySessionInvite" @focus-collaborator="focusCollaborator"
         @focus-ping="playSound('tick'); focusPingLocation($event)" @navigate="navigateInteraction" @focus-active="focusActive"
-        @import-data="importData" @export-data="exportData" @show-tags="tagVersionId = null; tagsOpen = true" />
+        @import-data="importData" @export-data="exportData" @show-tags="tagVersionId = null; tagsOpen = true"
+        @export-log="exportInteractionLog"
+        @replay-file="replayInteractionLog" @analyze-log="analysisOpen = true"
+        @replay-toggle="replay.playing.value ? replay.pause() : replay.play()" @replay-beginning="replay.beginning" @replay-next="replay.next"
+        @replay-end="replay.end" @replay-speed="replay.speed.value = $event" @replay-exit="exitReplay" />
 
-      <section class="canvas-region">
+      <section class="canvas-region" :inert="sessionRecorder.replaying.value">
         <div ref="graphCanvas" class="graph-canvas" :class="{ 'ping-mode': pingMode }" @wheel="onWheel" @contextmenu="onCanvasContext" @pointerdown.capture="handlePingPointer" @pointermove.capture="trackPingPointerMove" @pointerup.capture="clearPingPointer" @pointercancel.capture="clearPingPointer" @click.capture="handlePingClick" @click="onCanvasClick" @pointerdown="startCanvasPan" @pointermove="moveCanvasPan" @pointerup="endCanvasPan" @pointercancel="endCanvasPan">
           <div class="canvas-grid"></div>
           <button type="button" class="tutorial-button quiet-icon" aria-label="Open tutorial" title="Open tutorial"
@@ -1379,11 +1544,16 @@ const cardModel: VersionCardModel = reactive({
           </div>
         </div>
       </section>
-      <ActionSidebar :collapsed="actionSidebarCollapsed" :disabled="actionDisabled"
+      <ActionSidebar :inert="sessionRecorder.replaying.value" :collapsed="actionSidebarCollapsed" :disabled="actionDisabled"
         :selected="(action) => action === 'compare' ? compareMode : action === 'merge' ? mergeMode : action === 'ping' && pingMode"
         @toggle="actionSidebarCollapsed = !actionSidebarCollapsed" @action="performAction" />
     </div>
 
+    <div v-if="sessionRecorder.replaying.value" class="replay-cursors" aria-hidden="true">
+      <div v-for="(cursor, id) in replay.cursorPositions.value" :key="id" class="replay-cursor"
+        :style="{ left: `${cursor.x}px`, top: `${cursor.y}px`, '--cursor-color': cursor.color }">▲ <span>{{ cursor.name }}</span></div>
+    </div>
+    <InteractionAnalysis v-if="analysisOpen && replay.log.value" :log="replay.log.value" @close="analysisOpen = false" />
     <VersionComparison :model="comparisonModel" :versions="versions" :sidebar-collapsed="sidebarCollapsed"
       :action-sidebar-collapsed="actionSidebarCollapsed" @confirm="confirmMerge" @entry-click="playSound('entryClick')"
       @pick="playSound('entryAdded')" @omit="playSound('entryClick')" />

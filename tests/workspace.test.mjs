@@ -28,6 +28,8 @@ const { isStoredState, isVersion } = await vite.ssrLoadModule('/src/utils/valida
 const { shortcutAction, shortcuts } = await vite.ssrLoadModule('/src/config/hotkeys.ts')
 const { actionIcons, actionSymbols } = await vite.ssrLoadModule('/src/config/icons.ts')
 const { collaboratorColors } = await vite.ssrLoadModule('/src/utils/colors.ts')
+const { interactionPatch, applyInteractionPatch, newInteractionRevisions, parseInteractionLog } = await vite.ssrLoadModule('/src/utils/interactionLog.ts')
+const { analyzeInteractions, abstractInteractions, interactionVersionLabels } = await vite.ssrLoadModule('/src/utils/interactionAnalysis.ts')
 
 function node(id, children = []) {
   return { id, value: id, children }
@@ -36,6 +38,107 @@ function node(id, children = []) {
 function version(id, data, parentId = null, step = 0) {
   return { id, data, parentId, step, lane: 0, branch: id, change: id, createdAt: step }
 }
+
+test('interaction patches reproduce room changes and reject invalid replay data', () => {
+  const initial = { versions: [version('v0', [])], activeId: 'v0', nextNode: 1, nextVersion: 1, nextLane: 1, copyLinks: [] }
+  const changed = { ...initial, versions: [...initial.versions, version('v1', [node('n1')], 'v0', 1)],
+    activeId: 'v1', nextNode: 2, nextVersion: 2 }
+  const patch = interactionPatch(initial, changed)
+  assert.deepEqual(applyInteractionPatch(initial, patch), changed)
+  const log = { format: 'canopy-interaction-log', version: 1, room: 'Room', initialState: initial,
+    initialViewport: { zoom: 1, panX: 0, panY: 0 }, events: [{
+      id: 'one', actor: { id: 'user', name: 'User', color: '#123456' }, action: 'Add',
+      category: 'state', method: 'button', inputTime: 1, changeTime: 2, patch,
+    }] }
+  assert.equal(parseInteractionLog(log).events.length, 1)
+  assert.throws(() => parseInteractionLog({ ...log, events: [log.events[0], log.events[0]] }), /Invalid/)
+  assert.throws(() => parseInteractionLog({ ...log, events: [{ ...log.events[0], patch: { ...patch, removed: ['v0'] } }] }), /invalid room state/)
+})
+
+test('replay resolves concurrent version edits by collaboration revision rather than arrival order', () => {
+  const root = version('v0', [])
+  const base = version('v1', [node('n1')], 'v0', 1)
+  const initial = { versions: [root, base], activeId: 'v1', nextNode: 2, nextVersion: 2, nextLane: 1, copyLinks: [] }
+  const winner = { ...base, tag: { title: 'winner', description: '' } }
+  const loser = { ...base, tag: { title: 'loser', description: '' } }
+  const revisions = newInteractionRevisions()
+  const makePatch = (item, actor) => ({ versions: [item], removed: [], activeId: 'v1', nextNode: 2, nextVersion: 2,
+    nextLane: 1, versionRevisions: { v1: { clock: 10, actor } } })
+  const afterWinner = applyInteractionPatch(initial, makePatch(winner, 'z'), revisions)
+  const afterLoser = applyInteractionPatch(afterWinner, makePatch(loser, 'a'), revisions)
+  assert.equal(afterLoser.versions.find((item) => item.id === 'v1').tag.title, 'winner')
+})
+
+test('replay merges concurrent copy links and keeps the newest branching setting', () => {
+  const initial = { versions: [version('v0', []), version('v1', [node('n1'), node('n2'), node('n3')], 'v0', 1)],
+    activeId: 'v1', nextNode: 4, nextVersion: 2, nextLane: 1, copyLinks: [] }
+  const link = (targetNodeId) => ({ sourceVersionId: 'v1', sourceNodeId: 'n1', targetVersionId: 'v1', targetNodeId })
+  const base = { versions: [], removed: [], activeId: 'v1', nextNode: 4, nextVersion: 2, nextLane: 1 }
+  const first = applyInteractionPatch(initial, { ...base, copyLinks: [link('n2')],
+    branching: { enabled: false, revision: { clock: 10, actor: 'z' } } })
+  const second = applyInteractionPatch(first, { ...base, copyLinks: [link('n3')],
+    branching: { enabled: true, revision: { clock: 10, actor: 'a' } } })
+  assert.deepEqual(second.copyLinks, [link('n2'), link('n3')])
+  assert.equal(second.branching.enabled, false)
+})
+
+test('interaction visualizations group users, same-user transitions, viewport time and versions', () => {
+  const alice = { id: 'alice', name: 'Alice', color: '#123456' }
+  const bob = { id: 'bob', name: 'Bob', color: '#654321' }
+  const event = (id, actor, action, time, extra = {}) => ({
+    id, actor, action, category: 'input', method: 'mouse', inputTime: time, changeTime: time, ...extra,
+  })
+  const log = { initialState: { versions: [version('v0', [])] }, events: [
+    event('1', alice, 'Graph zoom', 1000, { category: 'viewport', viewport: { zoom: 1, panX: 0, panY: 0 } }),
+    event('2', alice, 'Ping', 2000, { parameters: { versionId: 'v0' } }),
+    event('3', bob, 'Graph zoom', 2500, { category: 'viewport', viewport: { zoom: 1, panX: 0, panY: 0 } }),
+    event('4', alice, 'Graph pan', 3000, { category: 'viewport', viewport: { zoom: 1, panX: -600, panY: 0 } }),
+    event('5', alice, 'Version zoom', 4000, { category: 'viewport', parameters: { scope: 'version' },
+      viewport: { zoom: 1, panX: -9000, panY: 0 } }),
+    event('bob-ping', bob, 'Ping', 4500),
+    event('6', alice, 'Navigate', 5000, { category: 'selection', selection: { versionId: 'v0', nodeIds: [] } }),
+    event('left', bob, 'Left room', 5500, { parameters: { meaningful: true } }),
+    event('joined', bob, 'Joined room', 10000, { parameters: { meaningful: true } }),
+  ] }
+  const result = analyzeInteractions(log)
+  assert.equal(result.users.find((user) => user.id === 'alice').actions.get('Ping').length, 1)
+  assert.equal(result.users.find((user) => user.id === 'bob').actions.get('Ping').length, 1)
+  assert.deepEqual(result.flows.map(({ from, to, count }) => [from, to, count]), [['Ping', 'Navigate', 1]])
+  assert.deepEqual(result.heatmap.cells.map(({ x, duration }) => [x, duration]), [[0, 5000], [2, 2000]])
+  assert.equal(result.versions.find((item) => item.id === 'v0').events.length, 2)
+  const empty = analyzeInteractions({ ...log, events: [] })
+  assert.equal(empty.heatmap.cells.length, 0)
+  assert.equal(empty.flows.length, 0)
+})
+
+test('abstract analysis groups committed actions with legacy semantic duplicates without merging separate edits', () => {
+  const alice = { id: 'alice', name: 'Alice', color: '#123456' }
+  const event = (id, action, changeTime, extra = {}) => ({
+    id, actor: alice, action, category: 'input', method: 'button', inputTime: changeTime, changeTime, ...extra,
+  })
+  const first = { ...version('v1-hash', [node('n1')], 'v0', 1), change: 'Created 4 items',
+    number: { step: 1, branch: 1, subbranch: 1, origin: 'v1-hash', owner: 'alice' } }
+  const second = { ...first, id: 'v2-hash', parentId: first.id, step: 2, change: 'Detach n1',
+    number: { ...first.number, step: 2, origin: 'v2-hash' } }
+  const patch = (item) => ({ versions: [item], removed: [], activeId: item.id, nextNode: 2, nextVersion: 3, nextLane: 1 })
+  const log = { initialState: { versions: [version('v0', [])] }, events: [
+    event('click', 'Button: Add 4 entries', 100),
+    event('summary', 'Created 01.01.001 · Created 4 items', 101, { parameters: { meaningful: true, versionId: first.id } }),
+    event('state', 'Button: Add 4 entries', 102, { category: 'state', inputTime: 100, patch: patch(first), parameters: { versionId: first.id } }),
+    event('summary2', 'Created 02.01.001 · Detach n1', 105, { parameters: { meaningful: true, versionId: second.id } }),
+    event('state2', 'Created 02.01.001 · Detach n1', 106, { category: 'state', patch: patch(second), parameters: { versionId: second.id } }),
+    event('navigation', 'Navigate', 110, { category: 'selection', selection: { versionId: second.id, nodeIds: [] } }),
+    event('typing1', 'Input: Search', 111, { parameters: { value: 'a' } }),
+    event('typing2', 'Input: Search', 112, { parameters: { value: 'ab' } }),
+  ] }
+  const result = abstractInteractions(log)
+  assert.deepEqual(result.events.map((item) => item.action), ['Create entries', 'Detach entries', 'Navigate', 'Input: Search'])
+  assert.deepEqual(result.sources.get('state').map((item) => item.id), ['state', 'click', 'summary'])
+  assert.deepEqual(result.sources.get('typing1').map((item) => item.id), ['typing1', 'typing2'])
+  assert.equal(interactionVersionLabels(log).get('v1-hash'), '01.01.001')
+  assert.equal(analyzeInteractions(log).versions.find((item) => item.id === 'v2-hash').label, '02.01.001')
+  assert.equal(log.events.length, 8)
+})
 
 test('action configuration resolves editable shortcut mappings and icons', () => {
   const event = { key: 'f', ctrlKey: true, metaKey: false, altKey: false, shiftKey: false, repeat: false }
@@ -225,6 +328,49 @@ test('comparison and merge retain differences and prevent cyclic parents', () =>
     assert.equal(comparison.mergeResult.value.data.find((item) => item.id === 'a').children.length, 0)
   })
   scope.stop()
+})
+
+test('unequal-step merges use the later version as source regardless of selection order', () => {
+  for (const [ids, targetLatest] of [
+    [['low', 'high'], false], [['high', 'low'], false], [['low', 'high'], true], [['high', 'low'], true],
+  ]) {
+    const scope = effectScope()
+    scope.run(() => {
+      const low = { ...version('low', [{ ...node('shared'), value: 'Low value' }], 'v0', 2), branch: 'B1' }
+      const high = { ...version('high', [{ ...node('shared'), value: 'High value' }], 'v0', 4), branch: 'B2' }
+      const continuation = { ...version('continuation', low.data, low.id, 3), branch: low.branch }
+      const state = ref({ versions: [version('v0', []), low, high, ...(targetLatest ? [] : [continuation])], activeId: low.id,
+        nextNode: 1, nextVersion: 10, nextLane: 1, copyLinks: [] })
+      const versions = computed(() => state.value.versions)
+      const comparison = useVersionComparison(versions, () => ({ zoom: 1, panX: 0, panY: 0, manual: false }),
+        () => ({ width: 246, height: 213 }))
+      comparison.startVersionSelection('merge', ids[0])
+      comparison.chooseCompare(ids[1])
+      assert.equal(comparison.mergeResult.value.source.id, 'high')
+      assert.equal(comparison.mergeResult.value.target.id, 'low')
+      assert.equal(comparison.mergeResult.value.data[0].value, 'Low value')
+      assert.deepEqual(comparison.comparisonPanels.value.map((panel) => panel.id), ['high', 'low'])
+      const history = useVersionHistory({
+        clientId: 'test', state, currentRoomName: ref('test'), versions,
+        active: computed(() => low), selectedNode: ref(null),
+        windowDimensions: computed(() => ({ width: 200, height: 150 })), comparison,
+        camera: { isVersionCentered: () => false, cardPosition: () => ({ x: 0, y: 0 }),
+          cardHeight: () => 150, startVersionArrival: () => {}, panToVersion: () => {} },
+        treemaps: { compactVersionTreemaps: () => {} },
+        reflowLayout: () => reflowVersionLayout(state.value), setSelectedNodes: () => {}, notify: () => {}, logInteraction: () => {},
+        canCreateFrom: () => true, playChange: () => {},
+      })
+      history.confirmMerge()
+      const merged = state.value.versions.find((item) => item.id === state.value.activeId)
+      assert.equal(merged.parentId, low.id)
+      assert.equal(merged.mergeSourceId, high.id)
+      if (targetLatest) assert.equal(merged.lane, low.lane)
+      else assert.notEqual(merged.lane, low.lane)
+      assert.equal(merged.data[0].value, 'Low value')
+      assert.equal(merged.step, 5)
+    })
+    scope.stop()
+  }
 })
 
 test('parent-relative differences identify added, modified, relocated and replacement entries', () => {
