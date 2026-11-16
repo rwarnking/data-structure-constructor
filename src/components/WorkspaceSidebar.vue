@@ -16,7 +16,7 @@ const props = defineProps<{
   colorForUser: (id: string) => string
   branchCount: number; active: Version; activeNodes: number; activeChildren: number
   volume: number; muted: boolean; branchingEnabled: boolean
-  replayMode: boolean; replayPlaying: boolean; replaySpeed: number; replayIndex: number; replayTotal: number
+  replayMode: boolean
 }>()
 const { expand: ChevronDown, export: Download, layers: Layers3, darkMode: Moon,
   settings: Settings, lightMode: Sun, import: Upload, tag: TagIcon, changeRoom: ChangeRoom } = actionIcons
@@ -72,8 +72,7 @@ const emit = defineEmits<{
   'focus-collaborator': [id: string]; 'focus-ping': [location: { x: number; y: number }]
   navigate: [entry: InteractionEntry, kind: 'node' | 'version']; 'focus-active': []
   'import-data': [file: File]; 'export-data': []; 'show-tags': []
-  'export-log': []; 'replay-file': [file: File]; 'analyze-log': []
-  'replay-toggle': []; 'replay-beginning': []; 'replay-next': []; 'replay-end': []; 'replay-speed': [speed: number]; 'replay-exit': []
+  'export-log': []; 'replay-file': [file: File]
   'set-volume': [value: number]; 'toggle-mute': []; 'set-branching': [enabled: boolean]
 }>()
 </script>
@@ -128,25 +127,8 @@ const emit = defineEmits<{
       </button>
       <button type="button" class="theme-toggle" @click="chooseImport('data')"><Upload :size="15" /><span>Import data</span></button>
       <button type="button" class="theme-toggle" @click="emit('export-data'); settingsOpen = false"><Download :size="15" /><span>Export data</span></button>
-      <button type="button" class="theme-toggle" @click="emit('export-log')"><Download :size="15" /><span>Export Interaction Log</span></button>
+      <button v-if="!replayMode" type="button" class="theme-toggle" @click="emit('export-log')"><Download :size="15" /><span>Export Interaction Log</span></button>
       <button type="button" class="theme-toggle" @click="chooseImport('replay')"><Upload :size="15" /><span>Replay Interaction Log</span></button>
-      <template v-if="replayMode">
-        <button type="button" class="theme-toggle" @click="emit('analyze-log')">Analyze Interaction Log</button>
-        <label class="volume-control">Playback speed
-          <select aria-label="Playback speed" :value="replaySpeed" @change="emit('replay-speed', Number(($event.target as HTMLSelectElement).value))">
-            <option :value="0.25">0.25×</option><option :value="0.5">0.5×</option><option :value="1">1×</option>
-            <option :value="2">2×</option><option :value="4">4×</option><option :value="8">8×</option>
-          </select>
-        </label>
-        <div class="replay-controls">
-          <small>{{ replayIndex }} / {{ replayTotal }}</small>
-          <button type="button" @click="emit('replay-toggle')">{{ replayPlaying ? 'Pause' : 'Play' }}</button>
-          <button type="button" :disabled="replayIndex >= replayTotal" @click="emit('replay-next')">Skip to next step</button>
-          <button type="button" @click="emit('replay-beginning')">Jump to beginning</button>
-          <button type="button" @click="emit('replay-end')">Jump to end</button>
-          <button type="button" @click="emit('replay-exit')">Exit replay</button>
-        </div>
-      </template>
       <input ref="importInput" type="file" accept=".json,application/json" hidden @change="importFile" />
     </section>
     <section class="side-section session-section">

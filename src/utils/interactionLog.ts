@@ -1,4 +1,4 @@
-import type { CopyLink, RetiredVersionNumber, Revision, StoredState, Version } from '../types/workspace'
+import type { CopyLink, EditorState, EntryOperation, RetiredVersionNumber, Revision, StoredState, Version } from '../types/workspace'
 import { hasRootEntries, isCopyLink, isRecord, isRetiredVersionNumber, isRevision, isStoredState, isVersion, revisionIsNewer } from './validation'
 import { findNode } from './tree'
 import { assignVersionSuffixes, compareCopyLinks, reflowVersionLayout } from './versions'
@@ -19,8 +19,15 @@ export type InteractionPatch = {
   retiredVersionNumbers?: RetiredVersionNumber[]
   branching?: StoredState['branching']
 }
+export type InteractionDialog = {
+  editor: EditorState | null
+  operation: EntryOperation | null
+  deleteOpen: boolean
+  deleteMode: 'keep-children' | 'subtree' | 'detach-children'
+}
 export type InteractionEvent = {
   id: string
+  sessionId?: string
   actor: InteractionActor
   action: string
   category: InteractionCategory
@@ -32,6 +39,16 @@ export type InteractionEvent = {
   patch?: InteractionPatch
   viewport?: { zoom: number; panX: number; panY: number }
   selection?: { versionId: string; nodeIds: string[] }
+  dialog?: InteractionDialog
+}
+export type InteractionSession = {
+  id: string
+  actor: InteractionActor
+  startedAt: number
+  endedAt?: number
+  initialState: StoredState
+  initialViewport: { zoom: number; panX: number; panY: number }
+  eventIds: string[]
 }
 export type InteractionLog = {
   format: 'canopy-interaction-log'
@@ -40,6 +57,7 @@ export type InteractionLog = {
   initialState: StoredState
   initialViewport: { zoom: number; panX: number; panY: number }
   events: InteractionEvent[]
+  sessions?: InteractionSession[]
 }
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
@@ -119,10 +137,98 @@ function isViewport(value: unknown): value is NonNullable<InteractionEvent['view
     && Number.isFinite(value.panX) && Number.isFinite(value.panY)
 }
 
+function isActor(value: unknown): value is InteractionActor {
+  return isRecord(value) && typeof value.id === 'string' && !!value.id
+    && typeof value.name === 'string' && typeof value.color === 'string' && /^#[0-9a-f]{6}$/i.test(value.color)
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string')
+}
+
+function isDrafts(value: unknown): boolean {
+  return Array.isArray(value) && value.length > 0 && value.every((item) => isRecord(item)
+    && typeof item.id === 'string' && typeof item.value === 'string' && typeof item.description === 'string')
+}
+
+function isInteractionDialog(value: unknown): value is InteractionDialog {
+  if (!isRecord(value) || typeof value.deleteOpen !== 'boolean'
+    || !['keep-children', 'subtree', 'detach-children'].includes(String(value.deleteMode))) return false
+  const editor = value.editor
+  if (editor !== null && (!isRecord(editor) || (editor.mode === 'create'
+    ? !(editor.parentId === null || typeof editor.parentId === 'string') || !isDrafts(editor.entries)
+      || (editor.parentOf !== undefined && !isStringArray(editor.parentOf))
+      || (editor.childOf !== undefined && !isStringArray(editor.childOf))
+    : editor.mode !== 'rename' || editor.parentId !== null || typeof editor.nodeId !== 'string'
+      || typeof editor.value !== 'string' || typeof editor.description !== 'string'))) return false
+  const operation = value.operation
+  if (operation !== null && (!isRecord(operation) || (operation.mode === 'split'
+    ? typeof operation.nodeId !== 'string' || !isDrafts(operation.entries) || !isRecord(operation.assignments)
+      || !Object.values(operation.assignments).every((item) => typeof item === 'string')
+    : operation.mode !== 'merge' || !isStringArray(operation.nodeIds)
+      || typeof operation.value !== 'string' || typeof operation.description !== 'string'))) return false
+  return true
+}
+
+function isInteractionSession(value: unknown): value is InteractionSession {
+  return isRecord(value) && typeof value.id === 'string' && !!value.id && isActor(value.actor)
+    && typeof value.startedAt === 'number' && Number.isFinite(value.startedAt)
+    && (value.endedAt === undefined || typeof value.endedAt === 'number'
+      && Number.isFinite(value.endedAt) && value.endedAt >= value.startedAt)
+    && isStoredState(value.initialState) && !hasRootEntries(value.initialState)
+    && isViewport(value.initialViewport)
+    && Array.isArray(value.eventIds) && value.eventIds.every((id) => typeof id === 'string')
+}
+
+function sessionBoundary(event: InteractionEvent) {
+  const boundary = event.parameters?.sessionBoundary
+  if (boundary === 'login' || event.action === 'Login' || event.action === 'Joined room') return 'login'
+  if (boundary === 'logout' || event.action === 'Logout' || event.action === 'Left room') return 'logout'
+  return undefined
+}
+
+function normalizeSessions(events: InteractionEvent[], initialState: StoredState,
+  initialViewport: InteractionLog['initialViewport'], sourceSessions: InteractionSession[] = []) {
+  const sessions = new Map<string, InteractionSession>()
+  for (const source of sourceSessions) sessions.set(source.id, { ...clone(source), eventIds: [] })
+  const active = new Map<string, string>()
+  const counters = new Map<string, number>()
+  const normalizedEvents: InteractionEvent[] = []
+
+  for (const event of events) {
+    const boundary = sessionBoundary(event)
+    let id = event.sessionId
+    if (!id && boundary === 'login') {
+      const count = (counters.get(event.actor.id) ?? 0) + 1
+      counters.set(event.actor.id, count)
+      id = `${event.actor.id}:session:${count}`
+    }
+    id ??= active.get(event.actor.id) ?? `${event.actor.id}:legacy`
+    let session = sessions.get(id)
+    if (session && session.actor.id !== event.actor.id) throw new Error('Interaction session actor mismatch')
+    if (!session) {
+      session = { id, actor: clone(event.actor), startedAt: event.changeTime,
+        initialState: clone(initialState), initialViewport: clone(initialViewport), eventIds: [] }
+      sessions.set(id, session)
+    }
+    session.eventIds.push(event.id)
+    if (boundary === 'login') {
+      session.startedAt = event.changeTime
+      active.set(event.actor.id, id)
+    }
+    else if (!event.sessionId && !active.has(event.actor.id)) active.set(event.actor.id, id)
+    if (boundary === 'logout') {
+      session.endedAt = event.changeTime
+      if (active.get(event.actor.id) === id) active.delete(event.actor.id)
+    }
+    normalizedEvents.push({ ...event, sessionId: id })
+  }
+  return { events: normalizedEvents, sessions: [...sessions.values()] }
+}
+
 export function isInteractionEvent(value: unknown): value is InteractionEvent {
-  if (!isRecord(value) || typeof value.id !== 'string' || !value.id || !isRecord(value.actor)
-    || typeof value.actor.id !== 'string' || !value.actor.id || typeof value.actor.name !== 'string'
-    || typeof value.actor.color !== 'string' || !/^#[0-9a-f]{6}$/i.test(value.actor.color)
+  if (!isRecord(value) || typeof value.id !== 'string' || !value.id || !isActor(value.actor)
+    || value.sessionId !== undefined && (typeof value.sessionId !== 'string' || !value.sessionId)
     || typeof value.action !== 'string' || !value.action
     || !['state', 'viewport', 'selection', 'input'].includes(String(value.category))
     || !['hotkey', 'keyboard', 'mouse', 'button', 'system'].includes(String(value.method))
@@ -135,6 +241,7 @@ export function isInteractionEvent(value: unknown): value is InteractionEvent {
   if (value.viewport !== undefined && !isViewport(value.viewport)) return false
   if (value.selection !== undefined && (!isRecord(value.selection) || typeof value.selection.versionId !== 'string'
     || !Array.isArray(value.selection.nodeIds) || !value.selection.nodeIds.every((id) => typeof id === 'string'))) return false
+  if (value.dialog !== undefined && !isInteractionDialog(value.dialog)) return false
   if (value.patch !== undefined) {
     const patch = value.patch
     if (!isRecord(patch) || !Array.isArray(patch.versions) || !patch.versions.every(isVersion)
@@ -162,13 +269,17 @@ export function parseInteractionLog(value: unknown): InteractionLog {
     || typeof value.room !== 'string' || !value.room.trim() || !isStoredState(value.initialState)
     || hasRootEntries(value.initialState) || !isViewport(value.initialViewport)
     || !Array.isArray(value.events) || !value.events.every(isInteractionEvent)
-    || new Set(value.events.map((event) => event.id)).size !== value.events.length) {
+    || new Set(value.events.map((event) => event.id)).size !== value.events.length
+    || value.sessions !== undefined && (!Array.isArray(value.sessions) || !value.sessions.every(isInteractionSession)
+      || new Set(value.sessions.map((session) => session.id)).size !== value.sessions.length)) {
     throw new Error('Invalid or unsupported interaction log')
   }
   const events = [...value.events].sort((a, b) => a.changeTime - b.changeTime || a.id.localeCompare(b.id))
+  const normalized = normalizeSessions(events, value.initialState, value.initialViewport, value.sessions as InteractionSession[] | undefined)
   let state = value.initialState
   const revisions = newInteractionRevisions()
-  for (const event of events) if (event.patch) state = applyInteractionPatch(state, event.patch, revisions)
+  for (const event of normalized.events) if (event.patch) state = applyInteractionPatch(state, event.patch, revisions)
   return { format: 'canopy-interaction-log', version: 1, room: value.room,
-    initialState: value.initialState, initialViewport: value.initialViewport, events }
+    initialState: value.initialState, initialViewport: value.initialViewport, events: normalized.events,
+    sessions: normalized.sessions }
 }

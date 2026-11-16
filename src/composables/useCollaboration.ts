@@ -28,6 +28,7 @@ export function useCollaboration(options: {
   onRemoteDeparture?: (entry: InteractionEntry) => void
   onSessionMessage?: (message: unknown) => boolean
   onSyncRequest?: (reply: (message: unknown) => void) => void
+  onSessionBaseline?: (reply: (message: unknown) => void) => void
 }) {
   const { clientId: CLIENT_ID, state, active, selectedNodes, currentRoomName, graphCanvas, pan, zoom, normalizeState, roomDataKey, reflowLayout, fitGraph, followVersion, notify } = options
   const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
@@ -295,7 +296,10 @@ export function useCollaboration(options: {
     applyingRemoteState = true
     persistCollaborationMetadata()
     localStorage.setItem(roomDataKey(currentRoomName.value), lastObservedState)
-    requestAnimationFrame(fitGraph)
+    requestAnimationFrame(() => {
+      fitGraph()
+      options.onSessionBaseline?.((message) => peerRoom.send(message))
+    })
     void nextTick(() => { applyingRemoteState = false })
   }
 
@@ -482,6 +486,7 @@ export function useCollaboration(options: {
       type: 'sync-delta', versions: [], removed: [], retiredVersionNumbers: extraRetired,
       nextNode: state.value.nextNode, nextVersion: state.value.nextVersion, nextLane: state.value.nextLane,
     } satisfies SyncDelta)
+    options.onSessionBaseline?.((message) => peerRoom.send(message))
     void nextTick(() => { applyingRemoteState = false })
   }
 

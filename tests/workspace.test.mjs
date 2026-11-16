@@ -50,7 +50,39 @@ test('interaction patches reproduce room changes and reject invalid replay data'
       id: 'one', actor: { id: 'user', name: 'User', color: '#123456' }, action: 'Add',
       category: 'state', method: 'button', inputTime: 1, changeTime: 2, patch,
     }] }
-  assert.equal(parseInteractionLog(log).events.length, 1)
+  const parsed = parseInteractionLog(log)
+  assert.equal(parsed.events.length, 1)
+  assert.equal(parsed.sessions.length, 1)
+  assert.equal(parsed.sessions[0].actor.id, 'user')
+  assert.deepEqual(parsed.sessions[0].eventIds, ['one'])
+  const alice = { id: 'alice', name: 'Alice', color: '#123456' }
+  const bob = { id: 'bob', name: 'Bob', color: '#654321' }
+  const boundaryEvent = (id, actor, sessionId, action, time, boundary) => ({
+    id, actor, sessionId, action, category: 'input', method: 'system', inputTime: time, changeTime: time,
+    parameters: { sessionBoundary: boundary },
+  })
+  const shared = parseInteractionLog({ ...log,
+    events: [boundaryEvent('alice-in', alice, 'alice-1', 'Login', 1, 'login'),
+      boundaryEvent('alice-out', alice, 'alice-1', 'Logout', 2, 'logout'),
+      boundaryEvent('bob-in', bob, 'bob-1', 'Login', 3, 'login')],
+    sessions: [
+      { id: 'alice-1', actor: alice, startedAt: 1, endedAt: 2, initialState: initial,
+        initialViewport: { zoom: 1, panX: 0, panY: 0 }, eventIds: [] },
+      { id: 'bob-1', actor: bob, startedAt: 3, initialState: changed,
+        initialViewport: { zoom: 2, panX: 5, panY: 6 }, eventIds: [] },
+    ],
+  })
+  assert.equal(shared.sessions.find((session) => session.id === 'alice-1').endedAt, 2)
+  assert.equal(shared.sessions.find((session) => session.id === 'bob-1').initialState.versions.length, 2)
+  assert.deepEqual(shared.sessions.find((session) => session.id === 'alice-1').eventIds, ['alice-in', 'alice-out'])
+  const dialog = { editor: { mode: 'create', parentId: null,
+    entries: [{ id: 'draft', value: 'Example', description: '' }] },
+    operation: null, deleteOpen: false, deleteMode: 'keep-children' }
+  assert.deepEqual(parseInteractionLog({ ...log, events: [{ ...log.events[0], dialog }] }).events[0].dialog, dialog)
+  assert.throws(() => parseInteractionLog({ ...log, events: [{ ...log.events[0],
+    dialog: { ...dialog, editor: { ...dialog.editor, entries: [{ id: 'draft', value: 3 }] } } }] }), /Invalid/)
+  assert.throws(() => parseInteractionLog({ ...log, events: [{ ...log.events[0],
+    dialog: { ...dialog, operation: { mode: 'split', nodeId: 'n', entries: [], assignments: {} } } }] }), /Invalid/)
   assert.throws(() => parseInteractionLog({ ...log, events: [log.events[0], log.events[0]] }), /Invalid/)
   assert.throws(() => parseInteractionLog({ ...log, events: [{ ...log.events[0], patch: { ...patch, removed: ['v0'] } }] }), /invalid room state/)
 })
@@ -642,22 +674,39 @@ test('legacy numbering migrates session changes without treating them as forks',
   assert.deepEqual(graph, migrated)
 })
 
-test('entry labels wrap at word boundaries and truncate without breaking words across lines', () => {
+test('entry labels wrap at whitespace, hyphenate long words, and stay within width and height', () => {
   const tile = { id: 'a', label: 'Long labels wrap at spaces', x: 0, y: 0, width: 320, height: 150, depth: 0, hasChildren: false }
   const wrapped = layoutTileLabel(tile)
   assert.ok(wrapped.lines.length > 1)
   assert.equal(wrapped.lines.join(' '), tile.label)
   assert.ok(wrapped.lines.length * wrapped.fontSize * 1.15 <= tile.height - 6)
-  const unbroken = layoutTileLabel({ ...tile, label: 'abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz' })
-  assert.equal(unbroken.lines.length, 1)
-  assert.match(unbroken.lines[0], /^[a-z]+\.\.\.$/)
+  const longWord = layoutTileLabel({ ...tile, label: 'interoperability' })
+  assert.ok(longWord.lines.length > 1)
+  assert.ok(longWord.lines.some((line) => line.endsWith('-')))
+  assert.equal(longWord.lines.join('').replace(/-/g, ''), 'interoperability')
+  const arbitrary = layoutTileLabel({ ...tile, label: 'bcdfghjklmnpqrstvwxz' })
+  assert.ok(arbitrary.lines.length > 1)
+  assert.equal(arbitrary.lines.join('').replace(/-/g, ''), 'bcdfghjklmnpqrstvwxz')
+  for (const result of [longWord, arbitrary]) {
+    assert.ok(result.lines.every((line) => line.length * result.fontSize * 0.65 <= tile.width - 10))
+    assert.ok(result.lines.length * result.fontSize * 1.15 <= tile.height - 6)
+  }
   const hyphenated = layoutTileLabel({ ...tile, label: 'alpha-beta' })
   assert.equal(hyphenated.lines.join(''), 'alpha-beta')
-  assert.ok(hyphenated.lines.length === 1 || hyphenated.lines[0].endsWith('-'))
-  assert.match(layoutTileLabel({ ...tile, height: 55, label: 'An entry with a much longer label that cannot fit' }).lines[0], /\.\.\.$/)
-  const parent = layoutTileLabel({ ...tile, hasChildren: true })
+  const clipped = layoutTileLabel({ ...tile, width: 210, height: 100,
+    label: 'A very long label that cannot fit in two lines' })
+  assert.match(clipped.lines.at(-1), /\.\.\.$/)
+  assert.ok(clipped.lines.every((line) => line.length * clipped.fontSize * 0.65 <= 200))
+  assert.ok(clipped.lines.length * clipped.fontSize * 1.15 <= 94)
+  const oneLine = layoutTileLabel({ ...tile, width: 120, height: 55,
+    label: 'extraordinarily long entry name' })
+  assert.equal(oneLine.lines.length, 1)
+  assert.ok(oneLine.lines[0].length > 0)
+  assert.doesNotMatch(oneLine.lines[0], /\.\.\.$/)
+  assert.ok(oneLine.lines[0].length * oneLine.fontSize * 0.65 <= 110)
+  const parent = layoutTileLabel({ ...tile, hasChildren: true, label: 'A very long parent label that cannot fit' })
   assert.equal(parent.lines.length, 1)
-  assert.match(parent.lines[0], /\.\.\.$/)
+  assert.doesNotMatch(parent.lines[0], /\.\.\.$/)
   assert.equal(parent.fontSize, layoutTileLabel({ ...tile, hasChildren: true, height: 12 }).fontSize)
   assert.equal(wrapped.fontSize, layoutTileLabel({ ...tile, height: 12 }).fontSize)
   assert.equal(wrapped.fontSize, 36)

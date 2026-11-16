@@ -3,7 +3,7 @@ import type { InteractionEntry, SyncDelta } from '../types/collaboration'
 import type { StoredState } from '../types/workspace'
 import { shortcutAction } from '../config/hotkeys'
 import { interactionPatch, isInteractionEvent, parseInteractionLog, type InteractionActor, type InteractionCategory,
-  type InteractionEvent, type InteractionLog, type InteractionMethod } from '../utils/interactionLog'
+  type InteractionDialog, type InteractionEvent, type InteractionLog, type InteractionMethod, type InteractionSession } from '../utils/interactionLog'
 
 type Input = { time: number; method: InteractionMethod; cursor?: { x: number; y: number }; action: string }
 type Viewport = { zoom: number; panX: number; panY: number }
@@ -30,6 +30,7 @@ export function useInteractionRecorder(options: {
   let viewportTimer = 0
   let viewportInput: Input | null = null
   let pointer: { x: number; y: number; time: number } | null = null
+  let activeSessionId: string | null = null
   const viewport = (): Viewport => ({ zoom: options.zoom.value, panX: options.pan.value.x, panY: options.pan.value.y })
 
   function forgetRoom(room: string) {
@@ -39,6 +40,7 @@ export function useInteractionRecorder(options: {
   function stopRoom() {
     flushViewport()
     current.value = null
+    activeSessionId = null
     pendingIntent = null
     pendingAction = null
     pointer = null
@@ -51,22 +53,41 @@ export function useInteractionRecorder(options: {
     if (saved) current.value = saved
     else {
       const log: InteractionLog = { format: 'canopy-interaction-log', version: 1, room,
-        initialState: clone(options.state.value), initialViewport: viewport(), events: [] }
+        initialState: clone(options.state.value), initialViewport: viewport(), events: [], sessions: [] }
       logs.set(room, log)
       current.value = log
     }
+    current.value.sessions ??= []
     if (!eventIds.has(room)) eventIds.set(room, new Set(current.value.events.map((event) => event.id)))
     input = { time: Date.now(), method: 'system', action: 'Change' }
     pendingIntent = null
     pendingAction = null
+    activeSessionId = null
+    const actor = options.actor()
+    const startedAt = Date.now()
+    const sessionId = `${actor.id}-${startedAt}-${++sequence}`
+    const session: InteractionSession = { id: sessionId, actor, startedAt, initialState: clone(options.state.value),
+      initialViewport: viewport(), eventIds: [] }
+    current.value.sessions.push(session)
+    activeSessionId = sessionId
+    record('input', 'Login', { parameters: { meaningful: true, sessionBoundary: 'login' } },
+      { time: startedAt, method: 'system', action: 'Login' })
   }
   function append(event: InteractionEvent, broadcast = true) {
     if (!current.value || current.value.room !== options.room.value || replaying.value) return
     const ids = eventIds.get(current.value.room)
     if (ids?.has(event.id)) return
     ids?.add(event.id)
-    current.value.events.push(clone(event))
-    if (broadcast) options.send({ type: 'session-interaction', room: current.value.room, event })
+    const session = current.value.sessions?.find((item) => item.id === event.sessionId)
+      ?? current.value.sessions?.filter((item) => item.actor.id === event.actor.id && item.endedAt === undefined).at(-1)
+    const recorded = event.sessionId || !session ? event : { ...event, sessionId: session.id }
+    current.value.events.push(clone(recorded))
+    if (session && !session.eventIds.includes(event.id)) {
+      session.eventIds.push(event.id)
+      if (event.parameters?.sessionBoundary === 'logout') session.endedAt = event.changeTime
+    }
+    if (recorded.parameters?.sessionBoundary === 'logout' && activeSessionId === recorded.sessionId) activeSessionId = null
+    if (broadcast) options.send({ type: 'session-interaction', room: current.value.room, event: recorded })
   }
   function recentInput(action: string): Input {
     return Date.now() - input.time <= 5000 ? input : { time: Date.now(), method: 'system', action }
@@ -76,7 +97,8 @@ export function useInteractionRecorder(options: {
     const actor = options.actor()
     const time = performance.timeOrigin + performance.now()
     const event: InteractionEvent = {
-      id: `${actor.id}-${Math.floor(time)}-${String(++sequence).padStart(12, '0')}`, actor, action, category, method: source.method,
+      id: `${actor.id}-${Math.floor(time)}-${String(++sequence).padStart(12, '0')}`,
+      ...(activeSessionId ? { sessionId: activeSessionId } : {}), actor, action, category, method: source.method,
       inputTime: Math.min(source.time, time), changeTime: time, ...(source.cursor ? { cursor: source.cursor } : {}), ...extra,
     }
     append(event)
@@ -126,7 +148,19 @@ export function useInteractionRecorder(options: {
     else if (before.activeId !== after.activeId) record('selection', 'Navigate',
       { selection: { versionId: after.activeId, nodeIds: [...options.selectedNodes.value] } })
   }
+  function refreshSessionBaseline() {
+    const session = current.value?.sessions?.find((item) => item.id === activeSessionId)
+    if (!session || pendingIntent || pendingAction
+      || current.value?.events.some((event) => event.sessionId === activeSessionId && event.category === 'state')) return false
+    const nextState = JSON.stringify(options.state.value)
+    const nextViewport = JSON.stringify(viewport())
+    if (JSON.stringify(session.initialState) === nextState && JSON.stringify(session.initialViewport) === nextViewport) return false
+    session.initialState = clone(options.state.value)
+    session.initialViewport = viewport()
+    return true
+  }
   function recordAction(entry: InteractionEntry) {
+    if (entry.action === 'Joined room') { refreshSessionBaseline(); return }
     if (/^(Created |Merged |Undid |Redid |Tagged |Removed tag )/.test(entry.action)) {
       if (pendingAction) record('input', pendingAction.action, { parameters: actionParameters(pendingAction) })
       pendingAction = entry
@@ -138,13 +172,22 @@ export function useInteractionRecorder(options: {
     } else {
       const source = /^(Joined|Left) room$/.test(entry.action)
         ? { time: Date.now(), method: 'system' as const, action: entry.action } : recentInput(entry.action)
-      record('input', entry.action, { parameters: actionParameters(entry) }, source)
+      const boundary = entry.action === 'Left room' ? 'logout' : undefined
+      record('input', boundary ? 'Logout' : entry.action, { parameters: {
+        ...actionParameters(entry), ...(boundary ? { sessionBoundary: boundary } : {}),
+      } }, source)
     }
   }
+  function recordDialog(dialog: InteractionDialog) {
+    if (!current.value || replaying.value) return
+    record('input', 'Dialog state', { dialog: clone(dialog) })
+  }
   function recordRemoteDeparture(entry: InteractionEntry) {
+    const boundary = entry.action === 'Left room' ? 'logout' : undefined
     append({ id: `session-${entry.id}`, actor: { id: entry.actorId, name: entry.actorName,
-      color: entry.actorColor ?? '#0075b8' }, action: entry.action, category: 'input', method: 'system',
-      inputTime: entry.createdAt, changeTime: entry.createdAt, parameters: { meaningful: true } }, false)
+      color: entry.actorColor ?? '#0075b8' }, action: boundary ? 'Logout' : entry.action, category: 'input', method: 'system',
+      inputTime: entry.createdAt, changeTime: entry.createdAt,
+      parameters: { meaningful: true, ...(boundary ? { sessionBoundary: boundary } : {}) } }, false)
   }
   function capturePointer(event: PointerEvent) {
     if (replaying.value || !event.isTrusted) return
@@ -165,8 +208,26 @@ export function useInteractionRecorder(options: {
     record('input', action, { parameters: {
       ...(tile?.dataset.node ? { nodeId: tile.dataset.node } : {}),
       ...(version?.dataset.version ? { versionId: version.dataset.version } : {}),
+      ...(button?.classList.contains('card-menu') ? { menuKind: 'version',
+        x: event.clientX, y: event.clientY } : {}),
+      ...(button?.closest('.context-menu') ? { menuAction: (label || 'Menu action').slice(0, 120) } : {}),
       button: event.button, shift: event.shiftKey, control: event.ctrlKey || event.metaKey,
     } })
+  }
+  function captureContextMenu(event: MouseEvent) {
+    if (replaying.value || !event.isTrusted) return
+    const target = event.target instanceof Element ? event.target : null
+    const tile = target?.closest<HTMLElement>('[data-node]')
+    const version = target?.closest<HTMLElement>('[data-version]')
+    const kind = tile ? 'entry' : version ? 'version' : 'canvas'
+    const source: Input = { time: Date.now(), method: 'mouse', action: `Open ${kind} menu`,
+      cursor: { x: event.clientX, y: event.clientY } }
+    input = source
+    record('input', source.action, { parameters: {
+      menuKind: kind, x: event.clientX, y: event.clientY,
+      ...(tile?.dataset.node ? { nodeId: tile.dataset.node } : {}),
+      ...(version?.dataset.version ? { versionId: version.dataset.version } : {}),
+    } }, source)
   }
   function capturePointerUp(event: PointerEvent) {
     if (replaying.value || !event.isTrusted || !pointer) return
@@ -238,9 +299,14 @@ export function useInteractionRecorder(options: {
         const incoming = parseInteractionLog(packet.log)
         if (incoming.room !== options.room.value || !current.value || current.value.room !== options.room.value) throw new Error('Wrong room')
         const events = new Map([...incoming.events, ...current.value.events].map((event) => [event.id, event]))
-        current.value.initialState = incoming.initialState
-        current.value.initialViewport = incoming.initialViewport
         current.value.events = [...events.values()]
+        const sessions = new Map((current.value.sessions ?? []).map((session) => [session.id, session]))
+        for (const session of incoming.sessions ?? []) {
+          const previous = sessions.get(session.id)
+          sessions.set(session.id, previous ? { ...previous, ...session,
+            eventIds: [...new Set([...previous.eventIds, ...session.eventIds])] } : session)
+        }
+        current.value.sessions = [...sessions.values()]
         eventIds.set(current.value.room, new Set(events.keys()))
         return true
       } catch {
@@ -252,7 +318,7 @@ export function useInteractionRecorder(options: {
   }
   function exportLog(source: InteractionLog | null = current.value) {
     if (!source) { options.notify('No interaction log is available', true); return }
-    const log = clone(source)
+    const log = parseInteractionLog(clone(source))
     log.events.sort((a, b) => a.changeTime - b.changeTime || a.id.localeCompare(b.id))
     const url = URL.createObjectURL(new Blob([JSON.stringify(log, null, 2)], { type: 'application/json' }))
     const link = document.createElement('a')
@@ -262,11 +328,14 @@ export function useInteractionRecorder(options: {
     URL.revokeObjectURL(url)
   }
   function sendLog(reply: (message: unknown) => void) {
-    if (current.value && current.value.room === options.room.value && !replaying.value) reply({ type: 'session-log', log: clone(current.value) })
+    if (current.value && current.value.room === options.room.value && !replaying.value) {
+      reply({ type: 'session-log', log: parseInteractionLog(clone(current.value)) })
+    }
   }
   onMounted(() => {
     window.addEventListener('pointerdown', capturePointer, true)
     window.addEventListener('pointerup', capturePointerUp, true)
+    window.addEventListener('contextmenu', captureContextMenu, true)
     window.addEventListener('keydown', captureKey, true)
     window.addEventListener('wheel', captureWheel, true)
     window.addEventListener('input', captureText, true)
@@ -275,9 +344,11 @@ export function useInteractionRecorder(options: {
     window.clearTimeout(viewportTimer)
     window.removeEventListener('pointerdown', capturePointer, true)
     window.removeEventListener('pointerup', capturePointerUp, true)
+    window.removeEventListener('contextmenu', captureContextMenu, true)
     window.removeEventListener('keydown', captureKey, true)
     window.removeEventListener('wheel', captureWheel, true)
     window.removeEventListener('input', captureText, true)
   })
-  return { current, replaying, startRoom, stopRoom, forgetRoom, recordState, recordAction, recordRemoteDeparture, receive, sendLog, exportLog, flushViewport }
+  return { current, replaying, startRoom, stopRoom, forgetRoom, recordState, recordAction, recordRemoteDeparture,
+    receive, sendLog, exportLog, flushViewport, refreshSessionBaseline, recordDialog }
 }

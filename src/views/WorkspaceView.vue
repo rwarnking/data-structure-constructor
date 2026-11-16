@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { ChartNoAxesCombined as AnalysisIcon, ChevronsLeft as FirstIcon, ChevronsRight as LastIcon,
+  Download as DownloadIcon, Pause as PauseIcon, Play as PlayIcon, SkipForward as NextIcon, X as ExitIcon } from '@lucide/vue'
 import { getClientId } from '../collaboration'
 import { useCollaboration } from '../composables/useCollaboration'
 import type { InteractionEntry, Ping } from '../types/collaboration'
@@ -243,6 +245,9 @@ const {
   onLocalChanges: (before, after, delta) => recorder?.recordState(before, after, delta),
   onLocalInteraction: (entry) => recorder?.recordAction(entry),
   onRemoteDeparture: (entry) => recorder?.recordRemoteDeparture(entry),
+  onSessionBaseline: (reply) => {
+    if (recorder?.refreshSessionBaseline()) recorder.sendLog(reply)
+  },
   onSessionMessage: (message) => recorder?.receive(message) ?? false,
   onSyncRequest: (reply) => recorder?.sendLog(reply),
   followVersion: (version) => {
@@ -264,6 +269,11 @@ const replay = useInteractionReplay({
   reset: () => {
     stopGraphAnimations()
     clearTransientMapViews()
+    menu.value = null
+    editor.value = null
+    entryOperation.value = null
+    bulkDeleteDialog.value = false
+    bulkDeleteMode.value = 'keep-children'
     remoteUsers.value = {}
     pings.value = []
     setRoomInteractions(currentRoomName.value, [])
@@ -279,6 +289,24 @@ const replay = useInteractionReplay({
     pan.value = { x: log.initialViewport.panX, y: log.initialViewport.panY }
   },
   apply: (event: InteractionEvent) => {
+    const parameters = event.parameters
+    if (event.dialog) {
+      editor.value = clone(event.dialog.editor)
+      entryOperation.value = clone(event.dialog.operation)
+      bulkDeleteDialog.value = event.dialog.deleteOpen
+      bulkDeleteMode.value = event.dialog.deleteMode
+    } else if (!dialogSessions.value.has(event.sessionId)) {
+      replayLegacyDialog(event)
+    }
+    if (parameters?.menuKind === 'entry' || parameters?.menuKind === 'version' || parameters?.menuKind === 'canvas') {
+      menu.value = { x: typeof parameters.x === 'number' ? parameters.x : event.cursor?.x ?? 0,
+        y: typeof parameters.y === 'number' ? parameters.y : event.cursor?.y ?? 0,
+        kind: parameters.menuKind,
+        ...(typeof parameters.nodeId === 'string' ? { nodeId: parameters.nodeId } : {}),
+        ...(typeof parameters.versionId === 'string' ? { versionId: parameters.versionId } : {}),
+      }
+    }
+    if (typeof parameters?.menuAction === 'string') menu.value = null
     if (event.patch) {
       state.value = applyInteractionPatch(state.value, event.patch, replayRevisions)
       clearTransientMapViews()
@@ -298,8 +326,7 @@ const replay = useInteractionReplay({
       activeVersionId: event.selection?.versionId ?? event.patch?.activeId ?? previous?.activeVersionId ?? null,
       selectedNodeIds: event.selection?.nodeIds ?? previous?.selectedNodeIds ?? [], lastSeen: Date.now(),
     } }
-    if (event.parameters?.meaningful === true) {
-      const parameters = event.parameters
+    if (parameters?.meaningful === true) {
       const ping = typeof parameters.x === 'number' && typeof parameters.y === 'number'
         ? { x: parameters.x, y: parameters.y,
           ...(parameters.coordinateSpace === 'viewport' ? { coordinateSpace: 'viewport' as const } : {}) } : undefined
@@ -311,13 +338,11 @@ const replay = useInteractionReplay({
         ...(ping ? { ping } : {}),
       })
       if (ping) showPing({ id: event.id, userId: event.actor.id, ...ping, createdAt: event.changeTime })
-      if (event.action === 'Left room') {
-        const { [event.actor.id]: _left, ...remaining } = remoteUsers.value
-        remoteUsers.value = remaining
-      }
     }
   },
 })
+const dialogSessions = computed(() => new Set(replay.log.value?.events.filter((event) => event.dialog)
+  .map((event) => event.sessionId) ?? []))
 const replayUsers = computed(() => Object.entries(remoteUsers.value).map(([id, user]) => ({
   id, name: user.name, activeVersionId: user.activeVersionId,
 })))
@@ -344,6 +369,60 @@ const { editor, setEntryValueInput, entryOperation, bulkDeleteMode, bulkDeleteDi
   removeSplitEntry, commitEntryOperation, detachEntry, canAttach, attachEntry,
 } = useHierarchyEditor({ clientId: CLIENT_ID, state, active, selectedNodes, isReadOnly, createVersion, canCreateFrom, setSelectedNodes, notify })
 
+watch([editor, entryOperation, bulkDeleteDialog, bulkDeleteMode], () => {
+  sessionRecorder.recordDialog({ editor: editor.value, operation: entryOperation.value,
+    deleteOpen: bulkDeleteDialog.value, deleteMode: bulkDeleteMode.value })
+}, { deep: true, flush: 'sync' })
+
+function replayLegacyDialog(event: InteractionEvent) {
+  if (event.patch) {
+    editor.value = null
+    entryOperation.value = null
+    bulkDeleteDialog.value = false
+    return
+  }
+  if (event.category !== 'input') return
+  const action = event.action.replace(/^Button: /, '')
+  if (event.action.startsWith('Input: ') && typeof event.parameters?.value === 'string') {
+    const label = event.action.slice(7)
+    const value = event.parameters.value
+    if (editor.value?.mode === 'create') {
+      const draft = editor.value.entries.at(-1)
+      if (draft && label === 'Entry name') draft.value = value
+      if (draft && label === 'Optional description') draft.description = value
+    } else if (editor.value?.mode === 'rename') {
+      if (label === 'e.g. Research notes') editor.value.value = value
+      if (label === 'Shown when you hover over this entry') editor.value.description = value
+    } else if (entryOperation.value?.mode === 'split') {
+      const match = /^Result (\d+) (name|description)$/.exec(label)
+      const draft = match ? entryOperation.value.entries[Number(match[1]) - 1] : undefined
+      if (draft && match) {
+        if (match[2] === 'name') draft.value = value
+        else draft.description = value
+      }
+    }
+    return
+  }
+  if (editor.value || entryOperation.value || bulkDeleteDialog.value) {
+    if (action === 'dismiss' || /^(Cancel|Close|Confirm|Add \d+ entr(?:y|ies)|Split entry|Merge entries|Delete entr(?:y|ies))$/i.test(action)) {
+      editor.value = null
+      entryOperation.value = null
+      bulkDeleteDialog.value = false
+    } else if (action === 'Add another entry') addEditorEntryRow()
+    else if (action === 'Add result entry') addSplitEntry()
+    return
+  }
+  const nodeId = typeof event.parameters?.nodeId === 'string' ? event.parameters.nodeId
+    : menu.value?.nodeId ?? selectedNodes.value[0] ?? selectedNode.value
+  if (action === 'newEntry' || /^New free entry\b/i.test(action) || action === 'Add Entry') addEntry()
+  else if (action === 'addChild' || /^Add child\b/i.test(action)) addChildren()
+  else if (action === 'group' || /^Add parent\b/i.test(action) || /^Group entries\b/i.test(action)) addParent()
+  else if ((action === 'edit' || /^Edit entry\b/i.test(action) || action === 'Change value') && nodeId) renameEntry(nodeId)
+  else if (action === 'mergeEntries' || /^Merge (selected )?entries\b/i.test(action)) openMergeEntries()
+  else if ((action === 'split' || /^Split entry\b/i.test(action)) && nodeId) openSplitEntry(nodeId)
+  else if (action === 'deleteNode' || /^Delete entry\b/i.test(action)) openBulkDelete()
+}
+
 function suppressGraphClicks() {
   suppressVersionClick = true
   suppressTileClick = true
@@ -367,7 +446,7 @@ watch(selectedNode, (nodeId) => {
   else if (!selectedNodes.value.includes(nodeId)) selectedNodes.value = [nodeId]
 })
 watch(isReadOnly, (readOnly) => {
-  if (!readOnly) return
+  if (!readOnly || sessionRecorder.replaying.value) return
   setSelectedNodes([])
   if (editor.value?.mode === 'rename') editor.value = null
   entryOperation.value = null
@@ -1583,17 +1662,14 @@ const cardModel: VersionCardModel = reactive({
         :room-status="roomStatus" :local-only="isLocalOnlyRoom(currentRoomName)" :connected-users="sessionRecorder.replaying.value ? replayUsers : connectedUsers" :client-id="CLIENT_ID" :versions="versions"
         :recent-interactions="recentInteractions" :branch-count="branchCount" :active="active" :color-for-user="displayColorForUser"
         :active-nodes="activeNodes" :active-children="activeChildren"
-        :replay-mode="sessionRecorder.replaying.value" :replay-playing="replay.playing.value" :replay-speed="replay.speed.value"
-        :replay-index="replay.index.value" :replay-total="replay.log.value?.events.length ?? 0"
+        :replay-mode="sessionRecorder.replaying.value"
         @toggle-sidebar="sidebarCollapsed = !sidebarCollapsed" @toggle-theme="toggleTheme"
         @set-volume="changeVolume" @toggle-mute="toggleMute" @set-branching="changeBranching"
         @change-room="roomDialogOpen = true" @copy-invite="copySessionInvite" @focus-collaborator="focusCollaborator"
         @focus-ping="playSound('tick'); focusPingLocation($event)" @navigate="navigateInteraction" @focus-active="focusActive"
         @import-data="importData" @export-data="exportData" @show-tags="tagVersionId = null; tagsOpen = true"
         @export-log="exportInteractionLog"
-        @replay-file="replayInteractionLog" @analyze-log="analysisOpen = true"
-        @replay-toggle="replay.playing.value ? replay.pause() : replay.play()" @replay-beginning="replay.beginning" @replay-next="replay.next"
-        @replay-end="replay.end" @replay-speed="replay.speed.value = $event" @replay-exit="exitReplay" />
+        @replay-file="replayInteractionLog" />
 
       <section class="canvas-region" :inert="mergeMode && compareIds.length === 2 || sessionRecorder.replaying.value">
         <div ref="graphCanvas" class="graph-canvas" :class="{ 'ping-mode': pingMode }" @wheel="onWheel" @contextmenu="onCanvasContext" @pointerdown.capture="handlePingPointer" @pointermove.capture="trackPingPointerMove" @pointerup.capture="clearPingPointer" @pointercancel.capture="clearPingPointer" @click.capture="handlePingClick" @click="onCanvasClick" @pointerdown="startCanvasPan" @pointermove="moveCanvasPan" @pointerup="endCanvasPan" @pointercancel="endCanvasPan">
@@ -1653,6 +1729,38 @@ const cardModel: VersionCardModel = reactive({
         @toggle="actionSidebarCollapsed = !actionSidebarCollapsed" @action="performAction" />
     </div>
 
+    <div v-if="sessionRecorder.replaying.value" class="replay-toolbar" role="toolbar" aria-label="Interaction log replay controls">
+      <label class="replay-user-control">
+        <span>User</span>
+        <select aria-label="Replay user" :value="replay.selectedActorId.value ?? ''"
+          @change="replay.selectActor(($event.target as HTMLSelectElement).value)">
+          <option v-for="actor in replay.actors.value" :key="actor.id" :value="actor.id">{{ actor.name }}</option>
+        </select>
+      </label>
+      <button type="button" aria-label="Jump to beginning" title="Jump to beginning" @click="replay.beginning"><FirstIcon :size="17" /></button>
+      <button type="button" :aria-label="replay.playing.value ? 'Pause' : 'Play'"
+        :title="replay.playing.value ? 'Pause' : 'Play'" @click="replay.playing.value ? replay.pause() : replay.play()">
+        <component :is="replay.playing.value ? PauseIcon : PlayIcon" :size="17" />
+      </button>
+      <button type="button" aria-label="Skip to next step" title="Skip to next step"
+        :disabled="replay.index.value >= replay.events.value.length" @click="replay.next"><NextIcon :size="17" /></button>
+      <button type="button" aria-label="Jump to end" title="Jump to end" @click="replay.end"><LastIcon :size="17" /></button>
+      <label class="replay-timeline">
+        <span>{{ replay.index.value }} / {{ replay.events.value.length }}</span>
+        <input type="range" min="0" :max="replay.events.value.length" step="1" aria-label="Replay timeline"
+          :disabled="!replay.events.value.length" :value="replay.index.value"
+          @input="replay.seek(Number(($event.target as HTMLInputElement).value))" />
+      </label>
+      <select aria-label="Playback speed" :value="replay.speed.value"
+        @change="replay.speed.value = Number(($event.target as HTMLSelectElement).value)">
+        <option :value="0.25">0.25×</option><option :value="0.5">0.5×</option><option :value="1">1×</option>
+        <option :value="2">2×</option><option :value="4">4×</option><option :value="8">8×</option>
+      </select>
+      <button type="button" aria-label="Export Interaction Log" title="Export Interaction Log" @click="exportInteractionLog"><DownloadIcon :size="17" /></button>
+      <button type="button" aria-label="Analyze Interaction Log" title="Analyze Interaction Log" @click="analysisOpen = true"><AnalysisIcon :size="17" /></button>
+      <button type="button" aria-label="Exit replay" title="Exit replay" @click="exitReplay"><ExitIcon :size="17" /></button>
+    </div>
+
     <div v-if="sessionRecorder.replaying.value" class="replay-cursors" aria-hidden="true">
       <div v-for="(cursor, id) in replay.cursorPositions.value" :key="id" class="replay-cursor"
         :style="{ left: `${cursor.x}px`, top: `${cursor.y}px`, '--cursor-color': cursor.color }">▲ <span>{{ cursor.name }}</span></div>
@@ -1662,7 +1770,8 @@ const cardModel: VersionCardModel = reactive({
       :action-sidebar-collapsed="actionSidebarCollapsed" @confirm="confirmMerge" @entry-click="playSound('entryClick')"
       @pick="playSound('entryAdded')" @omit="playSound('entryClick')" />
 
-    <div v-if="menu" ref="contextMenuElement" class="context-menu" :style="{ left: `${contextMenuPosition.x}px`, top: `${contextMenuPosition.y}px` }" @click.stop>
+    <div v-if="menu" ref="contextMenuElement" class="context-menu" :inert="sessionRecorder.replaying.value"
+      :style="{ left: `${contextMenuPosition.x}px`, top: `${contextMenuPosition.y}px` }" @click.stop>
       <template v-if="menu.kind === 'version'">
         <div class="context-title">{{ menu.versionId === 'v0' ? 'ROOT ACTIONS' : 'VERSION ACTIONS' }}</div>
         <button @click="addEntryToVersion(menu.versionId); menu = null"><Plus :size="15" /> Add Entry</button>
@@ -1706,9 +1815,9 @@ const cardModel: VersionCardModel = reactive({
         <button @click="fitGraph(); menu = null"><FitAllIcon :size="15" /> Fit all versions</button>
       </template>
     </div>
-    <EntryEditor v-if="editor" :editor="editor" :set-entry-value-input="setEntryValueInput"
+    <EntryEditor v-if="editor" :inert="sessionRecorder.replaying.value" :editor="editor" :set-entry-value-input="setEntryValueInput"
       @close="editor = null" @commit="commitEditor" @add-row="addEditorEntryRow" @remove-row="removeEditorEntryRow" />
-    <div v-if="bulkDeleteDialog" class="editor-scrim" @click.self="bulkDeleteDialog = false">
+    <div v-if="bulkDeleteDialog" class="editor-scrim" :inert="sessionRecorder.replaying.value" @click.self="bulkDeleteDialog = false">
       <form class="entry-editor operation-editor" @submit.prevent="deleteSelectedEntries(bulkDeleteMode)">
         <div class="editor-heading"><span class="section-label">DELETE {{ selectedNodes.length }} SELECTED {{ selectedNodes.length === 1 ? 'ENTRY' : 'ENTRIES' }}</span><button type="button" class="quiet-icon" title="Close" @click="bulkDeleteDialog = false"><X :size="17" /></button></div>
         <label class="editor-label" for="bulk-delete-mode">How should children be handled?</label>
@@ -1721,7 +1830,7 @@ const cardModel: VersionCardModel = reactive({
         <div class="editor-actions"><button type="button" class="cancel-button" @click="bulkDeleteDialog = false">Cancel</button><button type="submit" class="primary-button danger-button"><Trash2 :size="15" /> Delete {{ selectedNodes.length === 1 ? 'entry' : 'entries' }}</button></div>
       </form>
     </div>
-    <EntryOperationDialog v-if="entryOperation" :entry-operation="entryOperation" :data="active.data"
+    <EntryOperationDialog v-if="entryOperation" :inert="sessionRecorder.replaying.value" :entry-operation="entryOperation" :data="active.data"
       @close="entryOperation = null" @commit="commitEntryOperation" @add-split="addSplitEntry" @remove-split="removeSplitEntry" />
     <RoomManager v-if="roomDialogOpen" v-model="newRoomName" :local-rooms="localRooms" :current-room-name="currentRoomName"
       @close="roomDialogOpen = false" @activate="activateRoom" @delete="deleteLocalRoom" @create="createRoomFromDialog" @error="playSound('error')" />

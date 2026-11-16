@@ -1,8 +1,73 @@
 import type { MapView, Tile, TreeNode } from '../types/workspace'
 import { findNode, nodeParentIds } from './tree'
 import { hierarchy, treemap, treemapSquarify } from 'd3-hierarchy'
+import Hypher from 'hypher'
+import english from 'hyphenation.en-us'
 
 let labelContext: CanvasRenderingContext2D | null | undefined
+const hyphenator = new Hypher(english)
+
+function prefixThatFits(text: string, width: number, measure: (text: string) => number) {
+  let prefix = ''
+  for (const character of Array.from(text)) {
+    if (measure(prefix + character) > width) break
+    prefix += character
+  }
+  return prefix.trimEnd()
+}
+
+function wrapLongWord(word: string, width: number, measure: (text: string) => number) {
+  const characters = Array.from(word)
+  const syllables = hyphenator.hyphenate(word)
+  const boundaries: number[] = []
+  let syllableOffset = 0
+  for (const syllable of syllables) {
+    syllableOffset += Array.from(syllable).length
+    if (syllableOffset > 0 && syllableOffset < characters.length) boundaries.push(syllableOffset)
+  }
+  boundaries.push(characters.length)
+
+  const lines: string[] = []
+  let offset = 0
+  while (offset < characters.length) {
+    let plainEnd = offset
+    let markedEnd = offset
+    let markedSuffix = ''
+    for (const boundary of boundaries) {
+      if (boundary <= offset) continue
+      const piece = characters.slice(offset, boundary).join('')
+      const needsHyphen = boundary < characters.length && characters[boundary - 1] !== '-'
+      if (needsHyphen && measure(`${piece}-`) <= width) {
+        markedEnd = boundary
+        markedSuffix = '-'
+      } else if (piece.endsWith('-') && measure(piece) <= width) {
+        markedEnd = boundary
+        markedSuffix = ''
+      }
+      else if (measure(piece) <= width) plainEnd = boundary
+    }
+
+    const bestEnd = markedEnd > offset ? markedEnd : plainEnd
+    const bestSuffix = markedEnd > offset ? markedSuffix : ''
+    if (bestEnd === offset) {
+      const remainder = characters.slice(offset).join('')
+      let piece = prefixThatFits(remainder, width, measure)
+      if (!piece) break
+      const end = offset + Array.from(piece).length
+      if (end < characters.length && characters[end - 1] !== '-' && measure(`${piece}-`) <= width) {
+        piece += '-'
+      }
+      lines.push(piece)
+      offset = end
+      continue
+    }
+
+    lines.push(`${characters.slice(offset, bestEnd).join('')}${bestSuffix}`)
+    offset = bestEnd
+  }
+  return lines
+}
+
 export function layoutTileLabel(tile: Tile) {
   const width = Math.max(0, tile.width - 10)
   const height = Math.max(0, Math.min(tile.height, tile.hasChildren ? TREE_HEADER_HEIGHT : tile.height) - 6)
@@ -15,43 +80,44 @@ export function layoutTileLabel(tile: Tile) {
   if (labelContext) labelContext.font = `500 ${fontSize}px Arial, sans-serif`
   const measure = (text: string) => labelContext
     ? labelContext.measureText(text).width : text.length * fontSize * 0.65
-  if (measure('...') > width) return { fontSize, lines: [] as string[] }
+  const text = tile.label.trim()
   if (tile.hasChildren) {
-    let text = tile.label.trim()
-    if (measure(text) > width) {
-      while (text && measure(`${text}...`) > width) text = Array.from(text).slice(0, -1).join('')
-      text = `${text.trimEnd()}...`
-    }
-    return { fontSize, lines: text ? [text] : [] }
+    return { fontSize, lines: text ? [prefixThatFits(text, width, measure)].filter(Boolean) : [] }
   }
-  const words = tile.label.trim().split(/\s+/).filter(Boolean)
+
+  const words = text.split(/\s+/).filter(Boolean)
   const lines: string[] = []
   let line = ''
   let truncated = false
   for (const word of words) {
-    const pieces = word.match(/[^-]+-?|-/g) ?? [word]
-    for (let index = 0; index < pieces.length; index++) {
-      const piece = pieces[index]!
-      const separator = index === 0 && line ? ' ' : ''
-      if (measure(line + separator + piece) <= width) {
-        line += separator + piece
-        continue
-      }
-      if (line) { lines.push(line); line = '' }
+    const candidate = line ? `${line} ${word}` : word
+    if (measure(candidate) <= width) {
+      line = candidate
+      continue
+    }
+    if (line) {
+      lines.push(line)
+      line = ''
       if (lines.length >= maxLines) { truncated = true; break }
-      if (measure(piece) > width) {
-        let shortened = piece
-        while (shortened && measure(`${shortened}...`) > width) shortened = Array.from(shortened).slice(0, -1).join('')
-        line = `${shortened}...`
-        truncated = true
-        break
-      }
-      line = piece
+    }
+    if (measure(word) <= width) {
+      line = word
+      continue
+    }
+    const wrapped = wrapLongWord(word, width, measure)
+    if (!wrapped.length) { truncated = true; break }
+    for (let index = 0; index < wrapped.length; index++) {
+      if (lines.length >= maxLines) { truncated = true; break }
+      if (index === wrapped.length - 1) line = wrapped[index]!
+      else lines.push(wrapped[index]!)
     }
     if (truncated) break
   }
   if (line && lines.length < maxLines) lines.push(line)
-  if (truncated && lines.length && !lines.at(-1)!.endsWith('...')) {
+  if (truncated && maxLines === 1) {
+    return { fontSize, lines: [prefixThatFits(text, width, measure)].filter(Boolean) }
+  }
+  if (truncated && lines.length && measure('...') <= width) {
     let last = lines.at(-1)!
     while (last && measure(`${last}...`) > width) last = Array.from(last).slice(0, -1).join('')
     lines[lines.length - 1] = `${last.trimEnd()}...`
