@@ -643,7 +643,7 @@ test('legacy numbering migrates session changes without treating them as forks',
 })
 
 test('entry labels wrap at word boundaries and truncate without breaking words across lines', () => {
-  const tile = { id: 'a', label: 'Long labels wrap at spaces', x: 0, y: 0, width: 100, height: 90, depth: 0, hasChildren: false }
+  const tile = { id: 'a', label: 'Long labels wrap at spaces', x: 0, y: 0, width: 320, height: 150, depth: 0, hasChildren: false }
   const wrapped = layoutTileLabel(tile)
   assert.ok(wrapped.lines.length > 1)
   assert.equal(wrapped.lines.join(' '), tile.label)
@@ -654,13 +654,14 @@ test('entry labels wrap at word boundaries and truncate without breaking words a
   const hyphenated = layoutTileLabel({ ...tile, label: 'alpha-beta' })
   assert.equal(hyphenated.lines.join(''), 'alpha-beta')
   assert.ok(hyphenated.lines.length === 1 || hyphenated.lines[0].endsWith('-'))
-  assert.match(layoutTileLabel({ ...tile, height: 30, label: 'An entry with a much longer label that cannot fit' }).lines[0], /\.\.\.$/)
+  assert.match(layoutTileLabel({ ...tile, height: 55, label: 'An entry with a much longer label that cannot fit' }).lines[0], /\.\.\.$/)
   const parent = layoutTileLabel({ ...tile, hasChildren: true })
   assert.equal(parent.lines.length, 1)
   assert.match(parent.lines[0], /\.\.\.$/)
   assert.equal(parent.fontSize, layoutTileLabel({ ...tile, hasChildren: true, height: 12 }).fontSize)
   assert.equal(wrapped.fontSize, layoutTileLabel({ ...tile, height: 12 }).fontSize)
-  assert.ok(wrapped.fontSize > parent.fontSize && parent.fontSize > 14)
+  assert.equal(wrapped.fontSize, 36)
+  assert.equal(parent.fontSize, 32)
 })
 
 test('drag layout preserves overlapping positions and keeps previously visible content in view', () => {
@@ -820,7 +821,7 @@ test('squarified sibling subtrees fill their parent without overlapping', () => 
     }
   }
   const area = children.reduce((sum, tile) => sum + tile.width * tile.height, 0)
-  assert.ok(area / ((root.width - 16) * (root.height - 44)) > 0.95)
+  assert.ok(area / ((root.width - 16) * (root.height - 60)) > 0.95)
 })
 
 test('duplicate connectors retain the original choices across ties and nested duplicate groups', () => {

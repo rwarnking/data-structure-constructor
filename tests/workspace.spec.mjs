@@ -2184,7 +2184,8 @@ test('treemap labels use uniform font sizes and parent labels stay on one line',
   const font = async (label) => card.locator(`.tile-label[aria-label="${label}"]`).evaluate((element) => getComputedStyle(element).fontSize)
   expect(await font(parentName)).toBe(await font('Nested parent'))
   expect(await font('Leaf one')).toBe(await font('Leaf two'))
-  expect(parseFloat(await font('Leaf one'))).toBeGreaterThan(parseFloat(await font(parentName)))
+  expect(parseFloat(await font(parentName))).toBe(32)
+  expect(parseFloat(await font('Leaf one'))).toBe(36)
 })
 
 test('number shortcuts select the four camera presets directly', async ({ page }) => {
@@ -2294,6 +2295,28 @@ test('expanded sidebar exposes additional actions and search while collapsed sho
   await page.getByRole('button', { name: 'Expand action sidebar' }).click()
   await sidebar.getByRole('button', { name: 'Search versions, Ctrl or Command+F' }).click()
   await expect(page.getByRole('dialog', { name: 'Search versions' })).toBeVisible()
+})
+
+test('left sidebar text uses enlarged sizes and remains accessible when scrolled or collapsed', async ({ page }) => {
+  await openRoom(page)
+  await addEntries(page, ['Sidebar entry'])
+  await page.getByRole('button', { name: 'Settings' }).click()
+  const sidebar = page.locator('.sidebar')
+  const sizes = await sidebar.evaluate((element) => {
+    const selectors = ['.brand-name', '.section-label', '.current-room-name', '.session-status', '.session-button',
+      '.collaborator-info strong', '.collaborator-info small', '.interaction-heading small', '.interaction-action',
+      '.interaction-reference', '.interaction-time', '.metric-row', '.metric-row strong', '.active-version-top',
+      '.active-version-card > strong', '.active-meta', '.theme-toggle', '.volume-control']
+    return selectors.map((selector) => parseFloat(getComputedStyle(element.querySelector(selector)).fontSize))
+  })
+  expect(sizes).toEqual([25.5, 13.5, 15, 12, 12, 13.5, 12, 10.5, 12, 10.5, 10.5, 15, 16.5, 15, 15, 13.5, 13.5, 15])
+  await sidebar.locator('.active-version-card').scrollIntoViewIfNeeded()
+  await expect(sidebar.locator('.active-version-card')).toBeVisible()
+  await page.getByRole('button', { name: 'Collapse sidebar' }).click()
+  await expect(sidebar.locator('.compact-interaction').first()).toHaveCSS('font-size', '27px')
+  await page.getByRole('button', { name: 'Expand sidebar' }).click()
+  await page.setViewportSize({ width: 720, height: 800 })
+  await expect(sidebar.locator('.brand-name')).toHaveCSS('font-size', '25.5px')
 })
 
 test('collapsed sidebar retains room, user and interaction navigation', async ({ page }) => {

@@ -6,7 +6,7 @@ let labelContext: CanvasRenderingContext2D | null | undefined
 export function layoutTileLabel(tile: Tile) {
   const width = Math.max(0, tile.width - 10)
   const height = Math.max(0, Math.min(tile.height, tile.hasChildren ? TREE_HEADER_HEIGHT : tile.height) - 6)
-  const fontSize = tile.hasChildren ? 16 : 18
+  const fontSize = tile.hasChildren ? 32 : 36
   const maxLines = tile.hasChildren ? Math.min(1, Math.floor(height / (fontSize * 1.15))) : Math.floor(height / (fontSize * 1.15))
   if (!maxLines) return { fontSize, lines: [] as string[] }
   if (labelContext === undefined && typeof document !== 'undefined') {
@@ -65,7 +65,7 @@ export const TREE_MAP_HEIGHT = CARD_HEIGHT - 40
 const LEAF_TILE_WIDTH = 152
 const LEAF_TILE_HEIGHT = 106
 const TREE_PADDING = 8
-const TREE_HEADER_HEIGHT = 28
+const TREE_HEADER_HEIGHT = 44
 export const MAP_PADDING = 12
 export const MAP_GAP = 12
 const VERSION_TREEMAP_ASPECT = (CARD_WIDTH - 14) / (CARD_HEIGHT - 47)
