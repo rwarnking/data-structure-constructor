@@ -1269,11 +1269,11 @@ test('merge dialog and committed history put the higher step into the lower step
     await dialog.getByRole('button', { name: 'Confirm merge' }).click()
     await expect(dialog).toHaveCount(0)
     await expect.poll(async () => (await state(page, room)).versions.length).toBe(previousCount + 1)
-    const saved = await state(page, room)
-    const merge = saved.versions.find((item) => item.id === saved.activeId)
-    expect(merge.parentId).toBe(low)
-    expect(merge.mergeSourceId).toBe(high)
-    expect(merge.change).toBe(`Merge ${highLabel} into ${lowLabel}`)
+    await expect.poll(async () => {
+      const saved = await state(page, room)
+      const merge = saved.versions.find((item) => item.id === saved.activeId)
+      return { parentId: merge?.parentId, mergeSourceId: merge?.mergeSourceId, change: merge?.change }
+    }).toEqual({ parentId: low, mergeSourceId: high, change: `Merge ${highLabel} into ${lowLabel}` })
   }
 })
 
@@ -2031,6 +2031,8 @@ test('overlapping treemaps remain opaque and hit testing selects the topmost tar
   const source = card.locator('[data-node="source"]')
   const initial = await state(page, room)
   const upperBox = await upper.boundingBox()
+  const lowerBox = await lower.boundingBox()
+  expect(lowerBox.y + lowerBox.height).toBeGreaterThan(upperBox.y + upperBox.height)
   const lowerChildBox = await card.locator('[data-node="lower-child"]').boundingBox()
   const hit = { x: lowerChildBox.x + 8, y: lowerChildBox.y + 8 }
   expect(hit.x).toBeLessThan(upperBox.x + upperBox.width)
@@ -2059,8 +2061,16 @@ test('overlapping treemaps remain opaque and hit testing selects the topmost tar
   await expect.poll(async () => findNode(await activeData(page, room), 'Upper')?.children.map((node) => node.value)).toEqual(['Source'])
   const saved = await state(page, room)
   const version = saved.versions.find((item) => item.id === saved.activeId)
-  expect(version.positions.lower).toEqual(initial.versions.find((item) => item.id === 'v1').positions.lower)
+  const previous = initial.versions.find((item) => item.id === 'v1')
+  expect(version.positions.lower.x).toBe(previous.positions.lower.x)
+  expect(version.positions.lower.y).toBeGreaterThan(previous.positions.lower.y)
   expect(version.positions.upper).toEqual(initial.versions.find((item) => item.id === 'v1').positions.upper)
+  const gap = await card.evaluate((element) => {
+    const upper = element.querySelector('[data-node="upper"]').getBoundingClientRect()
+    const lower = element.querySelector('[data-node="lower"]').getBoundingClientRect()
+    return lower.top - upper.bottom
+  })
+  expect(Math.abs(gap)).toBeLessThan(1)
   await page.reload()
   expect((await state(page, room)).versions.find((item) => item.id === saved.activeId).positions).toEqual(version.positions)
 })
