@@ -76,12 +76,16 @@ export function useHierarchyEditor(options: {
       if (currentEditor.childOf) {
         const parents = currentEditor.childOf.map((id) => findNode(data, id))
         if (parents.some((parent) => !parent)) { notify('Selected entries are no longer available', true); return }
+        const added: TreeNode[] = []
         for (const parent of parents) {
-          parent!.children.push(...entries.map((entry) => makeNode(entry.value, entry.description)))
+          const children = entries.map((entry) => makeNode(entry.value, entry.description))
+          parent!.children.push(...children)
+          added.push(...children)
         }
         editor.value = null
         const count = parents.length * entries.length
-        createVersion(data, count > 1 ? `Created ${count} items` : `Add ${entries[0]!.value}`, count > 1, 'entryAdded')
+        const version = createVersion(data, count > 1 ? `Created ${count} items` : `Add ${entries[0]!.value}`, count > 1, 'entryAdded')
+        if (version) setSelectedNodes(added.map((node) => node.id))
         return
       }
       if (currentEditor.parentOf) {
@@ -123,7 +127,8 @@ export function useHierarchyEditor(options: {
       const summary = nodes.length === 1
         ? `${operation} ${entries[0]!.value}`
         : `Created ${nodes.length} items`
-      createVersion(data, summary, nodes.length > 1, 'entryAdded')
+      const version = createVersion(data, summary, nodes.length > 1, 'entryAdded')
+      if (version) setSelectedNodes(nodes.map((node) => node.id))
       return
     }
     const { nodeId, value: rawValue, description: rawDescription } = currentEditor
@@ -137,7 +142,8 @@ export function useHierarchyEditor(options: {
     if (description) node.description = description
     else delete node.description
     editor.value = null
-    createVersion(data, `Rename to ${value}`)
+    const version = createVersion(data, `Rename to ${value}`)
+    if (version) setSelectedNodes([node.id])
   }
 
   function renameEntry(id: string) {
@@ -166,8 +172,6 @@ export function useHierarchyEditor(options: {
     const data = clone(active.value.data)
     const node = findNode(data, id)
     if (!node) return
-    if (mode === 'subtree' && node.children.length
-      && !window.confirm(`Delete ${node.value} and all ${countNodes(node.children)} descendant entries?`)) return
     const parent = findParent(data, id)
     const siblings = parent?.children ?? data
     const index = siblings.findIndex((entry) => entry.id === id)
@@ -182,23 +186,14 @@ export function useHierarchyEditor(options: {
   }
 
   function deleteSelectedEntries(mode: 'keep-children' | 'subtree' | 'detach-children') {
-    if (isReadOnly.value || selectedNodes.value.length < 2) return
+    if (isReadOnly.value || selectedNodes.value.length < 1) return
     const selected = new Set(selectedNodes.value.filter((id) => !!findNode(active.value.data, id)))
-    if (selected.size < 2) return
-    const selectedRoots = [...selected].filter((id) => {
-      let parent = findParent(active.value.data, id)
-      while (parent) {
-        if (selected.has(parent.id)) return false
-        parent = findParent(active.value.data, parent.id)
-      }
-      return true
-    })
-    if (mode === 'subtree') {
-      const count = selectedRoots.reduce((sum, id) => {
-        const node = findNode(active.value.data, id)
-        return sum + (node ? countNodes([node]) : 0)
-      }, 0)
-      if (!window.confirm(`Delete ${count} entries in the selected subtrees?`)) return
+    if (!selected.size) return
+    if (selected.size === 1) {
+      deleteEntry([...selected][0]!, mode)
+      entryOperation.value = null
+      bulkDeleteDialog.value = false
+      return
     }
     const data = clone(active.value.data)
     const detachedRoots: TreeNode[] = []
@@ -226,7 +221,10 @@ export function useHierarchyEditor(options: {
   }
 
   function openBulkDelete() {
-    if (selectedNodes.value.length < 2) return
+    if (selectedNodes.value.length === 1) {
+      const node = findNode(active.value.data, selectedNodes.value[0]!)
+      if (!node?.children.length) return
+    } else if (selectedNodes.value.length < 2) return
     bulkDeleteMode.value = 'keep-children'
     bulkDeleteDialog.value = true
   }

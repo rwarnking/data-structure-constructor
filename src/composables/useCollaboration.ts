@@ -129,7 +129,7 @@ export function useCollaboration(options: {
 
   function logInteraction(
     action: string,
-    reference: { versionId?: string; nodeId?: string; nodeLabel?: string; ping?: { x: number; y: number } } = {},
+    reference: { versionId?: string; nodeId?: string; nodeLabel?: string; ping?: { x: number; y: number; coordinateSpace?: 'viewport' } } = {},
   ) {
     const entry: InteractionEntry = {
       id: `${CLIENT_ID}-${Date.now()}-${++interactionSequence}`,
@@ -548,10 +548,12 @@ export function useCollaboration(options: {
         remoteUsers.value = remainingUsers
       }
     } else if (packet.type === 'ping') {
-      const ping = message as { id?: unknown; userId?: unknown; x?: unknown; y?: unknown }
+      const ping = message as { id?: unknown; userId?: unknown; x?: unknown; y?: unknown; coordinateSpace?: unknown }
       if (typeof ping.id !== 'string' || typeof ping.userId !== 'string' || ping.userId === CLIENT_ID
-        || !Number.isFinite(ping.x) || !Number.isFinite(ping.y)) return
-      const entry = { id: ping.id, userId: ping.userId, x: ping.x as number, y: ping.y as number, createdAt: Date.now() }
+        || !Number.isFinite(ping.x) || !Number.isFinite(ping.y)
+        || (ping.coordinateSpace !== undefined && ping.coordinateSpace !== 'viewport')) return
+      const entry = { id: ping.id, userId: ping.userId, x: ping.x as number, y: ping.y as number,
+        ...(ping.coordinateSpace === 'viewport' ? { coordinateSpace: 'viewport' as const } : {}), createdAt: Date.now() }
       showPing(entry)
     } else if (packet.type === 'interaction') {
       const entry = (message as { entry?: unknown }).entry
@@ -598,17 +600,18 @@ export function useCollaboration(options: {
   }
   function sendPingAt(clientX: number, clientY: number) {
     const rect = graphCanvas.value?.getBoundingClientRect()
-    if (!rect) return
+    if (!rect || !rect.width || !rect.height) return
     const ping = {
       id: `${CLIENT_ID}-${Date.now()}-${++pingSequence}`,
       userId: CLIENT_ID,
-      x: (clientX - rect.left - pan.value.x) / zoom.value,
-      y: (clientY - rect.top - pan.value.y) / zoom.value,
+      x: (clientX - rect.left) / rect.width,
+      y: (clientY - rect.top) / rect.height,
+      coordinateSpace: 'viewport' as const,
       createdAt: Date.now(),
     }
     showPing(ping)
     peerRoom.send({ type: 'ping', ...ping })
-    logInteraction('Ping', { ping: { x: ping.x, y: ping.y } })
+    logInteraction('Ping', { ping: { x: ping.x, y: ping.y, coordinateSpace: ping.coordinateSpace } })
   }
 
   function onRoomStatus(status: RoomStatus) {

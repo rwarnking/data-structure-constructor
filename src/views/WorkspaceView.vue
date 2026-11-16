@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { getClientId } from '../collaboration'
 import { useCollaboration } from '../composables/useCollaboration'
-import type { InteractionEntry } from '../types/collaboration'
+import type { InteractionEntry, Ping } from '../types/collaboration'
 import { useVersionComparison } from '../composables/useVersionComparison'
 import { useGraphCamera } from '../composables/useGraphCamera'
 import { useTreemapViews } from '../composables/useTreemapViews'
@@ -301,7 +301,8 @@ const replay = useInteractionReplay({
     if (event.parameters?.meaningful === true) {
       const parameters = event.parameters
       const ping = typeof parameters.x === 'number' && typeof parameters.y === 'number'
-        ? { x: parameters.x, y: parameters.y } : undefined
+        ? { x: parameters.x, y: parameters.y,
+          ...(parameters.coordinateSpace === 'viewport' ? { coordinateSpace: 'viewport' as const } : {}) } : undefined
       addReplayInteraction({ id: event.id, actorId: event.actor.id, actorName: event.actor.name,
         actorColor: event.actor.color, action: event.action, createdAt: event.changeTime,
         ...(typeof parameters.versionId === 'string' ? { versionId: parameters.versionId } : {}),
@@ -408,12 +409,27 @@ function focusCollaborator(userId: string) {
   if (version) { playSound('focus'); focusVersion(version) }
 }
 
-function focusPingLocation(location: { x: number; y: number }) {
+function focusPingLocation(location: { x: number; y: number; coordinateSpace?: 'viewport' }) {
   const targetZoom = Math.min(ZOOM_MAX, Math.max(1, zoom.value))
+  const screenX = location.coordinateSpace === 'viewport'
+    ? location.x * canvasSize.value.width
+    : pan.value.x + location.x * zoom.value
+  const screenY = location.coordinateSpace === 'viewport'
+    ? location.y * canvasSize.value.height
+    : pan.value.y + location.y * zoom.value
+  const worldX = (screenX - pan.value.x) / zoom.value
+  const worldY = (screenY - pan.value.y) / zoom.value
   animateCamera(targetZoom, {
-    x: canvasSize.value.width / 2 - location.x * targetZoom,
-    y: canvasSize.value.height / 2 - location.y * targetZoom,
+    x: canvasSize.value.width / 2 - worldX * targetZoom,
+    y: canvasSize.value.height / 2 - worldY * targetZoom,
   })
+}
+function pingStyle(ping: Ping) {
+  const x = ping.coordinateSpace === 'viewport' ? ping.x * 100
+    : (pan.value.x + ping.x * zoom.value) / canvasSize.value.width * 100
+  const y = ping.coordinateSpace === 'viewport' ? ping.y * 100
+    : (pan.value.y + ping.y * zoom.value) / canvasSize.value.height * 100
+  return { left: `${x}%`, top: `${y}%`, '--ping-color': colorForUser(ping.userId) }
 }
 
 function navigateInteraction(entry: InteractionEntry, kind: 'version' | 'node' | 'ping') {
@@ -1248,15 +1264,24 @@ function actionDisabled(action: ShortcutAction) {
   return false
 }
 function deleteSelection() {
-  if (selectedNodes.value.length > 1) { openBulkDelete(); return }
+  if (selectedNodes.value.length > 1) {
+    if (selectionNeedsDeleteChoice()) openBulkDelete()
+    else deleteSelectedEntries('subtree')
+    return
+  }
   const id = selectedNode.value
   const node = id && findNode(active.value.data, id)
   if (!id || !node) return
   if (!node.children.length) { deleteEntry(id, 'subtree'); return }
-  const bounds = graphCanvas.value?.querySelector<SVGRectElement>('.version-card.active .tree-tile.is-selected')?.getBoundingClientRect()
-    ?? graphCanvas.value?.getBoundingClientRect()
-  if (bounds) menu.value = { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2,
-    kind: 'entry', nodeId: id, versionId: active.value.id }
+  openBulkDelete()
+}
+function selectionNeedsDeleteChoice() {
+  const selected = new Set(selectedNodes.value)
+  return [...selected].some((id) => findNode(active.value.data, id)?.children.some((child) => !selected.has(child.id)))
+}
+function deleteContextSelection() {
+  if (selectionNeedsDeleteChoice()) openBulkDelete()
+  else deleteSelectedEntries('subtree')
 }
 function performAction(action: ShortcutAction) {
   if (actionDisabled(action)) return
@@ -1417,14 +1442,30 @@ function pasteEntry() {
     return
   }
   const rekey = (node: TreeNode): TreeNode => ({ ...node, id: `n${state.value.nextNode++}-${CLIENT_ID}`, children: node.children.map(rekey) })
-  const newNodes = copied.nodes.map(rekey)
-  const label = newNodes.length === 1 ? newNodes[0]!.value : `${newNodes.length} entries`
-  const version = createVersion([...clone(active.value.data), ...newNodes], `Paste ${label}`, true, copied.cut ? 'moved' : 'entryAdded')
+  const data = clone(active.value.data)
+  const targets = selectedNodes.value.map((id) => findNode(data, id)).filter((node): node is TreeNode => !!node)
+  const inserted: { source: TreeNode; copy: TreeNode }[] = []
+  if (targets.length) {
+    for (const target of targets) {
+      for (const sourceNode of copied.nodes) {
+        const copy = rekey(sourceNode)
+        target.children.push(copy)
+        inserted.push({ source: sourceNode, copy })
+      }
+    }
+  } else {
+    const newNodes = copied.nodes.map(rekey)
+    data.push(...newNodes)
+    newNodes.forEach((copy, index) => inserted.push({ source: copied.nodes[index]!, copy }))
+  }
+  const pastedCount = inserted.length
+  const label = pastedCount === 1 ? inserted[0]!.copy.value : `${pastedCount} entries`
+  const version = createVersion(data, `Paste ${label}`, true, copied.cut ? 'moved' : 'entryAdded')
   if (!version) return
   if (source) {
-    state.value.copyLinks = [...state.value.copyLinks, ...copied.nodes.map((node, index) => ({
-      sourceVersionId: source.id, sourceNodeId: node.id,
-      targetVersionId: version.id, targetNodeId: newNodes[index]!.id,
+    state.value.copyLinks = [...state.value.copyLinks, ...inserted.map(({ source: sourceNode, copy }) => ({
+      sourceVersionId: source.id, sourceNodeId: sourceNode.id,
+      targetVersionId: version.id, targetNodeId: copy.id,
     }))].sort(compareCopyLinks)
   }
   if (copied.cut && source) {
@@ -1442,9 +1483,13 @@ function pasteEntry() {
     clipboard.value = null
     sessionStorage.removeItem(clipboardStorageKey(currentRoomName.value))
   }
+  setSelectedNodes(inserted.map(({ copy }) => copy.id))
 }
 function pasteEntryToVersion(versionId?: string) {
-  if (versionId) state.value.activeId = versionId
+  if (versionId && versionId !== active.value.id) {
+    state.value.activeId = versionId
+    setSelectedNodes([])
+  }
   pasteEntry()
 }
 function onVersionMenu(version: Version, event: MouseEvent) {
@@ -1515,8 +1560,8 @@ const cardModel: VersionCardModel = reactive({
       @close="roomDialogOpen = false" @activate="switchFromBlockedRoom" @delete="deleteLocalRoom" @create="switchFromBlockedRoom(newRoomName)" @error="playSound('error')" />
   </main>
   <main v-else class="app-shell" :class="{ dark: darkMode }" @click.capture="handleAppClickCapture">
-    <div class="workspace" :inert="mergeMode && compareIds.length === 2">
-      <WorkspaceSidebar :sidebar-collapsed="sidebarCollapsed" :dark-mode="darkMode" :current-room-name="currentRoomName"
+    <div class="workspace">
+      <WorkspaceSidebar :inert="mergeMode && compareIds.length === 2" :sidebar-collapsed="sidebarCollapsed" :dark-mode="darkMode" :current-room-name="currentRoomName"
         :volume="volume" :muted="muted" :branching-enabled="state.branching?.enabled !== false"
         :room-status="roomStatus" :local-only="isLocalOnlyRoom(currentRoomName)" :connected-users="sessionRecorder.replaying.value ? replayUsers : connectedUsers" :client-id="CLIENT_ID" :versions="versions"
         :recent-interactions="recentInteractions" :branch-count="branchCount" :active="active" :color-for-user="displayColorForUser"
@@ -1533,7 +1578,7 @@ const cardModel: VersionCardModel = reactive({
         @replay-toggle="replay.playing.value ? replay.pause() : replay.play()" @replay-beginning="replay.beginning" @replay-next="replay.next"
         @replay-end="replay.end" @replay-speed="replay.speed.value = $event" @replay-exit="exitReplay" />
 
-      <section class="canvas-region" :inert="sessionRecorder.replaying.value">
+      <section class="canvas-region" :inert="mergeMode && compareIds.length === 2 || sessionRecorder.replaying.value">
         <div ref="graphCanvas" class="graph-canvas" :class="{ 'ping-mode': pingMode }" @wheel="onWheel" @contextmenu="onCanvasContext" @pointerdown.capture="handlePingPointer" @pointermove.capture="trackPingPointerMove" @pointerup.capture="clearPingPointer" @pointercancel.capture="clearPingPointer" @click.capture="handlePingClick" @click="onCanvasClick" @pointerdown="startCanvasPan" @pointermove="moveCanvasPan" @pointerup="endCanvasPan" @pointercancel="endCanvasPan">
           <div class="canvas-grid"></div>
           <button type="button" class="tutorial-button quiet-icon" aria-label="Open tutorial" title="Open tutorial"
@@ -1564,12 +1609,11 @@ const cardModel: VersionCardModel = reactive({
                 </path>
               </g>
             </svg>
-            <span v-for="ping in pings" :key="ping.id" class="ping-origin"
-              :style="{ left: `${ping.x}px`, top: `${ping.y}px`, '--ping-color': colorForUser(ping.userId) }">
-              <span v-for="pulse in 3" :key="pulse" class="ping-ripple"
-                :style="{ animationDelay: `${(pulse - 1) * 180}ms` }"></span>
-            </span>
           </div>
+          <span v-for="ping in pings" :key="ping.id" class="ping-origin" :style="pingStyle(ping)">
+            <span v-for="pulse in 3" :key="pulse" class="ping-ripple"
+              :style="{ animationDelay: `${(pulse - 1) * 180}ms` }"></span>
+          </span>
 
           <template v-for="lane in visibleLanes" :key="lane.lane">
             <button type="button" class="lane-navigation lane-navigation-left" :class="{ 'active-lane': active.id !== 'v0' && active.lane === lane.lane }" :data-lane="lane.lane"
@@ -1609,6 +1653,7 @@ const cardModel: VersionCardModel = reactive({
         <button @click="focusActive(); menu = null"><FocusIcon :size="15" /> Focus active version</button>
         <button v-if="versions.find((version) => version.id === menu!.versionId)?.data.length" @click="centerVersionTreemaps(menu.versionId!); menu = null"><CenterIcon :size="15" /> Center all elements</button>
         <button v-if="!isReadOnly && versions.find((version) => version.id === menu!.versionId)?.data.length" @click="compactVersionTreemaps(menu.versionId!); menu = null"><CompactIcon :size="15" /> Compact Layout</button>
+        <button v-if="clipboard && !isReadOnly" @click="pasteEntryToVersion(menu.versionId); menu = null"><ClipboardPaste :size="15" /> Add copied entry</button>
         <template v-if="menu.versionId !== 'v0'">
           <div class="context-divider"></div>
           <button class="danger-action" @click="deleteBranch(menu.versionId!)"><Trash2 :size="15" /> Delete version and descendants</button>
@@ -1621,21 +1666,21 @@ const cardModel: VersionCardModel = reactive({
           <button @click="addParent(); menu = null"><GroupIcon :size="15" /> Add parent</button>
           <button @click="renameEntry(menu.nodeId!); menu = null"><Pencil :size="15" /> Change value</button>
           <button v-if="selectedNodes.length >= 2" @click="openMergeEntries(); menu = null"><MergeEntriesIcon :size="15" /> Merge selected entries</button>
-          <button v-if="selectedNodes.length >= 2" class="danger-action" @click="openBulkDelete(); menu = null"><Trash2 :size="15" /> Delete selected entries</button>
+          <button v-if="selectedNodes.length >= 2" class="danger-action" @click="deleteContextSelection(); menu = null"><Trash2 :size="15" /> Delete entries</button>
           <button v-if="selectedNodes.length === 1 && selectedNodes[0] === menu.nodeId" @click="openSplitEntry(menu.nodeId!); menu = null"><SplitIcon :size="15" /> Split entry</button>
           <button v-if="findParent(active.data, menu.nodeId!)" @click="detachEntry(menu.nodeId!); menu = null"><Unlink :size="15" /> Detach from parent</button>
         </template>
-        <template v-if="!isReadOnly && !(findNode(active.data, menu.nodeId!)?.children.length)">
+        <template v-if="!isReadOnly && selectedNodes.length < 2 && !(findNode(active.data, menu.nodeId!)?.children.length)">
           <button class="danger-action" @click="deleteEntry(menu.nodeId!, 'subtree'); menu = null"><Trash2 :size="15" /> Delete entry</button>
         </template>
-        <template v-else-if="!isReadOnly">
+        <template v-else-if="!isReadOnly && selectedNodes.length < 2">
           <div class="context-divider"></div>
           <button class="danger-action" @click="deleteEntry(menu.nodeId!, 'keep-children'); menu = null"><Trash2 :size="15" /> Delete selected entry, keep children</button>
           <button class="danger-action" @click="deleteEntry(menu.nodeId!, 'subtree'); menu = null"><Trash2 :size="15" /> Delete selected entry and its children</button>
           <button class="danger-action" @click="deleteEntry(menu.nodeId!, 'detach-children'); menu = null"><Trash2 :size="15" /> Delete selected entry, detach children</button>
         </template>
         <div class="context-divider"></div>
-        <button @click="copyEntry(menu.nodeId!); menu = null"><Copy :size="15" /> Copy entry and subtree</button>
+        <button @click="copyEntry(menu.nodeId!); menu = null"><Copy :size="15" /> Copy entry and children</button>
         <button v-if="clipboard && !isReadOnly" @click="pasteEntryToVersion(menu.versionId); menu = null"><ClipboardPaste :size="15" /> Add copied entry</button>
       </template>
       <template v-else>
@@ -1648,7 +1693,7 @@ const cardModel: VersionCardModel = reactive({
       @close="editor = null" @commit="commitEditor" @add-row="addEditorEntryRow" @remove-row="removeEditorEntryRow" />
     <div v-if="bulkDeleteDialog" class="editor-scrim" @click.self="bulkDeleteDialog = false">
       <form class="entry-editor operation-editor" @submit.prevent="deleteSelectedEntries(bulkDeleteMode)">
-        <div class="editor-heading"><span class="section-label">DELETE {{ selectedNodes.length }} SELECTED ENTRIES</span><button type="button" class="quiet-icon" title="Close" @click="bulkDeleteDialog = false"><X :size="17" /></button></div>
+        <div class="editor-heading"><span class="section-label">DELETE {{ selectedNodes.length }} SELECTED {{ selectedNodes.length === 1 ? 'ENTRY' : 'ENTRIES' }}</span><button type="button" class="quiet-icon" title="Close" @click="bulkDeleteDialog = false"><X :size="17" /></button></div>
         <label class="editor-label" for="bulk-delete-mode">How should children be handled?</label>
         <select id="bulk-delete-mode" v-model="bulkDeleteMode">
           <option value="keep-children">Remove selected entries and keep children in their place</option>
@@ -1656,7 +1701,7 @@ const cardModel: VersionCardModel = reactive({
           <option value="detach-children">Remove selected entries and detach children to roots</option>
         </select>
         <p class="operation-note">The complete selection is applied as one new version.</p>
-        <div class="editor-actions"><button type="button" class="cancel-button" @click="bulkDeleteDialog = false">Cancel</button><button type="submit" class="primary-button danger-button"><Trash2 :size="15" /> Delete entries</button></div>
+        <div class="editor-actions"><button type="button" class="cancel-button" @click="bulkDeleteDialog = false">Cancel</button><button type="submit" class="primary-button danger-button"><Trash2 :size="15" /> Delete {{ selectedNodes.length === 1 ? 'entry' : 'entries' }}</button></div>
       </form>
     </div>
     <EntryOperationDialog v-if="entryOperation" :entry-operation="entryOperation" :data="active.data"

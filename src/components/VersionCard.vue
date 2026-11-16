@@ -118,9 +118,8 @@ const dropTarget = computed(() => props.version.id === active.value.id
               @pointerleave="leaveTile(version.id, tile.id)"
               @click.stop="onTileClick(version, tile.id, $event)"
               @dblclick.stop="onTileDoubleClick(version, tile.id)"
-              @contextmenu="version.id === active.id && !isReadOnly && onTileContext($event, tile.id)">
-              <title>{{ tile.label }}</title>
-            </rect>
+              @contextmenu="version.id === active.id && !isReadOnly && onTileContext($event, tile.id)"
+              :aria-label="tile.label" />
             <TileLabel v-for="tile in group" :key="`label-${tile.id}`"
               :tile="tile" class="tile-label" />
             <rect v-if="overlappingTreemaps.has(group[0]!.id)" class="treemap-overlap-outline"

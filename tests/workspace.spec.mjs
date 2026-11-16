@@ -107,6 +107,22 @@ async function contextAction(page, room, name, action) {
   await page.getByRole('button', { name: action, exact: true }).click()
 }
 
+async function clearEntrySelection(page) {
+  const point = await page.locator('.graph-canvas').evaluate((canvas) => {
+    const bounds = canvas.getBoundingClientRect()
+    for (let y = bounds.top + 8; y < bounds.bottom - 8; y += 16) {
+      for (let x = bounds.left + 8; x < bounds.right - 8; x += 16) {
+        const hit = document.elementFromPoint(x, y)
+        if (hit && canvas.contains(hit) && !hit.closest('.version-card, button, .copy-link-hit, .canvas-controls')) return { x, y }
+      }
+    }
+    return null
+  })
+  expect(point).toBeTruthy()
+  await page.mouse.click(point.x, point.y)
+  await expect(page.locator('.version-card.active .tree-tile.is-selected')).toHaveCount(0)
+}
+
 test('tutorial navigates content, highlights actions, completes and restarts', async ({ page }) => {
   await openRoom(page)
   await page.getByRole('button', { name: 'Open tutorial' }).click()
@@ -324,6 +340,7 @@ test('difference outlines coexist with hover and selection fills in both themes'
   await addEntries(page, ['Unchanged'])
   await addEntries(page, ['Added'])
   await focusActive(page)
+  await clearEntrySelection(page)
   const added = await activeTile(page, room, 'Added')
   const unchanged = await activeTile(page, room, 'Unchanged')
   await expect(added).toHaveClass(/is-different/)
@@ -791,6 +808,7 @@ test('interaction analysis visualizes and inspects user, flow, viewport and vers
 test('new recordings combine committed sidebar actions and abstract their triggering button', async ({ page }) => {
   const room = await openRoom(page)
   await addEntries(page, ['One', 'Two', 'Three', 'Four'])
+  await clearEntrySelection(page)
   await contextAction(page, room, 'Two', 'Add child')
   await fillEntries(page, ['Child'])
   await contextAction(page, room, 'Two', 'Delete selected entry, keep children')
@@ -1153,17 +1171,22 @@ test('bulk creation, editing, copy connector, and deleting an entry create versi
   const room = await openRoom(page)
   await addEntries(page, ['Alpha', 'Beta'], true)
   await expect.poll(async () => (await activeData(page, room)).map((item) => item.value)).toEqual(['Alpha', 'Beta'])
+  await expect(page.locator('.version-card.active .tree-tile.is-selected')).toHaveCount(2)
 
   await contextAction(page, room, 'Alpha', 'Change value')
   await page.getByLabel('New value').fill('Renamed')
   await page.getByRole('button', { name: 'Confirm', exact: true }).click()
   await expect.poll(async () => !!findNode(await activeData(page, room), 'Renamed')).toBe(true)
   await expect(page.locator('.version-card.active')).toContainText('Renamed')
+  await expect(await activeTile(page, room, 'Renamed')).toHaveClass(/is-selected/)
 
-  await contextAction(page, room, 'Renamed', 'Copy entry and subtree')
+  await contextAction(page, room, 'Renamed', 'Copy entry and children')
+  await (await page.locator('.version-card.active')).click({ button: 'right', position: { x: 8, y: 8 } })
+  await expect(page.getByRole('button', { name: 'Add copied entry', exact: true })).toBeVisible()
+  await page.keyboard.press('Escape')
   await page.keyboard.press('Control+v')
   await expect.poll(async () => (await state(page, room)).copyLinks.length).toBe(1)
-  await expect.poll(async () => (await activeData(page, room)).filter((item) => item.value === 'Renamed').length).toBe(2)
+  await expect.poll(async () => findNode(await activeData(page, room), 'Renamed')?.children.map((item) => item.value)).toEqual(['Renamed'])
   await expect(page.locator('.copy-link-hit')).toHaveCount(1)
   const copy = (await state(page, room)).copyLinks[0]
   await expect(page.locator('.copy-link')).toHaveAttribute('d', /M /)
@@ -1176,6 +1199,49 @@ test('bulk creation, editing, copy connector, and deleting an entry create versi
   await contextAction(page, room, 'Beta', 'Delete entry')
   await expect.poll(async () => !!findNode(await activeData(page, room), 'Beta')).toBe(false)
   await expect(page.locator('.version-card.active .tile-label').filter({ hasText: 'Beta' })).toHaveCount(0)
+})
+
+test('pasting copied entries appends a copy to every selected target', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['Source', 'First target', 'Second target'])
+  await contextAction(page, room, 'Source', 'Copy entry and children')
+  await page.keyboard.press('Control+a')
+  await (await activeTile(page, room, 'Source')).click({ force: true })
+  await expect(page.locator('.version-card.active .tree-tile.is-selected')).toHaveCount(2)
+  await expect(await activeTile(page, room, 'First target')).toHaveClass(/is-selected/)
+  await expect(await activeTile(page, room, 'Second target')).toHaveClass(/is-selected/)
+  await page.keyboard.press('Control+v')
+  await expect.poll(async () => findNode(await activeData(page, room), 'First target')?.children.map((node) => node.value)).toEqual(['Source'])
+  await expect.poll(async () => findNode(await activeData(page, room), 'Second target')?.children.map((node) => node.value)).toEqual(['Source'])
+  await expect.poll(async () => (await state(page, room)).copyLinks.length).toBe(2)
+})
+
+test('sidebar deletion opens a child-choice dialog for a single parent and removes a leaf immediately', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['Parent'])
+  await contextAction(page, room, 'Parent', 'Add child')
+  await fillEntries(page, ['Child'])
+  await (await activeTile(page, room, 'Parent')).click({ position: { x: 4, y: 4 } })
+  await expect(await activeTile(page, room, 'Parent')).toHaveClass(/is-selected/)
+  await page.locator('.action-sidebar-item[title^="Delete entry ·"]').click()
+  await expect(page.locator('.editor-scrim')).toBeVisible()
+  await page.getByLabel('How should children be handled?').selectOption('subtree')
+  await page.getByRole('button', { name: 'Delete entry', exact: true }).click()
+  await expect.poll(async () => findNode(await activeData(page, room), 'Parent')).toBeUndefined()
+  await expect(page.locator('.editor-scrim')).toHaveCount(0)
+
+  await addEntries(page, ['Leaf'])
+  await focusActive(page)
+  await expect(await activeTile(page, room, 'Leaf')).toHaveClass(/is-selected/)
+  await page.locator('.action-sidebar-item[title^="Delete entry ·"]').click()
+  await expect.poll(async () => findNode(await activeData(page, room), 'Leaf')).toBeUndefined()
+  await expect(page.locator('.editor-scrim')).toHaveCount(0)
+
+  await addEntries(page, ['First leaf', 'Second leaf'])
+  await page.keyboard.press('Control+a')
+  await page.locator('.action-sidebar-item[title^="Delete entry ·"]').click()
+  await expect.poll(async () => (await activeData(page, room)).length).toBe(0)
+  await expect(page.locator('.editor-scrim')).toHaveCount(0)
 })
 
 test('split, merge and bulk delete operate on selected entries and preserve assigned children', async ({ page }) => {
@@ -1213,7 +1279,7 @@ test('split, merge and bulk delete operate on selected entries and preserve assi
   await (await activeTile(page, room, 'Delete me')).click({ modifiers: ['Shift'], position: { x: 8, y: 8 } })
   await expect(page.locator('.version-card.active .tree-tile.is-selected')).toHaveCount(2)
   await (await activeTile(page, room, 'Combined')).click({ button: 'right', position: { x: 8, y: 8 } })
-  await page.getByRole('button', { name: 'Delete selected entries' }).click()
+  await page.getByRole('button', { name: 'Delete entries', exact: true }).click()
   await page.getByRole('button', { name: 'Delete entries', exact: true }).click()
   await expect.poll(async () => (await activeData(page, room)).map((node) => node.value)).toEqual(['Child'])
 })
@@ -1231,6 +1297,10 @@ test('comparison and merge preselect the active version and allow replacing it',
 
   for (const shortcut of ['Shift+c', 'Shift+m']) {
     await page.keyboard.press(shortcut)
+    await page.getByRole('button', { name: shortcut === 'Shift+c' ? 'Expand action sidebar' : 'Collapse action sidebar' }).click()
+    const drawerBounds = await drawer.boundingBox()
+    const toolSidebarBounds = await page.getByLabel('Actions and shortcuts').boundingBox()
+    expect(drawerBounds.x + drawerBounds.width).toBeLessThanOrEqual(toolSidebarBounds.x)
     await expect(drawer.locator('.drawer-first-version')).toContainText(`First version: ${secondLabel}`)
     await expect(page.locator(`.version-card[data-version="${second}"]`)).toHaveClass(/compared/)
     await drawer.getByRole('button', { name: `Deselect first version ${secondLabel}` }).click()
@@ -1240,6 +1310,9 @@ test('comparison and merge preselect the active version and allow replacing it',
     await expect(drawer.locator('.drawer-first-version')).toContainText(`First version: ${firstLabel}`)
     await page.locator(`.version-card[data-version="${second}"]`).click()
     await expect(drawer.locator('.comparison-content')).toBeVisible()
+    const comparisonBounds = await drawer.boundingBox()
+    const visibleToolSidebarBounds = await page.getByLabel('Actions and shortcuts').boundingBox()
+    expect(comparisonBounds.x + comparisonBounds.width).toBeLessThanOrEqual(visibleToolSidebarBounds.x)
     await expect(drawer.locator('.drawer-head strong')).toContainText(shortcut === 'Shift+m'
       ? `${secondLabel} → ${firstLabel}` : `${firstLabel} ↔ ${secondLabel}`)
     await drawer.getByRole('button', { name: 'Abort and close' }).click()
@@ -1690,6 +1763,7 @@ test('long version and copy connectors stay visible across offscreen endpoints a
 test('dragging attaches a root, outside drops cancel, and shortcut detaches a child', async ({ page }) => {
   const room = await openRoom(page)
   await addEntries(page, ['Source', 'Target'])
+  await clearEntrySelection(page)
   await focusActive(page)
   await page.waitForTimeout(500)
   const source = await activeTile(page, room, 'Source')
@@ -2327,7 +2401,7 @@ test('action sidebar expands without changing data and keeps the canvas and card
 test('expanded sidebar exposes additional actions and search while collapsed shortcuts still work', async ({ page }) => {
   await openRoom(page)
   const sidebar = page.getByLabel('Actions and shortcuts')
-  const expandedOnly = ['Copy entry', 'Cut entry', 'Paste entry', 'Box select', 'Zoom version', 'Pan version',
+  const expandedOnly = ['Copy entry and children', 'Cut entry and children', 'Paste entry and children', 'Box select', 'Zoom version', 'Pan version',
     'Zoom graph', 'Pan graph', 'Previous version', 'Next version', 'Timeline above', 'Timeline below',
     'First timeline', 'Last timeline', 'First version in timeline', 'Last version in timeline',
     'Undo', 'Redo', 'Select entry', 'Select multiple entries', 'Activate version', 'Focus version']
@@ -2777,7 +2851,6 @@ test('undo and redo operate on one version, restore copy links and clear redo af
   const room = await openRoom(page)
   await addEntries(page, ['Base'])
   const base = (await state(page, room)).activeId
-  await (await activeTile(page, room, 'Base')).click()
   await expect(await activeTile(page, room, 'Base')).toHaveClass(/is-selected/)
   await page.keyboard.press('Control+c')
   await page.keyboard.press('Control+v')
@@ -2863,10 +2936,48 @@ test('undo and redo synchronize versions and copy connectors with peers', async 
   }
 })
 
+test('collaborative pings keep the same viewport-relative position across window sizes', async ({ browser }) => {
+  const contexts = await Promise.all([
+    browser.newContext({ viewport: { width: 1280, height: 900 } }),
+    browser.newContext({ viewport: { width: 980, height: 720 } }),
+  ])
+  const [host, guest] = await Promise.all(contexts.map((context) => context.newPage()))
+  try {
+    const room = await openRoom(host)
+    await guest.goto(`/?room=${room}`)
+    await expect(guest.getByRole('status').first()).toHaveText('Connected', { timeout: 20000 })
+
+    await host.locator('.action-sidebar-item[title^="Ping ·"]').click()
+    const canvasBounds = await host.locator('.graph-canvas').boundingBox()
+    const clickX = canvasBounds.width * 0.37
+    const clickY = canvasBounds.height * 0.71
+    await host.mouse.click(canvasBounds.x + clickX, canvasBounds.y + clickY)
+    await expect(host.locator('.ping-origin')).toHaveCount(1)
+    await expect(guest.locator('.ping-origin')).toHaveCount(1)
+
+    const relativePosition = async (page) => page.locator('.ping-origin').evaluate((ping) => {
+      const bounds = ping.getBoundingClientRect()
+      const canvas = ping.parentElement.getBoundingClientRect()
+      return { x: (bounds.left + bounds.width / 2 - canvas.left) / canvas.width,
+        y: (bounds.top + bounds.height / 2 - canvas.top) / canvas.height }
+    })
+    const hostPosition = await relativePosition(host)
+    const guestPosition = await relativePosition(guest)
+    expect(hostPosition.x).toBeCloseTo(guestPosition.x, 3)
+    expect(hostPosition.y).toBeCloseTo(guestPosition.y, 3)
+    const guestCanvas = await guest.locator('.graph-canvas').boundingBox()
+    expect(guestCanvas.width).not.toBe(canvasBounds.width)
+    expect(guestCanvas.height).not.toBe(canvasBounds.height)
+  } finally {
+    await Promise.all(contexts.map((context) => context.close()))
+  }
+})
+
 test('local editing shortcuts and version merge use their assigned scopes', async ({ page }) => {
   const room = await openRoom(page)
   await addEntries(page, ['First', 'Second'])
   await focusActive(page)
+  await clearEntrySelection(page)
   await (await activeTile(page, room, 'First')).click()
   await expect(await activeTile(page, room, 'First')).toHaveClass(/is-selected/)
   await page.keyboard.press('e')
@@ -2964,13 +3075,13 @@ test('regular wheel zooms the graph while shift wheel zooms the version map', as
   const room = await openRoom(page)
   await addEntries(page, ['Map entry'])
   await focusActive(page)
+  await clearEntrySelection(page)
   const map = page.locator('.version-card.active .mini-map')
   const world = page.locator('.graph-world')
   const content = map.locator('svg > g')
   await map.hover()
   const graphBefore = await world.getAttribute('style')
   const mapBefore = await content.getAttribute('transform')
-  await (await activeTile(page, room, 'Map entry')).click({ position: { x: 8, y: 8 } })
   await page.mouse.wheel(0, -180)
   await expect.poll(() => world.getAttribute('style')).not.toBe(graphBefore)
   expect(await content.getAttribute('transform')).toBe(mapBefore)
@@ -3120,6 +3231,7 @@ test('multi-selection copy and cut preserve subtrees and create separate destina
   const room = await openRoom(page)
   await addEntries(page, ['Parent', 'Other'])
   const destination = (await state(page, room)).activeId
+  await clearEntrySelection(page)
   await contextAction(page, room, 'Parent', 'Add child')
   await fillEntries(page, ['Child'])
   const source = (await state(page, room)).activeId
@@ -3127,6 +3239,7 @@ test('multi-selection copy and cut preserve subtrees and create separate destina
   await page.keyboard.press('Control+a')
   await expect(page.locator('.version-card.active .tree-tile.is-selected')).toHaveCount(3)
   await page.keyboard.press('Control+c')
+  await clearEntrySelection(page)
   await page.keyboard.press('Control+v')
   await expect.poll(async () => (await activeData(page, room)).filter((item) => item.value === 'Parent').length).toBe(2)
   let saved = await state(page, room)
@@ -3657,15 +3770,18 @@ test('bulk titles are concise and entry descriptions appear promptly', async ({ 
   await page.getByPlaceholder('Entry name').first().fill('First')
   await page.getByPlaceholder('Optional description').first().fill('A helpful description')
   await page.getByRole('button', { name: 'Add another entry' }).click()
+  await expect(page.getByPlaceholder('Entry name').nth(1)).toBeFocused()
   await page.getByPlaceholder('Entry name').nth(1).fill('Second')
   await page.getByRole('button', { name: 'Add 2 entries' }).click()
   await expect.poll(async () => (await state(page, room)).versions.at(-1).change).toBe('Created 2 items')
   await focusActive(page)
-  await (await activeTile(page, room, 'First')).hover()
+  const describedEntry = await activeTile(page, room, 'First')
+  await expect(describedEntry.locator('title')).toHaveCount(0)
+  await describedEntry.hover()
   await expect(page.locator('.entry-tooltip')).toContainText('A helpful description', { timeout: 1500 })
+  await expect(page.locator('.entry-tooltip')).toHaveCount(1)
   await page.keyboard.press('Control+a')
   await page.locator('.version-card.active .tree-tile').first().click({ button: 'right' })
-  await page.getByRole('button', { name: 'Delete selected entries' }).click()
   await page.getByRole('button', { name: 'Delete entries', exact: true }).click()
   await expect.poll(async () => (await state(page, room)).versions.at(-1).change).toBe('Deleted 2 items')
 })

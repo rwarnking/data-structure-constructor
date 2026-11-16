@@ -87,7 +87,8 @@ export function useInteractionRecorder(options: {
       ...(entry.versionId ? { versionId: entry.versionId } : {}),
       ...(entry.nodeId ? { nodeId: entry.nodeId } : {}),
       ...(entry.nodeLabel ? { nodeLabel: entry.nodeLabel } : {}),
-      ...(entry.ping ? { x: entry.ping.x, y: entry.ping.y } : {}),
+      ...(entry.ping ? { x: entry.ping.x, y: entry.ping.y,
+        ...(entry.ping.coordinateSpace ? { coordinateSpace: entry.ping.coordinateSpace } : {}) } : {}),
     }
   }
   function recordState(before: StoredState, after: StoredState, delta?: SyncDelta) {

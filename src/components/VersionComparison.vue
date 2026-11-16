@@ -78,10 +78,11 @@ function clickedEntry(event: MouseEvent) { if (event.button === 0 && !event.shif
     :aria-modal="mergeMode && compareIds.length === 2 ? 'true' : undefined"
     :aria-label="mergeMode ? 'Branch merge' : 'Version comparison'"
     :class="{ 'comparison-overlay': compareIds.length === 2, 'merge-overlay': mergeMode && compareIds.length === 2, 'sidebar-collapsed': sidebarCollapsed }"
-    :style="compareIds.length === 2 ? { right: `${(actionSidebarCollapsed ? 48 : 270) + 12}px` } : undefined"
+    :style="compareMode || mergeMode ? { right: `${(actionSidebarCollapsed ? 48 : 270) + 12}px` } : undefined"
     @pointerdown.stop @pointerup.stop @pointermove.stop @pointercancel.stop @click.stop
     @dblclick.stop @contextmenu.stop @wheel.stop @touchmove.stop>
-    <div class="compare-drawer" :class="{ open: compareIds.length === 2, 'merge-view': mergeMode }">
+    <div class="compare-drawer" :class="{ open: compareIds.length === 2, 'merge-view': mergeMode }"
+      :style="compareIds.length < 2 && (compareMode || mergeMode) ? { right: `${(actionSidebarCollapsed ? 48 : 270) + 12}px` } : undefined">
     <div class="drawer-head">
       <div>
         <span class="section-label">{{ mergeMode ? 'BRANCH MERGE' : 'VERSION COMPARISON' }}</span>
