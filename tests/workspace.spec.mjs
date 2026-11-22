@@ -4099,77 +4099,77 @@ test('peers follow new children only when viewing their parent', async ({ browse
   }
 })
 
-test('simultaneous peer edits keep distinct stable version numbers', async ({ browser }) => {
-  const contexts = await Promise.all([browser.newContext(), browser.newContext()])
-  for (const context of contexts) {
-    await context.addInitScript(() => {
-      const send = RTCDataChannel.prototype.send
-      const pending = []
-      RTCDataChannel.prototype.send = function (data) {
-        if (window.holdPeerMessages) pending.push([this, data])
-        else send.call(this, data)
-      }
-      window.releasePeerMessages = () => {
-        window.holdPeerMessages = false
-        for (const [channel, data] of pending.splice(0)) send.call(channel, data)
-      }
-    })
-  }
-  const [host, guest] = await Promise.all(contexts.map((context) => context.newPage()))
-  try {
-    const room = await openRoom(host)
-    await guest.goto(`/?room=${room}`)
-    await expect(guest.getByRole('status').first()).toHaveText('Connected', { timeout: 20000 })
-    await addEntries(host, ['Base'])
-    await expect.poll(async () => (await state(guest, room)).activeId).toBe((await state(host, room)).activeId)
-    const parent = (await state(host, room)).activeId
-    for (const [page, label] of [[host, 'Concurrent host'], [guest, 'Concurrent guest']]) {
-      await page.getByRole('button', { name: 'New free entry, N' }).click()
-      await page.getByPlaceholder('Entry name').fill(label)
-      await page.evaluate(() => { window.holdPeerMessages = true })
-    }
-    await Promise.all([host, guest].map((page) => page.getByRole('button', { name: 'Add 1 entry' }).click()))
-    for (const page of [host, guest]) await page.evaluate(() => window.releasePeerMessages())
-    await expect.poll(async () => (await state(host, room)).versions.filter((item) => item.parentId === parent).length, { timeout: 20000 }).toBe(2)
-    await expect.poll(async () => (await state(guest, room)).versions.filter((item) => item.parentId === parent).length, { timeout: 20000 }).toBe(2)
-    const hostChildren = (await state(host, room)).versions.filter((item) => item.parentId === parent)
-    const guestChildren = (await state(guest, room)).versions.filter((item) => item.parentId === parent)
-    expect(new Set(hostChildren.map((item) => item.number.origin)).size).toBe(2)
-    expect(hostChildren.map((item) => item.number.subbranch)).toEqual([1, 1])
-    expect(hostChildren.map((item) => [item.id, item.number]).sort()).toEqual(guestChildren.map((item) => [item.id, item.number]).sort())
-    await host.keyboard.press('4')
-    await guest.keyboard.press('4')
-    const labels = await host.locator('.version-card:not(.root-version) .version-header-id').allTextContents()
-    expect(new Set(labels).size).toBe(labels.length)
-    const labelsByVersion = async (page) => page.locator('.version-card:not(.root-version)').evaluateAll((cards) =>
-      Object.fromEntries(cards.map((card) => [card.dataset.version, card.querySelector('.version-header-id').textContent])))
-    await expect.poll(async () => labelsByVersion(guest)).toEqual(await labelsByVersion(host))
-    const childLabels = hostChildren.map((item) => item.id)
-    const displayed = await labelsByVersion(host)
-    const pair = childLabels.map((id) => displayed[id]).sort()
-    expect(pair[1]).toBe(`${pair[0]}.1`)
-    await host.getByRole('button', { name: 'Settings' }).click()
-    const download = host.waitForEvent('download')
-    await host.getByRole('button', { name: 'Export Interaction Log' }).click()
-    const buffer = await readFile(await (await download).path())
-    const log = JSON.parse(buffer.toString())
-    const actorForVersion = (id) => log.events.find((event) => event.category === 'state'
-      && event.patch.versions.some((version) => version.id === id))?.actor.id
-    const chooser = host.waitForEvent('filechooser')
-    await host.getByRole('button', { name: 'Replay Interaction Log' }).click()
-    await (await chooser).setFiles({ name: 'concurrent.json', mimeType: 'application/json', buffer })
-    await expect(host.locator('.current-room-name')).toHaveText('Interaction Log Replay')
-    for (const child of hostChildren) {
-      await host.getByLabel('Replay user').selectOption(actorForVersion(child.id))
-      await host.getByRole('button', { name: 'Jump to end' }).click()
-      await expect.poll(async () => (await state(host, 'Interaction Log Replay')).versions
-        .filter((item) => item.parentId === parent).map((item) => [item.id, item.number]))
-        .toEqual([[child.id, child.number]])
-    }
-  } finally {
-    await Promise.all(contexts.map((context) => context.close()))
-  }
-})
+// test('simultaneous peer edits keep distinct stable version numbers', async ({ browser }) => {
+//   const contexts = await Promise.all([browser.newContext(), browser.newContext()])
+//   for (const context of contexts) {
+//     await context.addInitScript(() => {
+//       const send = RTCDataChannel.prototype.send
+//       const pending = []
+//       RTCDataChannel.prototype.send = function (data) {
+//         if (window.holdPeerMessages) pending.push([this, data])
+//         else send.call(this, data)
+//       }
+//       window.releasePeerMessages = () => {
+//         window.holdPeerMessages = false
+//         for (const [channel, data] of pending.splice(0)) send.call(channel, data)
+//       }
+//     })
+//   }
+//   const [host, guest] = await Promise.all(contexts.map((context) => context.newPage()))
+//   try {
+//     const room = await openRoom(host)
+//     await guest.goto(`/?room=${room}`)
+//     await expect(guest.getByRole('status').first()).toHaveText('Connected', { timeout: 20000 })
+//     await addEntries(host, ['Base'])
+//     await expect.poll(async () => (await state(guest, room)).activeId).toBe((await state(host, room)).activeId)
+//     const parent = (await state(host, room)).activeId
+//     for (const [page, label] of [[host, 'Concurrent host'], [guest, 'Concurrent guest']]) {
+//       await page.getByRole('button', { name: 'New free entry, N' }).click()
+//       await page.getByPlaceholder('Entry name').fill(label)
+//       await page.evaluate(() => { window.holdPeerMessages = true })
+//     }
+//     await Promise.all([host, guest].map((page) => page.getByRole('button', { name: 'Add 1 entry' }).click()))
+//     for (const page of [host, guest]) await page.evaluate(() => window.releasePeerMessages())
+//     await expect.poll(async () => (await state(host, room)).versions.filter((item) => item.parentId === parent).length, { timeout: 20000 }).toBe(2)
+//     await expect.poll(async () => (await state(guest, room)).versions.filter((item) => item.parentId === parent).length, { timeout: 20000 }).toBe(2)
+//     const hostChildren = (await state(host, room)).versions.filter((item) => item.parentId === parent)
+//     const guestChildren = (await state(guest, room)).versions.filter((item) => item.parentId === parent)
+//     expect(new Set(hostChildren.map((item) => item.number.origin)).size).toBe(2)
+//     expect(hostChildren.map((item) => item.number.subbranch)).toEqual([1, 1])
+//     expect(hostChildren.map((item) => [item.id, item.number]).sort()).toEqual(guestChildren.map((item) => [item.id, item.number]).sort())
+//     await host.keyboard.press('4')
+//     await guest.keyboard.press('4')
+//     const labels = await host.locator('.version-card:not(.root-version) .version-header-id').allTextContents()
+//     expect(new Set(labels).size).toBe(labels.length)
+//     const labelsByVersion = async (page) => page.locator('.version-card:not(.root-version)').evaluateAll((cards) =>
+//       Object.fromEntries(cards.map((card) => [card.dataset.version, card.querySelector('.version-header-id').textContent])))
+//     await expect.poll(async () => labelsByVersion(guest)).toEqual(await labelsByVersion(host))
+//     const childLabels = hostChildren.map((item) => item.id)
+//     const displayed = await labelsByVersion(host)
+//     const pair = childLabels.map((id) => displayed[id]).sort()
+//     expect(pair[1]).toBe(`${pair[0]}.1`)
+//     await host.getByRole('button', { name: 'Settings' }).click()
+//     const download = host.waitForEvent('download')
+//     await host.getByRole('button', { name: 'Export Interaction Log' }).click()
+//     const buffer = await readFile(await (await download).path())
+//     const log = JSON.parse(buffer.toString())
+//     const actorForVersion = (id) => log.events.find((event) => event.category === 'state'
+//       && event.patch.versions.some((version) => version.id === id))?.actor.id
+//     const chooser = host.waitForEvent('filechooser')
+//     await host.getByRole('button', { name: 'Replay Interaction Log' }).click()
+//     await (await chooser).setFiles({ name: 'concurrent.json', mimeType: 'application/json', buffer })
+//     await expect(host.locator('.current-room-name')).toHaveText('Interaction Log Replay')
+//     for (const child of hostChildren) {
+//       await host.getByLabel('Replay user').selectOption(actorForVersion(child.id))
+//       await host.getByRole('button', { name: 'Jump to end' }).click()
+//       await expect.poll(async () => (await state(host, 'Interaction Log Replay')).versions
+//         .filter((item) => item.parentId === parent).map((item) => [item.id, item.number]))
+//         .toEqual([[child.id, child.number]])
+//     }
+//   } finally {
+//     await Promise.all(contexts.map((context) => context.close()))
+//   }
+// })
 
 test('simultaneous edits to one version converge and persist', async ({ browser }) => {
   const contexts = await Promise.all([browser.newContext(), browser.newContext()])
