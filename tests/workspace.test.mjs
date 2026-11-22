@@ -29,6 +29,7 @@ const { shortcutAction, shortcuts } = await vite.ssrLoadModule('/src/config/hotk
 const { actionIcons, actionSymbols } = await vite.ssrLoadModule('/src/config/icons.ts')
 const { collaboratorColors } = await vite.ssrLoadModule('/src/utils/colors.ts')
 const { interactionPatch, applyInteractionPatch, newInteractionRevisions, parseInteractionLog } = await vite.ssrLoadModule('/src/utils/interactionLog.ts')
+const { useInteractionRecorder } = await vite.ssrLoadModule('/src/composables/useInteractionRecorder.ts')
 const { analyzeInteractions, abstractInteractions, interactionVersionLabels } = await vite.ssrLoadModule('/src/utils/interactionAnalysis.ts')
 
 function node(id, children = []) {
@@ -99,6 +100,86 @@ test('replay resolves concurrent version edits by collaboration revision rather 
   const afterWinner = applyInteractionPatch(initial, makePatch(winner, 'z'), revisions)
   const afterLoser = applyInteractionPatch(afterWinner, makePatch(loser, 'a'), revisions)
   assert.equal(afterLoser.versions.find((item) => item.id === 'v1').tag.title, 'winner')
+})
+
+test('recorded dependencies make out-of-order and participant-specific replay possible', () => {
+  const previousWindow = globalThis.window
+  globalThis.window = { clearTimeout, setTimeout }
+  const scope = effectScope()
+  try {
+    const root = version('v0', [])
+    const parent = version('v1', [node('n1')], 'v0', 1)
+    const branch = version('v2', [node('n2')], 'v0', 1)
+    const merged = { ...version('v3', [node('n1')], 'v1', 2), mergeSourceId: 'v2' }
+    const before = { versions: [root, parent, branch], activeId: 'v1', nextNode: 3, nextVersion: 3, nextLane: 1, copyLinks: [] }
+    const after = { ...before, versions: [...before.versions, merged], activeId: 'v3', nextVersion: 4 }
+    const rootState = { ...before, versions: [root], activeId: 'v0' }
+    const actor = { id: 'alice', name: 'Alice', color: '#123456' }
+    const recorder = scope.run(() => useInteractionRecorder({
+      state: ref(rootState), room: ref('Room'), zoom: ref(1), pan: ref({ x: 0, y: 0 }), selectedNodes: ref([]),
+      screen: () => ({ width: 1440, height: 900 }), actor: () => actor, send: () => {}, notify: () => {},
+    }))
+    recorder.startRoom('Room')
+    recorder.recordRemoteState(rootState, before)
+    recorder.recordState(before, after)
+    const event = recorder.current.value.events.find((item) => item.patch && !item.parameters?.localObservation)
+    assert.ok(recorder.current.value.events.some((item) => item.parameters?.localObservation))
+    assert.deepEqual(event.patch.dependencies.map((item) => item.id), ['v1', 'v2'])
+    assert.deepEqual(recorder.current.value.sessions[0].initialScreen, { width: 1440, height: 900 })
+    const parsed = parseInteractionLog({ ...recorder.current.value, initialState: rootState })
+    assert.equal(applyInteractionPatch(rootState,
+      parsed.events.find((item) => item.patch && !item.parameters?.localObservation).patch).versions.length, 4)
+    const laterParent = { ...event, id: 'later-parent', actor: { id: 'bob', name: 'Bob', color: '#654321' },
+      sessionId: 'bob-session', inputTime: event.changeTime + 10, changeTime: event.changeTime + 10,
+      patch: interactionPatch(rootState, before) }
+    const ordered = parseInteractionLog({ ...recorder.current.value, initialState: rootState,
+      events: [...recorder.current.value.events, laterParent] })
+    assert.equal(ordered.events.at(-1).id, 'later-parent')
+    const updatedParent = { ...parent, tag: { title: 'newer', description: '' } }
+    const existing = { ...before, versions: [root, updatedParent, branch] }
+    assert.equal(applyInteractionPatch(existing, event.patch).versions.find((item) => item.id === 'v1').tag.title, 'newer')
+  } finally {
+    scope.stop()
+    globalThis.window = previousWindow
+  }
+})
+
+test('invalid replay data is exported intact with an explicit warning', async () => {
+  const previousWindow = globalThis.window
+  const previousDocument = globalThis.document
+  const create = URL.createObjectURL
+  const revoke = URL.revokeObjectURL
+  let blob
+  let downloaded
+  const messages = []
+  globalThis.window = { clearTimeout, setTimeout }
+  globalThis.document = { createElement: () => ({ click() { downloaded = this.download } }) }
+  URL.createObjectURL = (value) => { blob = value; return 'blob:test' }
+  URL.revokeObjectURL = () => {}
+  const scope = effectScope()
+  try {
+    const initial = { versions: [version('v0', [])], activeId: 'v0', nextNode: 1, nextVersion: 1, nextLane: 1, copyLinks: [] }
+    const recorder = scope.run(() => useInteractionRecorder({
+      state: ref(initial), room: ref('Room'), zoom: ref(1), pan: ref({ x: 0, y: 0 }), selectedNodes: ref([]),
+      screen: () => ({ width: 1440, height: 900 }), actor: () => ({ id: 'alice', name: 'Alice', color: '#123456' }),
+      send: () => {}, notify: (message, error) => messages.push({ message, error }),
+    }))
+    recorder.startRoom('Room')
+    const bad = structuredClone(recorder.current.value)
+    bad.events.push({ ...bad.events[0], id: 'bad', category: 'state', action: 'Invalid',
+      patch: { versions: [], removed: ['v0'], activeId: 'v0', nextNode: 1, nextVersion: 1, nextLane: 1 } })
+    recorder.exportLog(bad)
+    assert.match(downloaded, /-raw\.json$/)
+    assert.deepEqual(JSON.parse(await blob.text()), bad)
+    assert.match(messages[0].message, /validation failed.*invalid room state/i)
+    assert.equal(messages[0].error, true)
+  } finally {
+    scope.stop()
+    globalThis.window = previousWindow
+    globalThis.document = previousDocument
+    URL.createObjectURL = create
+    URL.revokeObjectURL = revoke
+  }
 })
 
 test('replay merges concurrent copy links and keeps the newest branching setting', () => {

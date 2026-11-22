@@ -6,9 +6,16 @@ import { assignVersionSuffixes, compareCopyLinks, reflowVersionLayout } from './
 export type InteractionActor = { id: string; name: string; color: string }
 export type InteractionMethod = 'hotkey' | 'keyboard' | 'mouse' | 'button' | 'system'
 export type InteractionCategory = 'state' | 'viewport' | 'selection' | 'input'
+export type InteractionScreen = {
+  width: number
+  height: number
+  sidebarCollapsed?: boolean
+  actionSidebarCollapsed?: boolean
+}
 export type InteractionPatch = {
   versions: Version[]
   removed: string[]
+  dependencies?: Version[]
   versionRevisions?: Record<string, Revision>
   removalRevisions?: Record<string, Revision>
   activeId: string
@@ -35,6 +42,7 @@ export type InteractionEvent = {
   inputTime: number
   changeTime: number
   cursor?: { x: number; y: number }
+  screen?: InteractionScreen
   parameters?: Record<string, string | number | boolean>
   patch?: InteractionPatch
   viewport?: { zoom: number; panX: number; panY: number }
@@ -48,6 +56,7 @@ export type InteractionSession = {
   endedAt?: number
   initialState: StoredState
   initialViewport: { zoom: number; panX: number; panY: number }
+  initialScreen?: InteractionScreen
   eventIds: string[]
 }
 export type InteractionLog = {
@@ -83,6 +92,12 @@ export function applyInteractionPatch(state: StoredState, patch: InteractionPatc
   const previous = clone(state)
   const versions = new Map(previous.versions.map((version) => [version.id, version]))
   let structural = false
+  // Dependencies restore missing ancestry without overwriting newer versions or tombstones.
+  for (const version of patch.dependencies ?? []) {
+    if (versions.has(version.id) || revisions.removed[version.id] || patch.removed.includes(version.id)) continue
+    versions.set(version.id, clone(version))
+    structural = true
+  }
   for (const id of patch.removed) {
     const revision = patch.removalRevisions?.[id]
     if (revision) {
@@ -137,6 +152,13 @@ function isViewport(value: unknown): value is NonNullable<InteractionEvent['view
     && Number.isFinite(value.panX) && Number.isFinite(value.panY)
 }
 
+function isScreen(value: unknown): value is InteractionScreen {
+  return isRecord(value) && Number.isFinite(value.width) && (value.width as number) > 0
+    && Number.isFinite(value.height) && (value.height as number) > 0
+    && (value.sidebarCollapsed === undefined || typeof value.sidebarCollapsed === 'boolean')
+    && (value.actionSidebarCollapsed === undefined || typeof value.actionSidebarCollapsed === 'boolean')
+}
+
 function isActor(value: unknown): value is InteractionActor {
   return isRecord(value) && typeof value.id === 'string' && !!value.id
     && typeof value.name === 'string' && typeof value.color === 'string' && /^#[0-9a-f]{6}$/i.test(value.color)
@@ -177,6 +199,7 @@ function isInteractionSession(value: unknown): value is InteractionSession {
       && Number.isFinite(value.endedAt) && value.endedAt >= value.startedAt)
     && isStoredState(value.initialState) && !hasRootEntries(value.initialState)
     && isViewport(value.initialViewport)
+    && (value.initialScreen === undefined || isScreen(value.initialScreen))
     && Array.isArray(value.eventIds) && value.eventIds.every((id) => typeof id === 'string')
 }
 
@@ -236,6 +259,7 @@ export function isInteractionEvent(value: unknown): value is InteractionEvent {
     || (value.changeTime as number) < (value.inputTime as number)) return false
   if (value.cursor !== undefined && (!isRecord(value.cursor) || !Number.isFinite(value.cursor.x)
     || !Number.isFinite(value.cursor.y))) return false
+  if (value.screen !== undefined && !isScreen(value.screen)) return false
   if (value.parameters !== undefined && (!isRecord(value.parameters) || !Object.values(value.parameters)
     .every((item) => typeof item === 'string' || typeof item === 'boolean' || typeof item === 'number' && Number.isFinite(item)))) return false
   if (value.viewport !== undefined && !isViewport(value.viewport)) return false
@@ -246,6 +270,7 @@ export function isInteractionEvent(value: unknown): value is InteractionEvent {
     const patch = value.patch
     if (!isRecord(patch) || !Array.isArray(patch.versions) || !patch.versions.every(isVersion)
       || !Array.isArray(patch.removed) || !patch.removed.every((id) => typeof id === 'string')
+      || (patch.dependencies !== undefined && (!Array.isArray(patch.dependencies) || !patch.dependencies.every(isVersion)))
       || (patch.versionRevisions !== undefined && (!isRecord(patch.versionRevisions)
         || !Object.values(patch.versionRevisions).every(isRevision)))
       || (patch.removalRevisions !== undefined && (!isRecord(patch.removalRevisions)
@@ -264,7 +289,7 @@ export function isInteractionEvent(value: unknown): value is InteractionEvent {
     && (value.category !== 'selection' || value.selection !== undefined)
 }
 
-export function parseInteractionLog(value: unknown): InteractionLog {
+export function parseInteractionLog(value: unknown, validateReplay = true): InteractionLog {
   if (!isRecord(value) || value.format !== 'canopy-interaction-log' || value.version !== 1
     || typeof value.room !== 'string' || !value.room.trim() || !isStoredState(value.initialState)
     || hasRootEntries(value.initialState) || !isViewport(value.initialViewport)
@@ -278,7 +303,19 @@ export function parseInteractionLog(value: unknown): InteractionLog {
   const normalized = normalizeSessions(events, value.initialState, value.initialViewport, value.sessions as InteractionSession[] | undefined)
   let state = value.initialState
   const revisions = newInteractionRevisions()
-  for (const event of normalized.events) if (event.patch) state = applyInteractionPatch(state, event.patch, revisions)
+  if (validateReplay) {
+    const sessions = new Map(normalized.sessions.map((session) => [session.id, {
+      state: session.initialState, revisions: newInteractionRevisions(),
+    }]))
+    for (const event of normalized.events) {
+      if (!event.patch) continue
+      // Observations replay a participant's view, not an additional shared edit.
+      if (event.parameters?.localObservation !== true) state = applyInteractionPatch(state, event.patch, revisions)
+      const session = sessions.get(event.sessionId!)
+      if (!session) throw new Error('Interaction session is missing')
+      session.state = applyInteractionPatch(session.state, event.patch, session.revisions)
+    }
+  }
   return { format: 'canopy-interaction-log', version: 1, room: value.room,
     initialState: value.initialState, initialViewport: value.initialViewport, events: normalized.events,
     sessions: normalized.sessions }

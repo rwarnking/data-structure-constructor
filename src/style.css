@@ -101,9 +101,11 @@ button.action-sidebar-item:hover:not(:disabled), .action-sidebar-item.selected {
 .replay-toolbar button:disabled { opacity: .4; cursor: default; }
 .replay-toolbar select { max-width: 150px; padding: 0 6px; font-size: 11px; }
 .replay-user-control { display: flex; align-items: center; gap: 5px; color: var(--theme-text-muted); font-size: 10px; white-space: nowrap; }
+.replay-size-control { display: flex; align-items: center; gap: 3px; color: var(--theme-text-muted); font-size: 10px; white-space: nowrap; }
+.replay-size-control input[type="number"] { width: 52px; }
 .replay-timeline { flex: 1; min-width: 90px; display: grid; grid-template-columns: auto minmax(50px, 1fr); align-items: center; gap: 7px; color: var(--theme-text-muted); font: 10px var(--mono); white-space: nowrap; }
 .replay-timeline input { width: 100%; margin: 0; accent-color: var(--theme-accent); }
-.replay-cursors { position: fixed; inset: 0; z-index: 30; pointer-events: none; }
+.replay-cursors { position: fixed; inset: 0; z-index: 100; pointer-events: none; }
 .replay-cursor { position: absolute; color: var(--cursor-color); font-size: 15px; text-shadow: 0 0 2px white; }
 .replay-cursor span { padding: 2px 5px; border-radius: 3px; background: var(--cursor-color); color: white; font-size: 10px; text-shadow: none; }
 .analysis-scrim { z-index: 110; }

@@ -24,11 +24,12 @@ export function useCollaboration(options: {
   notify: (message: string, error?: boolean) => void
   playPing: () => void
   onLocalChanges?: (before: StoredState, after: StoredState, delta?: SyncDelta) => void
+  onRemoteChanges?: (before: StoredState, after: StoredState) => void
   onLocalInteraction?: (entry: InteractionEntry) => void
   onRemoteDeparture?: (entry: InteractionEntry) => void
   onSessionMessage?: (message: unknown) => boolean
   onSyncRequest?: (reply: (message: unknown) => void) => void
-  onSessionBaseline?: (reply: (message: unknown) => void) => void
+  onSessionBaseline?: (reply: (message: unknown) => void) => boolean
 }) {
   const { clientId: CLIENT_ID, state, active, selectedNodes, currentRoomName, graphCanvas, pan, zoom, normalizeState, roomDataKey, reflowLayout, fitGraph, followVersion, notify } = options
   const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
@@ -273,6 +274,7 @@ export function useCollaboration(options: {
       notify('Ignored an invalid shared-state snapshot', true)
       return
     }
+    const before = JSON.parse(lastObservedState) as StoredState
     collaborationMetadata = {
       clock: Object.values(message.versions).reduce(
         (clock, revision) => Math.max(clock, revision.clock),
@@ -296,6 +298,9 @@ export function useCollaboration(options: {
     applyingRemoteState = true
     persistCollaborationMetadata()
     localStorage.setItem(roomDataKey(currentRoomName.value), lastObservedState)
+    if (!options.onSessionBaseline?.((message) => peerRoom.send(message))) {
+      options.onRemoteChanges?.(before, clone(state.value))
+    }
     requestAnimationFrame(() => {
       fitGraph()
       options.onSessionBaseline?.((message) => peerRoom.send(message))
@@ -314,6 +319,7 @@ export function useCollaboration(options: {
       notify('Ignored an invalid shared-state update', true)
       return
     }
+    const before = JSON.parse(lastObservedState) as StoredState
     const previousVersions = new Map(state.value.versions.map((version) => [version.id, version]))
     const versionsById = new Map(previousVersions)
     const newVersions: Version[] = []
@@ -486,7 +492,9 @@ export function useCollaboration(options: {
       type: 'sync-delta', versions: [], removed: [], retiredVersionNumbers: extraRetired,
       nextNode: state.value.nextNode, nextVersion: state.value.nextVersion, nextLane: state.value.nextLane,
     } satisfies SyncDelta)
-    options.onSessionBaseline?.((message) => peerRoom.send(message))
+    if (!options.onSessionBaseline?.((message) => peerRoom.send(message))) {
+      options.onRemoteChanges?.(before, clone(state.value))
+    }
     void nextTick(() => { applyingRemoteState = false })
   }
 

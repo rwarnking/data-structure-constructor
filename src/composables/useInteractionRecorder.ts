@@ -3,7 +3,7 @@ import type { InteractionEntry, SyncDelta } from '../types/collaboration'
 import type { StoredState } from '../types/workspace'
 import { shortcutAction } from '../config/hotkeys'
 import { interactionPatch, isInteractionEvent, parseInteractionLog, type InteractionActor, type InteractionCategory,
-  type InteractionDialog, type InteractionEvent, type InteractionLog, type InteractionMethod, type InteractionSession } from '../utils/interactionLog'
+  type InteractionDialog, type InteractionEvent, type InteractionLog, type InteractionMethod, type InteractionScreen, type InteractionSession } from '../utils/interactionLog'
 
 type Input = { time: number; method: InteractionMethod; cursor?: { x: number; y: number }; action: string }
 type Viewport = { zoom: number; panX: number; panY: number }
@@ -15,6 +15,7 @@ export function useInteractionRecorder(options: {
   zoom: Ref<number>
   pan: Ref<{ x: number; y: number }>
   selectedNodes: Ref<string[]>
+  screen: () => InteractionScreen
   actor: () => InteractionActor
   send: (message: unknown) => void
   notify: (message: string, error?: boolean) => void
@@ -31,7 +32,9 @@ export function useInteractionRecorder(options: {
   let viewportInput: Input | null = null
   let pointer: { x: number; y: number; time: number } | null = null
   let activeSessionId: string | null = null
+  let recordedVersions = new Set<string>()
   const viewport = (): Viewport => ({ zoom: options.zoom.value, panX: options.pan.value.x, panY: options.pan.value.y })
+  const screen = options.screen
 
   function forgetRoom(room: string) {
     logs.delete(room)
@@ -67,9 +70,10 @@ export function useInteractionRecorder(options: {
     const startedAt = Date.now()
     const sessionId = `${actor.id}-${startedAt}-${++sequence}`
     const session: InteractionSession = { id: sessionId, actor, startedAt, initialState: clone(options.state.value),
-      initialViewport: viewport(), eventIds: [] }
+      initialViewport: viewport(), initialScreen: screen(), eventIds: [] }
     current.value.sessions.push(session)
     activeSessionId = sessionId
+    recordedVersions = new Set(['v0'])
     record('input', 'Login', { parameters: { meaningful: true, sessionBoundary: 'login' } },
       { time: startedAt, method: 'system', action: 'Login' })
   }
@@ -99,7 +103,8 @@ export function useInteractionRecorder(options: {
     const event: InteractionEvent = {
       id: `${actor.id}-${Math.floor(time)}-${String(++sequence).padStart(12, '0')}`,
       ...(activeSessionId ? { sessionId: activeSessionId } : {}), actor, action, category, method: source.method,
-      inputTime: Math.min(source.time, time), changeTime: time, ...(source.cursor ? { cursor: source.cursor } : {}), ...extra,
+      inputTime: Math.min(source.time, time), changeTime: time, screen: screen(),
+      ...(source.cursor ? { cursor: source.cursor } : {}), ...extra,
     }
     append(event)
   }
@@ -122,10 +127,29 @@ export function useInteractionRecorder(options: {
       patch.versionRevisions = Object.fromEntries(delta.versions.map((change) => [change.version.id, change.revision]))
       patch.removalRevisions = Object.fromEntries(delta.removed.map((removal) => [removal.id, removal.revision]))
     }
+    const available = new Map(after.versions.map((version) => [version.id, version]))
+    const included = new Set([...recordedVersions, ...patch.versions.map((version) => version.id)])
+    const dependencies: StoredState['versions'] = []
+    const includeDependencies = (id: string | null | undefined) => {
+      if (!id || included.has(id)) return
+      const version = available.get(id)
+      if (!version) throw new Error(`Missing interaction dependency: ${id}`)
+      included.add(id)
+      includeDependencies(version.parentId)
+      includeDependencies(version.mergeSourceId)
+      dependencies.push(version)
+    }
+    for (const version of patch.versions) {
+      includeDependencies(version.parentId)
+      includeDependencies(version.mergeSourceId)
+    }
+    if (dependencies.length) patch.dependencies = clone(dependencies)
     const action = pendingAction?.action ?? 'Committed change'
     const stateChanged = patch.versions.length || patch.removed.length || patch.copyLinks || patch.retiredVersionNumbers
       || patch.branching || before.nextNode !== after.nextNode || before.nextVersion !== after.nextVersion || before.nextLane !== after.nextLane
     if (stateChanged) {
+      for (const id of patch.removed) recordedVersions.delete(id)
+      for (const version of [...dependencies, ...patch.versions]) recordedVersions.add(version.id)
       const oldVersions = new Map(before.versions.map((version) => [version.id, version]))
       const mapOnly = patch.versions.length > 0 && !patch.removed.length && !patch.copyLinks && !patch.retiredVersionNumbers
         && !patch.branching && before.nextNode === after.nextNode && before.nextVersion === after.nextVersion
@@ -148,6 +172,19 @@ export function useInteractionRecorder(options: {
     else if (before.activeId !== after.activeId) record('selection', 'Navigate',
       { selection: { versionId: after.activeId, nodeIds: [...options.selectedNodes.value] } })
   }
+  function recordRemoteState(before: StoredState, after: StoredState) {
+    if (!current.value || replaying.value) return
+    const patch = interactionPatch(before, after)
+    const source: Input = { time: Date.now(), method: 'system', action: 'Received shared changes' }
+    if (patch.versions.length || patch.removed.length || patch.copyLinks || patch.retiredVersionNumbers
+      || patch.branching || before.nextNode !== after.nextNode || before.nextVersion !== after.nextVersion
+      || before.nextLane !== after.nextLane) {
+      record('state', source.action, { patch, parameters: { localObservation: true } }, source)
+    } else if (before.activeId !== after.activeId) {
+      record('selection', 'Follow shared version',
+        { selection: { versionId: after.activeId, nodeIds: [...options.selectedNodes.value] } }, source)
+    }
+  }
   function refreshSessionBaseline() {
     const session = current.value?.sessions?.find((item) => item.id === activeSessionId)
     if (!session || pendingIntent || pendingAction
@@ -157,6 +194,7 @@ export function useInteractionRecorder(options: {
     if (JSON.stringify(session.initialState) === nextState && JSON.stringify(session.initialViewport) === nextViewport) return false
     session.initialState = clone(options.state.value)
     session.initialViewport = viewport()
+    session.initialScreen = screen()
     return true
   }
   function recordAction(entry: InteractionEntry) {
@@ -191,6 +229,7 @@ export function useInteractionRecorder(options: {
   }
   function capturePointer(event: PointerEvent) {
     if (replaying.value || !event.isTrusted) return
+    flushViewport()
     const target = event.target instanceof Element ? event.target : null
     const button = target?.closest('button, [role="button"]')
     const tile = target?.closest<HTMLElement>('[data-node]')
@@ -231,6 +270,7 @@ export function useInteractionRecorder(options: {
   }
   function capturePointerUp(event: PointerEvent) {
     if (replaying.value || !event.isTrusted || !pointer) return
+    flushViewport()
     if (Math.hypot(event.clientX - pointer.x, event.clientY - pointer.y) > 5) {
       input = { ...input, time: pointer.time, cursor: { x: event.clientX, y: event.clientY }, action: 'Drag' }
       pendingIntent = input
@@ -266,14 +306,17 @@ export function useInteractionRecorder(options: {
     input = { time: Date.now(), method: 'keyboard', action: `Input: ${label}` }
     record('input', input.action, { parameters: { value: target.value } })
   }
+  function recordScreen() {
+    record('input', 'Window layout', {}, { time: Date.now(), method: 'system', action: 'Window layout' })
+  }
   watch([options.zoom, options.pan], () => {
     if (!current.value || replaying.value) return
     viewportInput ??= recentInput('Graph viewport')
-    window.clearTimeout(viewportTimer)
-    viewportTimer = window.setTimeout(flushViewport, 180)
+    if (!viewportTimer) viewportTimer = window.setTimeout(flushViewport, 120)
   }, { deep: true })
   function flushViewport() {
     window.clearTimeout(viewportTimer)
+    viewportTimer = 0
     if (viewportInput && current.value && !replaying.value) {
       record('viewport', 'Graph viewport', { viewport: viewport() }, viewportInput)
     }
@@ -296,7 +339,7 @@ export function useInteractionRecorder(options: {
     }
     if (packet.type === 'session-log') {
       try {
-        const incoming = parseInteractionLog(packet.log)
+        const incoming = parseInteractionLog(packet.log, false)
         if (incoming.room !== options.room.value || !current.value || current.value.room !== options.room.value) throw new Error('Wrong room')
         const events = new Map([...incoming.events, ...current.value.events].map((event) => [event.id, event]))
         current.value.events = [...events.values()]
@@ -318,18 +361,25 @@ export function useInteractionRecorder(options: {
   }
   function exportLog(source: InteractionLog | null = current.value) {
     if (!source) { options.notify('No interaction log is available', true); return }
-    const log = parseInteractionLog(clone(source))
-    log.events.sort((a, b) => a.changeTime - b.changeTime || a.id.localeCompare(b.id))
+    let log: InteractionLog
+    let raw = false
+    try { log = parseInteractionLog(clone(source)) }
+    catch (error) {
+      log = clone(source)
+      raw = true
+      options.notify(`Replay validation failed; downloading raw interaction log: ${error instanceof Error ? error.message : String(error)}`, true)
+    }
+    if (!raw) log.events.sort((a, b) => a.changeTime - b.changeTime || a.id.localeCompare(b.id))
     const url = URL.createObjectURL(new Blob([JSON.stringify(log, null, 2)], { type: 'application/json' }))
     const link = document.createElement('a')
     link.href = url
-    link.download = `canopy-interactions-${log.room.replace(/[\\/:*?"<>|]/g, '_')}.json`
+    link.download = `canopy-interactions-${log.room.replace(/[\\/:*?"<>|]/g, '_')}${raw ? '-raw' : ''}.json`
     link.click()
     URL.revokeObjectURL(url)
   }
   function sendLog(reply: (message: unknown) => void) {
     if (current.value && current.value.room === options.room.value && !replaying.value) {
-      reply({ type: 'session-log', log: parseInteractionLog(clone(current.value)) })
+      reply({ type: 'session-log', log: parseInteractionLog(clone(current.value), false) })
     }
   }
   onMounted(() => {
@@ -339,6 +389,7 @@ export function useInteractionRecorder(options: {
     window.addEventListener('keydown', captureKey, true)
     window.addEventListener('wheel', captureWheel, true)
     window.addEventListener('input', captureText, true)
+    window.addEventListener('resize', recordScreen)
   })
   onUnmounted(() => {
     window.clearTimeout(viewportTimer)
@@ -348,7 +399,8 @@ export function useInteractionRecorder(options: {
     window.removeEventListener('keydown', captureKey, true)
     window.removeEventListener('wheel', captureWheel, true)
     window.removeEventListener('input', captureText, true)
+    window.removeEventListener('resize', recordScreen)
   })
-  return { current, replaying, startRoom, stopRoom, forgetRoom, recordState, recordAction, recordRemoteDeparture,
-    receive, sendLog, exportLog, flushViewport, refreshSessionBaseline, recordDialog }
+  return { current, replaying, startRoom, stopRoom, forgetRoom, recordState, recordRemoteState, recordAction, recordRemoteDeparture,
+    receive, sendLog, exportLog, flushViewport, refreshSessionBaseline, recordDialog, recordScreen }
 }

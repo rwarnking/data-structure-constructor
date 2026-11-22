@@ -14,7 +14,7 @@ import { useVersionHistory } from '../composables/useVersionHistory'
 import { useSounds } from '../composables/useSounds'
 import { useInteractionRecorder } from '../composables/useInteractionRecorder'
 import { useInteractionReplay } from '../composables/useInteractionReplay'
-import { applyInteractionPatch, newInteractionRevisions, parseInteractionLog, type InteractionEvent } from '../utils/interactionLog'
+import { applyInteractionPatch, newInteractionRevisions, parseInteractionLog, type InteractionEvent, type InteractionScreen } from '../utils/interactionLog'
 import { createRoomStorage, LAST_ROOM_KEY } from '../services/roomStorage'
 import { parseDataset, type Dataset } from '../services/dataset'
 import VersionComparison from '../components/VersionComparison.vue'
@@ -92,6 +92,33 @@ const isReadOnly = computed(() => zoom.value <= 0.35)
 const pan = ref({ x: 40, y: 0 })
 const graphCanvas = ref<HTMLElement | null>(null)
 const canvasSize = ref({ width: window.innerWidth, height: Math.max(400, window.innerHeight - 209) })
+const browserSize = ref({ width: window.innerWidth, height: window.innerHeight })
+const replayScreen = ref<InteractionScreen>()
+const legacyReplayScreen = ref<InteractionScreen>()
+const hasRecordedScreen = ref(false)
+const legacyScreenWidth = ref(window.innerWidth)
+const legacyScreenHeight = ref(window.innerHeight)
+let sidebarBeforeReplay: { left: boolean; right: boolean } | undefined
+const replayStageStyle = computed(() => {
+  const screen = replayScreen.value
+  if (!screen) return undefined
+  const scale = Math.min(browserSize.value.width / screen.width, browserSize.value.height / screen.height)
+  return {
+    position: 'fixed' as const, width: `${screen.width}px`, height: `${screen.height}px`,
+    left: `${(browserSize.value.width - screen.width * scale) / 2}px`,
+    top: `${(browserSize.value.height - screen.height * scale) / 2}px`,
+    transform: `scale(${scale})`, transformOrigin: 'top left',
+  }
+})
+function applyLegacyScreen() {
+  if (!Number.isFinite(legacyScreenWidth.value) || !Number.isFinite(legacyScreenHeight.value)
+    || legacyScreenWidth.value < 760 || legacyScreenHeight.value <= 0) {
+    notify('Enter a recording width of at least 760 and a positive height', true)
+    return
+  }
+  legacyReplayScreen.value = { width: legacyScreenWidth.value, height: legacyScreenHeight.value }
+  replayScreen.value = legacyReplayScreen.value
+}
 let canvasObserver: ResizeObserver | null = null
 let suppressVersionClick = false
 let suppressTileClick = false
@@ -118,8 +145,8 @@ watch(menu, async (value) => {
   const element = contextMenuElement.value
   if (!element) return
   contextMenuPosition.value = {
-    x: Math.max(4, Math.min(value.x, window.innerWidth - element.offsetWidth - 4)),
-    y: Math.max(4, Math.min(value.y, window.innerHeight - element.offsetHeight - 4)),
+    x: Math.max(4, Math.min(value.x, (replayScreen.value?.width ?? window.innerWidth) - element.offsetWidth - 4)),
+    y: Math.max(4, Math.min(value.y, (replayScreen.value?.height ?? window.innerHeight) - element.offsetHeight - 4)),
   }
 })
 const windowDimensions = computed(() => {
@@ -170,7 +197,8 @@ watch([compareMode, mergeMode], () => {
 })
 
 const graphCamera = useGraphCamera({ versions, active, state, compareIds, draggedVersionId: () => treeDrag.value?.versionId,
-  zoom, pan, canvasSize, windowDimensions, suppressClicks: suppressGraphClicks })
+  zoom, pan, canvasSize, windowDimensions, suppressClicks: suppressGraphClicks,
+  isReplaying: () => recorder?.replaying.value ?? false })
 const { versionArrival, cardPosition, cardWidth, cardHeight, rootLabelOffset, rootLabelX, rootLabelWidth, displayCardPosition, graphBounds,
   visibleVersions, visibleConnectionVersions, visibleMergeConnectionVersions, fitGraph, fitHeight, focusNeighborhood,
   stepPreset,
@@ -243,10 +271,13 @@ const {
   clientId: CLIENT_ID, state, active, selectedNodes, currentRoomName, graphCanvas, pan, zoom,
   normalizeState, roomDataKey, reflowLayout, fitGraph, notify, playPing,
   onLocalChanges: (before, after, delta) => recorder?.recordState(before, after, delta),
+  onRemoteChanges: (before, after) => recorder?.recordRemoteState(before, after),
   onLocalInteraction: (entry) => recorder?.recordAction(entry),
   onRemoteDeparture: (entry) => recorder?.recordRemoteDeparture(entry),
   onSessionBaseline: (reply) => {
-    if (recorder?.refreshSessionBaseline()) recorder.sendLog(reply)
+    if (!recorder?.refreshSessionBaseline()) return false
+    recorder.sendLog(reply)
+    return true
   },
   onSessionMessage: (message) => recorder?.receive(message) ?? false,
   onSyncRequest: (reply) => recorder?.sendLog(reply),
@@ -259,13 +290,22 @@ const {
 })
 recorder = useInteractionRecorder({
   state, room: currentRoomName, zoom, pan, selectedNodes,
+  screen: () => ({ width: window.innerWidth, height: window.innerHeight,
+    sidebarCollapsed: sidebarCollapsed.value, actionSidebarCollapsed: actionSidebarCollapsed.value }),
   actor: () => ({ id: CLIENT_ID, name: userName.value, color: colorForUser(CLIENT_ID) }),
   send: (message) => peerRoom.send(message), notify,
 })
 const sessionRecorder = recorder
+watch([sidebarCollapsed, actionSidebarCollapsed], () => sessionRecorder.recordScreen())
 const analysisOpen = ref(false)
 let replayRevisions = newInteractionRevisions()
 const replay = useInteractionReplay({
+  setScreen: (screen) => {
+    hasRecordedScreen.value = !!screen
+    replayScreen.value = screen ?? legacyReplayScreen.value
+    if (screen?.sidebarCollapsed !== undefined) sidebarCollapsed.value = screen.sidebarCollapsed
+    if (screen?.actionSidebarCollapsed !== undefined) actionSidebarCollapsed.value = screen.actionSidebarCollapsed
+  },
   reset: () => {
     stopGraphAnimations()
     clearTransientMapViews()
@@ -632,6 +672,14 @@ async function activateRoom(room: string, createEmpty = false, replayStartup = f
     replay.close()
     sessionRecorder.replaying.value = false
     analysisOpen.value = false
+    replayScreen.value = undefined
+    legacyReplayScreen.value = undefined
+    hasRecordedScreen.value = false
+    if (sidebarBeforeReplay) {
+      sidebarCollapsed.value = sidebarBeforeReplay.left
+      actionSidebarCollapsed.value = sidebarBeforeReplay.right
+      sidebarBeforeReplay = undefined
+    }
   }
   playSound('room')
   peerRoom.close()
@@ -729,6 +777,10 @@ async function replayInteractionLog(file: File) {
   }
   if (!sessionRecorder.replaying.value) roomBeforeReplay = currentRoomName.value
   else replay.pause()
+  legacyReplayScreen.value = undefined
+  if (!sessionRecorder.replaying.value) {
+    sidebarBeforeReplay = { left: sidebarCollapsed.value, right: actionSidebarCollapsed.value }
+  }
   const name = 'Interaction Log Replay'
   try {
     for (const versionId of mapViewTimers.keys()) commitMapView(versionId)
@@ -745,6 +797,8 @@ async function replayInteractionLog(file: File) {
     replay.play()
   } catch (error) {
     sessionRecorder.replaying.value = false
+    replayScreen.value = undefined
+    hasRecordedScreen.value = false
     notify(error instanceof Error ? `Replay failed: ${error.message}` : 'Replay failed', true)
   }
 }
@@ -760,6 +814,8 @@ async function exportInteractionLog() {
 }
 function exitReplay() {
   if (!roomBeforeReplay) return
+  replayScreen.value = undefined
+  hasRecordedScreen.value = false
   void activateRoom(roomBeforeReplay)
 }
 
@@ -1444,6 +1500,7 @@ function onKeydown(event: KeyboardEvent) {
   performAction(action)
 }
 function measureCanvas() {
+  browserSize.value = { width: window.innerWidth, height: window.innerHeight }
   if (graphCanvas.value) canvasSize.value = { width: graphCanvas.value.clientWidth, height: graphCanvas.value.clientHeight }
 }
 onMounted(() => {
@@ -1655,7 +1712,7 @@ const cardModel: VersionCardModel = reactive({
     <RoomManager v-if="roomDialogOpen" v-model="newRoomName" :local-rooms="localRooms" :current-room-name="currentRoomName"
       @close="roomDialogOpen = false" @activate="switchFromBlockedRoom" @delete="deleteLocalRoom" @create="switchFromBlockedRoom(newRoomName)" @error="playSound('error')" />
   </main>
-  <main v-else class="app-shell" :class="{ dark: darkMode }" @click.capture="handleAppClickCapture">
+  <main v-else class="app-shell" :class="{ dark: darkMode }" :style="replayStageStyle" @click.capture="handleAppClickCapture">
     <div class="workspace">
       <WorkspaceSidebar :inert="mergeMode && compareIds.length === 2" :sidebar-collapsed="sidebarCollapsed" :dark-mode="darkMode" :current-room-name="currentRoomName"
         :volume="volume" :muted="muted" :branching-enabled="state.branching?.enabled !== false"
@@ -1737,6 +1794,15 @@ const cardModel: VersionCardModel = reactive({
           <option v-for="actor in replay.actors.value" :key="actor.id" :value="actor.id">{{ actor.name }}</option>
         </select>
       </label>
+      <label v-if="!hasRecordedScreen" class="replay-size-control" title="Older recordings do not contain the original browser size">
+        Original size
+        <input v-model.number="legacyScreenWidth" type="number" min="760" aria-label="Recording width" />
+        ×
+        <input v-model.number="legacyScreenHeight" type="number" min="1" aria-label="Recording height" />
+        <button type="button" aria-label="Apply recording size" @click="applyLegacyScreen">Set</button>
+      </label>
+      <label v-if="!hasRecordedScreen" class="replay-size-control"><input v-model="sidebarCollapsed" type="checkbox" /> Left collapsed</label>
+      <label v-if="!hasRecordedScreen" class="replay-size-control"><input v-model="actionSidebarCollapsed" type="checkbox" /> Right collapsed</label>
       <button type="button" aria-label="Jump to beginning" title="Jump to beginning" @click="replay.beginning"><FirstIcon :size="17" /></button>
       <button type="button" :aria-label="replay.playing.value ? 'Pause' : 'Play'"
         :title="replay.playing.value ? 'Pause' : 'Play'" @click="replay.playing.value ? replay.pause() : replay.play()">

@@ -1,10 +1,11 @@
 import { computed, onUnmounted, ref, shallowRef } from 'vue'
-import type { InteractionActor, InteractionEvent, InteractionLog } from '../utils/interactionLog'
+import type { InteractionActor, InteractionEvent, InteractionLog, InteractionScreen } from '../utils/interactionLog'
 
 export function useInteractionReplay(options: {
   reset: () => void
   initialize: (log: InteractionLog) => void
   apply: (event: InteractionEvent) => void
+  setScreen: (screen: InteractionScreen | undefined) => void
 }) {
   const log = shallowRef<InteractionLog | null>(null)
   const playing = ref(false)
@@ -38,6 +39,7 @@ export function useInteractionReplay(options: {
     const session = sessionId
       ? log.value.sessions?.find((item) => item.id === sessionId)
       : undefined
+    options.setScreen(session?.initialScreen)
     options.initialize(session ? { ...log.value, initialState: session.initialState,
       initialViewport: session.initialViewport } : log.value)
     activeSessionId = sessionId ?? null
@@ -50,6 +52,7 @@ export function useInteractionReplay(options: {
   }
   function execute(event: InteractionEvent) {
     if (event.sessionId !== activeSessionId) initializeSession(event.sessionId, true)
+    if (event.screen) options.setScreen(event.screen)
     const boundary = event.parameters?.sessionBoundary
     if (boundary === 'login' || boundary === 'logout'
       || event.action === 'Login' || event.action === 'Logout'

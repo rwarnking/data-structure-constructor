@@ -803,6 +803,77 @@ test('interaction logs export, replay, reset, and show analysis without changing
     .toEqual(original.versions.map(({ id, data }) => ({ id, data })))
 })
 
+test('replay scales the recorded screen and keeps cursor and graph aligned after a resize', async ({ page }) => {
+  await openRoom(page)
+  await addEntries(page, ['Existing'])
+  await focusActive(page)
+  await page.getByRole('button', { name: 'New free entry, N' }).click()
+  await page.getByPlaceholder('Entry name').fill('Replay target')
+  const addButton = page.getByRole('button', { name: 'Add 1 entry' })
+  const originalButton = await addButton.boundingBox()
+  await page.evaluate(() => window.addEventListener('pointerdown', () => {
+    const rect = document.querySelector('.version-card.active').getBoundingClientRect()
+    window.recordedCardBounds = { x: rect.x, y: rect.y }
+  }, { once: true }))
+  await addButton.click()
+  const originalCard = await page.evaluate(() => window.recordedCardBounds)
+  await page.getByRole('button', { name: 'Settings' }).click()
+  const download = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Export Interaction Log' }).click()
+  const buffer = await readFile(await (await download).path())
+  const log = JSON.parse(buffer.toString())
+  const index = log.events.findLastIndex((event) => event.action === 'Button: Add 1 entry')
+  expect(log.events[index].screen).toMatchObject({ width: 1440, height: 900 })
+  await page.setViewportSize({ width: 1000, height: 700 })
+  const chooser = page.waitForEvent('filechooser')
+  await page.getByRole('button', { name: 'Replay Interaction Log' }).click()
+  await (await chooser).setFiles({ name: 'recording.json', mimeType: 'application/json', buffer })
+  await expect(page.getByRole('toolbar', { name: 'Interaction log replay controls' })).toBeVisible()
+  await page.getByLabel('Replay timeline').evaluate((slider, value) => {
+    slider.value = String(value)
+    slider.dispatchEvent(new Event('input', { bubbles: true }))
+  }, index + 1)
+  await expect(page.getByRole('button', { name: 'Add 1 entry' })).toBeVisible()
+  await page.waitForTimeout(300)
+  const replayButton = await page.getByRole('button', { name: 'Add 1 entry' }).boundingBox()
+  const replayCard = await page.locator('.version-card.active').boundingBox()
+  const cursor = await page.locator('.replay-cursor').boundingBox()
+  const scale = 1000 / 1440
+  const top = (700 - 900 * scale) / 2
+  expect(Math.abs(cursor.x - (log.events[index].cursor.x * scale))).toBeLessThan(2)
+  expect(Math.abs(cursor.y - (top + log.events[index].cursor.y * scale))).toBeLessThan(2)
+  expect(Math.abs(replayButton.x + replayButton.width / 2 - cursor.x)).toBeLessThan(3)
+  expect(Math.abs(replayButton.y + replayButton.height / 2 - cursor.y)).toBeLessThan(3)
+  expect(Math.abs(replayCard.x - originalCard.x * scale)).toBeLessThan(3)
+  expect(Math.abs(replayCard.y - (top + originalCard.y * scale))).toBeLessThan(3)
+  expect(Math.abs(replayButton.width - originalButton.width * scale)).toBeLessThan(3)
+})
+
+test('older recordings can use a manually supplied screen size', async ({ page }) => {
+  await page.setViewportSize({ width: 1000, height: 700 })
+  const room = await openRoom(page)
+  const initialState = await state(page, room)
+  const actor = { id: 'alice', name: 'Alice', color: '#123456' }
+  const log = { format: 'canopy-interaction-log', version: 1, room, initialState,
+    initialViewport: { zoom: 1, panX: 0, panY: 0 }, events: [{
+      id: 'click', actor, action: 'Mouse interaction', category: 'input', method: 'mouse',
+      inputTime: 1, changeTime: 1, cursor: { x: 1200, y: 600 },
+    }] }
+  await page.getByRole('button', { name: 'Settings' }).click()
+  const chooser = page.waitForEvent('filechooser')
+  await page.getByRole('button', { name: 'Replay Interaction Log' }).click()
+  await (await chooser).setFiles({ name: 'legacy.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(log)) })
+  await page.getByLabel('Recording width').fill('1800')
+  await page.getByLabel('Recording height').fill('1000')
+  await page.getByRole('button', { name: 'Apply recording size' }).click()
+  await expect(page.locator('.app-shell')).toHaveCSS('width', '1800px')
+  await page.getByRole('button', { name: 'Jump to end' }).click()
+  const cursor = await page.locator('.replay-cursor').boundingBox()
+  expect(Math.abs(cursor.x - 1200 * (1000 / 1800))).toBeLessThan(2)
+  await page.getByRole('button', { name: 'Jump to beginning' }).click()
+  await expect(page.locator('.app-shell')).toHaveCSS('width', '1800px')
+})
+
 test('interaction analysis visualizes and inspects user, flow, viewport and version activity', async ({ page }) => {
   const room = await openRoom(page)
   const initialState = await state(page, room)
@@ -1230,6 +1301,7 @@ test('shared interaction logs preserve each participant and replay their edits',
     await host.getByRole('button', { name: 'Export Interaction Log' }).click()
     const buffer = await readFile(await (await download).path())
     const log = JSON.parse(buffer.toString())
+    expect(log.events.some((event) => event.parameters?.localObservation === true)).toBe(true)
     expect(new Set(log.events.filter((event) => event.category === 'state').map((event) => event.actor.id)).size).toBe(2)
     const hostActorId = log.events.find((event) => event.category === 'state' && event.patch.versions.some((version) =>
       findNode(version.data, 'Host record'))).actor.id
@@ -1248,7 +1320,7 @@ test('shared interaction logs preserve each participant and replay their edits',
     await expect.poll(async () => (await state(host, 'Interaction Log Replay')).versions
       .some((version) => findNode(version.data, 'Host record'))).toBe(true)
     expect((await state(host, 'Interaction Log Replay')).versions
-      .some((version) => findNode(version.data, 'Guest record'))).toBe(false)
+      .some((version) => findNode(version.data, 'Guest record'))).toBe(true)
     await host.getByLabel('Replay user').selectOption(guestActorId)
     await host.getByRole('button', { name: 'Jump to end' }).click()
     await expect.poll(async () => (await state(host, 'Interaction Log Replay')).versions

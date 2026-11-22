@@ -18,6 +18,7 @@ export function useGraphCamera(options: {
   canvasSize: Ref<{ width: number; height: number }>
   windowDimensions: ComputedRef<{ width: number; height: number }>
   suppressClicks: () => void
+  isReplaying?: () => boolean
 }) {
   const { versions, active, state, compareIds, draggedVersionId, zoom, pan, canvasSize, windowDimensions, suppressClicks } = options
   const focusedVersionId = ref<string | null>(null)
@@ -115,6 +116,7 @@ export function useGraphCamera(options: {
       Math.max(1, canvasSize.value.height - 100) / (bounds.bottom - bounds.top)))
   })
   watch([canvasSize, windowDimensions], ([size, dimensions], [oldSize, oldDimensions]) => {
+    if (options.isReplaying?.()) return
     const current = preset.value
     if (!current) {
       const anchor = active.value
@@ -393,6 +395,8 @@ export function useGraphCamera(options: {
   function stopGraphAnimations() {
     cancelPanAnimation()
     if (versionArrivalFrame) cancelAnimationFrame(versionArrivalFrame)
+    versionArrivalFrame = 0
+    versionArrival.value = null
   }
 
   return { focusedVersionId, versionArrival, cardPosition, cardWidth, cardHeight, rootLabelOffset, rootLabelX, rootLabelWidth, displayCardPosition, startVersionArrival, graphBounds,

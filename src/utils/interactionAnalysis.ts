@@ -155,7 +155,8 @@ export function analyzeInteractions(log: InteractionLog, labels = interactionVer
       versionEvents.set(versionId, entries)
     }
 
-    if (event.category === 'state' || /^(undo|redo|ping|navigate)/i.test(event.action)) {
+    if (event.parameters?.localObservation !== true
+      && (event.category === 'state' || /^(undo|redo|ping|navigate)/i.test(event.action))) {
       const previous = lastAction.get(event.actor.id)
       if (previous) {
         const key = JSON.stringify([previous.action, event.action])
