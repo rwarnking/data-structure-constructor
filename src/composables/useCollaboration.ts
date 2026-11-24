@@ -6,6 +6,7 @@ import { hasValidVersionStep, isCollaborationMetadata, isCopyLink, isInteraction
 import { findNode } from '../utils/tree'
 import { assignMissingVersionNumbers, assignVersionSuffixes, compareCopyLinks, retireVersionNumbers } from '../utils/versions'
 import { collaboratorColors, userColor } from '../utils/colors'
+import { writeRoomSnapshot } from '../services/roomStorage'
 
 export function useCollaboration(options: {
   clientId: string
@@ -77,9 +78,15 @@ export function useCollaboration(options: {
   watch(userName, (name) => {
     localStorage.setItem('canopy-user-name', name.trim().slice(0, 32) || animalForUser(CLIENT_ID))
   })
+  function persistRoomSnapshot(snapshot: string) {
+    try { writeRoomSnapshot(roomDataKey(currentRoomName.value), snapshot) }
+    catch (error) {
+      notify(`Could not save room "${currentRoomName.value}": ${error instanceof Error ? error.message : String(error)}`, true)
+    }
+  }
   watch(state, (value) => {
     const snapshot = JSON.stringify(toRaw(value))
-    localStorage.setItem(roomDataKey(currentRoomName.value), snapshot)
+    persistRoomSnapshot(snapshot)
     if (!applyingRemoteState && snapshot !== lastObservedState) {
       const before = JSON.parse(lastObservedState) as StoredState
       const delta = publishLocalChanges(value)
@@ -265,12 +272,17 @@ export function useCollaboration(options: {
     reply(snapshot)
   }
 
+  function isValidSyncSnapshot(message: SyncSnapshot) {
+    return isStoredState(message.state) && isRevision(message.active) && isRevision(message.copyLinks)
+      && Number.isFinite(message.clock) && isRecord(message.versions) && isRecord(message.removed)
+      && Object.values(message.versions).every(isRevision) && Object.values(message.removed).every(isRevision)
+      && message.state.versions.every((version) => isRevision(message.versions[version.id]))
+      && (message.interactions === undefined
+        || Array.isArray(message.interactions) && message.interactions.every(isInteractionEntry))
+  }
+
   function applySyncSnapshot(message: SyncSnapshot) {
-    if (!isStoredState(message.state) || !isRevision(message.active) || !isRevision(message.copyLinks)
-      || !Number.isFinite(message.clock) || !isRecord(message.versions) || !isRecord(message.removed)
-      || !Object.values(message.versions).every(isRevision) || !Object.values(message.removed).every(isRevision)
-      || (message.interactions !== undefined
-        && (!Array.isArray(message.interactions) || !message.interactions.every(isInteractionEntry)))) {
+    if (!isValidSyncSnapshot(message)) {
       notify('Ignored an invalid shared-state snapshot', true)
       return
     }
@@ -297,7 +309,7 @@ export function useCollaboration(options: {
     lastObservedState = JSON.stringify(toRaw(state.value))
     applyingRemoteState = true
     persistCollaborationMetadata()
-    localStorage.setItem(roomDataKey(currentRoomName.value), lastObservedState)
+    persistRoomSnapshot(lastObservedState)
     if (!options.onSessionBaseline?.((message) => peerRoom.send(message))) {
       options.onRemoteChanges?.(before, clone(state.value))
     }
@@ -484,7 +496,7 @@ export function useCollaboration(options: {
     lastObservedState = JSON.stringify(toRaw(state.value))
     applyingRemoteState = true
     persistCollaborationMetadata()
-    localStorage.setItem(roomDataKey(currentRoomName.value), lastObservedState)
+    persistRoomSnapshot(lastObservedState)
     const extraRetired = (state.value.retiredVersionNumbers ?? [])
       .filter((item) => !receivedRetiredKeys.has(JSON.stringify([item.id, item.suffix ?? 0])))
     // Another peer may have seen a different suffix before the same version was removed.
@@ -511,7 +523,27 @@ export function useCollaboration(options: {
     } else if (packet.type === 'session-interaction' || packet.type === 'session-log') {
       if (!options.onSessionMessage?.(message)) return false
     } else if (packet.type === 'sync-snapshot') {
-      applySyncSnapshot(packet as SyncSnapshot)
+      const snapshot = packet as SyncSnapshot
+      if (peerRoom.isHosting()) {
+        if (!isValidSyncSnapshot(snapshot)) {
+          notify('Ignored an invalid shared-state snapshot', true)
+          return false
+        }
+        const delta: SyncDelta = {
+          type: 'sync-delta',
+          versions: [...snapshot.state.versions].sort((a, b) => a.step - b.step)
+            .map((version) => ({ version, revision: snapshot.versions[version.id]! })),
+          removed: Object.entries(snapshot.removed).map(([id, revision]) => ({ id, revision })),
+          copyLinks: { links: snapshot.state.copyLinks, revision: snapshot.copyLinks },
+          retiredVersionNumbers: snapshot.state.retiredVersionNumbers,
+          branching: snapshot.state.branching,
+          nextNode: snapshot.state.nextNode, nextVersion: snapshot.state.nextVersion, nextLane: snapshot.state.nextLane,
+        }
+        applySyncDelta(delta)
+        peerRoom.send(delta)
+        return false
+      }
+      applySyncSnapshot(snapshot)
     } else if (packet.type === 'sync-delta') {
       applySyncDelta(packet as SyncDelta)
     } else if (packet.type === 'presence') {
@@ -629,7 +661,9 @@ export function useCollaboration(options: {
 
   function onRoomStatus(status: RoomStatus) {
     const wasOnline = roomStatus.value.state === 'connected' || roomStatus.value.state === 'hosting'
+    const wasReconnecting = roomStatus.value.state === 'reconnecting'
     roomStatus.value = status
+    if (wasReconnecting && status.state === 'error') notify(status.message, true)
     if (status.state === 'connected' || status.state === 'hosting') {
       if (!wasOnline) logInteraction('Joined room')
       publishPresence()
@@ -637,6 +671,7 @@ export function useCollaboration(options: {
     if (status.state === 'idle') remoteUsers.value = {}
   }
   function expireRemoteUsers() {
+    if (roomStatus.value.state === 'reconnecting' || roomStatus.value.state === 'error') return
     const cutoff = Date.now() - 15000
     for (const [id, user] of Object.entries(remoteUsers.value)) if (user.lastSeen < cutoff) recordRemoteDeparture(id, user)
     remoteUsers.value = Object.fromEntries(Object.entries(remoteUsers.value)

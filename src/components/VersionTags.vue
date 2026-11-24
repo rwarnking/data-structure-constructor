@@ -1,20 +1,20 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed } from 'vue'
 import type { Version, VersionTag } from '../types/workspace'
 import { displayVersionId } from '../utils/versions'
 import { actionIcons } from '../config/icons'
 
-const props = defineProps<{ versions: Version[]; editing?: Version }>()
-const emit = defineEmits<{ close: []; save: [tag: VersionTag]; remove: []; focus: [version: Version] }>()
+const props = defineProps<{ versions: Version[]; editing?: Version; draft: VersionTag }>()
+const emit = defineEmits<{ close: []; save: [tag: VersionTag]; remove: []; focus: [version: Version]; 'update:draft': [draft: VersionTag] }>()
 const { close: Close } = actionIcons
-const title = ref(props.editing?.tag?.title ?? '')
-const description = ref(props.editing?.tag?.description ?? '')
+const title = computed({ get: () => props.draft.title, set: (value: string) => emit('update:draft', { ...props.draft, title: value }) })
+const description = computed({ get: () => props.draft.description, set: (value: string) => emit('update:draft', { ...props.draft, description: value }) })
 </script>
 
 <template>
   <div class="editor-scrim" @click.self="emit('close')" @keydown.esc.stop="emit('close')">
     <form v-if="editing" class="entry-editor" role="dialog" aria-modal="true" aria-label="Version tag"
-      @submit.prevent="emit('save', { title: title.trim(), description: description.trim() })">
+      @submit.prevent="emit('save', { title: draft.title.trim(), description: draft.description.trim() })">
       <div class="editor-heading"><span class="section-label">TAG {{ displayVersionId(editing) }}</span>
         <button type="button" class="quiet-icon" aria-label="Close tag editor" @click="emit('close')"><Close :size="17" /></button></div>
       <label class="editor-label" for="tag-title">Title</label>
@@ -24,7 +24,7 @@ const description = ref(props.editing?.tag?.description ?? '')
       <div class="editor-actions">
         <button v-if="editing.tag" type="button" class="cancel-button" @click="emit('remove')">Remove tag</button>
         <button type="button" class="cancel-button" @click="emit('close')">Cancel</button>
-        <button type="submit" class="primary-button" :disabled="!title.trim()">Save tag</button>
+        <button type="submit" class="primary-button" :disabled="!draft.title.trim()">Save tag</button>
       </div>
     </form>
     <section v-else class="entry-editor" role="dialog" aria-modal="true" aria-label="All tags">

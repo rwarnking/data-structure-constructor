@@ -26,6 +26,8 @@ export function useTreemapViews(options: {
   } | null>(null)
   const transientMapViews = ref<Record<string, MapView>>({})
   const mapViewTimers = new Map<string, number>()
+  const pendingZoomViews = new Map<string, MapView>()
+  let zoomFrame = 0
   function cardData(version: Version): TreeNode[] {
     return version.data
   }
@@ -69,6 +71,8 @@ export function useTreemapViews(options: {
       panY: (viewport.height - (bottom - top) * targetZoom) / 2 - top * targetZoom, manual: true }
   }
   function mapViewFor(version: Version): MapView {
+    const pending = pendingZoomViews.get(version.id)
+    if (pending) return pending
     const transient = transientMapViews.value[version.id]
     if (transient) return transient
     if (version.mapView && (version.id !== 'v0' || version.mapView.manual)) return version.mapView
@@ -141,16 +145,20 @@ export function useTreemapViews(options: {
     if (notifyUser) notify('Treemap layout compacted')
   }
   function commitMapView(versionId: string) {
-    const view = transientMapViews.value[versionId]
+    const view = pendingZoomViews.get(versionId) ?? transientMapViews.value[versionId]
     const version = versions.value.find((item) => item.id === versionId)
     if (!view || !version) return
     const timer = mapViewTimers.get(versionId)
     if (timer !== undefined) window.clearTimeout(timer)
     mapViewTimers.delete(versionId)
     version.mapView = clone(view)
+    pendingZoomViews.delete(versionId)
     delete transientMapViews.value[versionId]
   }
   function clearTransientMapViews() {
+    cancelAnimationFrame(zoomFrame)
+    zoomFrame = 0
+    pendingZoomViews.clear()
     for (const timer of mapViewTimers.values()) window.clearTimeout(timer)
     mapViewTimers.clear()
     transientMapViews.value = {}
@@ -183,12 +191,19 @@ export function useTreemapViews(options: {
     const nextZoom = Math.max(MAP_ZOOM_MIN, Math.min(MAP_ZOOM_MAX, current.zoom * Math.exp(-event.deltaY * 0.0012)))
     const worldX = (pointerX - current.panX) / current.zoom
     const worldY = (pointerY - current.panY) / current.zoom
-    transientMapViews.value[version.id] = {
+    pendingZoomViews.set(version.id, {
       zoom: nextZoom,
       panX: pointerX - worldX * nextZoom,
       panY: pointerY - worldY * nextZoom,
       manual: true,
-    }
+    })
+    if (!zoomFrame) zoomFrame = requestAnimationFrame(() => {
+      zoomFrame = 0
+      for (const [id, view] of pendingZoomViews) {
+        if (versions.value.some((item) => item.id === id)) transientMapViews.value[id] = view
+      }
+      pendingZoomViews.clear()
+    })
     scheduleMapViewCommit(version.id)
   }
   function startMapPan(event: PointerEvent, version: Version) {
@@ -196,6 +211,10 @@ export function useTreemapViews(options: {
     event.stopPropagation()
     state.value.activeId = version.id
     const view = mapViewFor(version)
+    if (pendingZoomViews.has(version.id)) {
+      transientMapViews.value[version.id] = view
+      pendingZoomViews.delete(version.id)
+    }
     const target = event.currentTarget as Element
     const map = target.closest<HTMLElement>('.mini-map, .overview-map')
     if (!map) return

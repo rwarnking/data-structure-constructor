@@ -15,7 +15,7 @@ import { useSounds } from '../composables/useSounds'
 import { useInteractionRecorder } from '../composables/useInteractionRecorder'
 import { useInteractionReplay } from '../composables/useInteractionReplay'
 import { applyInteractionPatch, newInteractionRevisions, parseInteractionLog, type InteractionEvent, type InteractionScreen } from '../utils/interactionLog'
-import { createRoomStorage, LAST_ROOM_KEY } from '../services/roomStorage'
+import { createRoomStorage, LAST_ROOM_KEY, writeRoomSnapshot } from '../services/roomStorage'
 import { parseDataset, type Dataset } from '../services/dataset'
 import VersionComparison from '../components/VersionComparison.vue'
 import WorkspaceSidebar from '../components/WorkspaceSidebar.vue'
@@ -37,7 +37,6 @@ import { countNodes, findNode, findParent, flattenNodes, removeNode } from '../u
 import { duplicateLinks } from '../utils/duplicateLinks'
 import { compareCopyLinks, displayVersionId, isLatestOnBranch, reflowVersionLayout } from '../utils/versions'
 import { changedEntryIds } from '../utils/versionDifferences'
-import { RootNotEmptyError } from '../utils/validation'
 import { CARD_WIDTH, TREE_MAP_HEIGHT, tilesForForest, tileForNode } from '../utils/treemap'
 import { shortcutAction, shortcutLabel, type ShortcutAction } from '../config/hotkeys'
 import { actionIcons, actionSymbols } from '../config/icons'
@@ -64,8 +63,7 @@ let initialState: StoredState
 try {
   initialState = readRoomState(currentRoomName.value, initialRooms.canMigrateLegacy)
 } catch (error) {
-  if (!(error instanceof RootNotEmptyError)) throw error
-  initialRoomError = error.message
+  initialRoomError = error instanceof Error ? error.message : String(error)
   initialState = structuredClone(seed)
 }
 const state = ref<StoredState>(initialState)
@@ -163,21 +161,33 @@ const searchOpen = ref(false)
 const tutorialOpen = ref(false)
 const tagsOpen = ref(false)
 const tagVersionId = ref<string | null>(null)
+const tagDraft = ref<VersionTag>({ title: '', description: '' })
 const tagVersion = computed(() => tagVersionId.value ? versionsById.value.get(tagVersionId.value) : undefined)
 function editTag(versionId?: string) {
-  if (!versionId || !versionsById.value.has(versionId)) return
+  const version = versionId ? versionsById.value.get(versionId) : undefined
+  if (!version || !versionId) return
   tagVersionId.value = versionId
+  tagDraft.value = { title: version.tag?.title ?? '', description: version.tag?.description ?? '' }
   tagsOpen.value = true
   menu.value = null
+  sessionRecorder.recordTagDialog({ versionId, ...tagDraft.value }, 'Tag editor opened')
+}
+function updateTagDraft(draft: VersionTag) {
+  tagDraft.value = draft
+  if (tagVersionId.value) sessionRecorder.recordTagDialog({ versionId: tagVersionId.value, ...draft }, 'Tag editor draft')
+}
+function closeTags(action = 'Tag editor closed') {
+  if (tagsOpen.value && tagVersionId.value) sessionRecorder.recordTagDialog(null, action)
+  tagsOpen.value = false
+  tagVersionId.value = null
 }
 function saveTag(tag?: VersionTag) {
   const version = tagVersion.value
-  if (!version) { notify('Version is no longer available', true); tagsOpen.value = false; return }
+  if (!version) { notify('Version is no longer available', true); closeTags(); return }
   if (tag) version.tag = tag
   else delete version.tag
   logInteraction(tag ? `Tagged ${displayVersionId(version)}` : `Removed tag from ${displayVersionId(version)}`, { versionId: version.id })
-  tagsOpen.value = false
-  tagVersionId.value = null
+  closeTags(tag ? 'Tag editor confirmed' : 'Tag editor removed')
 }
 const newRoomName = ref('')
 let toastTimer = 0
@@ -313,6 +323,11 @@ const replay = useInteractionReplay({
     entryOperation.value = null
     bulkDeleteDialog.value = false
     bulkDeleteMode.value = 'keep-children'
+    tagsOpen.value = false
+    tagVersionId.value = null
+    tagDraft.value = { title: '', description: '' }
+    mergeDialogSnapshot = ''
+    closeVersionSelection()
     remoteUsers.value = {}
     pings.value = []
     setRoomInteractions(currentRoomName.value, [])
@@ -329,6 +344,24 @@ const replay = useInteractionReplay({
   },
   apply: (event: InteractionEvent) => {
     const parameters = event.parameters
+    if (event.tagDialog !== undefined) {
+      const dialog = event.tagDialog
+      tagVersionId.value = dialog?.versionId ?? null
+      tagsOpen.value = !!dialog && versionsById.value.has(dialog.versionId)
+      if (dialog) tagDraft.value = { title: dialog.title, description: dialog.description }
+    }
+    if (event.mergeDialog !== undefined) {
+      if (event.mergeDialog === null) closeVersionSelection()
+      else {
+        compareMode.value = false
+        mergeMode.value = true
+        compareIds.value = clone(event.mergeDialog.versionIds)
+        comparisonController.mergeDecisions.value = clone(event.mergeDialog.decisions)
+        comparisonController.mergeParentOverrides.value = clone(event.mergeDialog.parentOverrides)
+        comparisonController.mergePositionOverrides.value = clone(event.mergeDialog.positionOverrides)
+        comparisonController.showOverview.value = event.mergeDialog.versionIds.length === 2
+      }
+    }
     if (event.dialog) {
       editor.value = clone(event.dialog.editor)
       entryOperation.value = clone(event.dialog.operation)
@@ -413,6 +446,24 @@ watch([editor, entryOperation, bulkDeleteDialog, bulkDeleteMode], () => {
   sessionRecorder.recordDialog({ editor: editor.value, operation: entryOperation.value,
     deleteOpen: bulkDeleteDialog.value, deleteMode: bulkDeleteMode.value })
 }, { deep: true, flush: 'sync' })
+
+let mergeDialogSnapshot = ''
+watch([mergeMode, compareIds, comparisonController.mergeDecisions, comparisonController.mergeParentOverrides,
+  comparisonController.mergePositionOverrides], () => {
+  if (sessionRecorder.replaying.value) return
+  if (mergeMode.value) {
+    const snapshot = { versionIds: compareIds.value,
+      decisions: comparisonController.mergeDecisions.value, parentOverrides: comparisonController.mergeParentOverrides.value,
+      positionOverrides: comparisonController.mergePositionOverrides.value }
+    const serialized = JSON.stringify(snapshot)
+    if (serialized === mergeDialogSnapshot) return
+    sessionRecorder.recordMergeDialog(snapshot)
+    mergeDialogSnapshot = serialized
+  } else if (mergeDialogSnapshot) {
+    sessionRecorder.recordMergeDialog(null)
+    mergeDialogSnapshot = ''
+  }
+}, { deep: true })
 
 function replayLegacyDialog(event: InteractionEvent) {
   if (event.patch) {
@@ -657,10 +708,12 @@ async function activateRoom(room: string, createEmpty = false, replayStartup = f
     return
   }
   let nextState: StoredState
-  try { nextState = createEmpty ? clone(seed) : readRoomState(name) }
+  try {
+    nextState = createEmpty ? clone(seed) : readRoomState(name)
+    writeRoomSnapshot(roomDataKey(name), JSON.stringify(nextState))
+  }
   catch (error) {
-    if (!(error instanceof RootNotEmptyError)) throw error
-    notify(`Cannot open room "${name}": ${error.message}`, true)
+    notify(`Cannot open room "${name}": ${error instanceof Error ? error.message : String(error)}`, true)
     return
   }
   for (const versionId of mapViewTimers.keys()) commitMapView(versionId)
@@ -670,6 +723,7 @@ async function activateRoom(room: string, createEmpty = false, replayStartup = f
   sessionRecorder.stopRoom()
   if (!replayStartup && sessionRecorder.replaying.value) {
     replay.close()
+    closeVersionSelection()
     sessionRecorder.replaying.value = false
     analysisOpen.value = false
     replayScreen.value = undefined
@@ -706,7 +760,6 @@ async function activateRoom(room: string, createEmpty = false, replayStartup = f
   await nextTick()
   finishRoomSwitch()
   initializeCollaborationMetadata(name)
-  localStorage.setItem(roomDataKey(name), JSON.stringify(state.value))
   reflowLayout()
   await nextTick(initializeMapViews)
   if (!replayStartup) sessionRecorder.startRoom(name, createEmpty)
@@ -753,7 +806,7 @@ async function importData(file: File) {
     name = `${base.slice(0, 80 - tail.length)}${tail}`
   }
   try {
-    localStorage.setItem(roomDataKey(name), JSON.stringify(dataset.state))
+    writeRoomSnapshot(roomDataKey(name), JSON.stringify(dataset.state))
     localStorage.setItem(localOnlyRoomKey(name), 'true')
     if (!setRoomInteractions(name, dataset.interactions)) throw new Error('Could not save recent interactions')
   } catch (error) {
@@ -814,6 +867,8 @@ async function exportInteractionLog() {
 }
 function exitReplay() {
   if (!roomBeforeReplay) return
+  tagsOpen.value = false
+  tagVersionId.value = null
   replayScreen.value = undefined
   hasRecordedScreen.value = false
   void activateRoom(roomBeforeReplay)
@@ -867,7 +922,10 @@ function switchFromBlockedRoom(room: string) {
 
 async function initializeCurrentRoom() {
   initializeCollaborationMetadata(currentRoomName.value)
-  localStorage.setItem(roomDataKey(currentRoomName.value), JSON.stringify(state.value))
+  try { writeRoomSnapshot(roomDataKey(currentRoomName.value), JSON.stringify(state.value)) }
+  catch (error) {
+    notify(`Could not save room "${currentRoomName.value}": ${error instanceof Error ? error.message : String(error)}`, true)
+  }
   reflowLayout()
   await nextTick(initializeMapViews)
   sessionRecorder.startRoom(currentRoomName.value)
@@ -1837,7 +1895,7 @@ const cardModel: VersionCardModel = reactive({
         :style="{ left: `${cursor.x}px`, top: `${cursor.y}px`, '--cursor-color': cursor.color }">▲ <span>{{ cursor.name }}</span></div>
     </div>
     <InteractionAnalysis v-if="analysisOpen && replay.log.value" :log="replay.log.value" @close="analysisOpen = false" />
-    <VersionComparison :model="comparisonModel" :versions="versions" :sidebar-collapsed="sidebarCollapsed"
+    <VersionComparison :inert="sessionRecorder.replaying.value" :model="comparisonModel" :versions="versions" :sidebar-collapsed="sidebarCollapsed"
       :action-sidebar-collapsed="actionSidebarCollapsed" @confirm="confirmMerge" @entry-click="playSound('entryClick')"
       @pick="playSound('entryAdded')" @omit="playSound('entryClick')" />
 
@@ -1907,8 +1965,8 @@ const cardModel: VersionCardModel = reactive({
       @close="roomDialogOpen = false" @activate="activateRoom" @delete="deleteLocalRoom" @create="createRoomFromDialog" @error="playSound('error')" />
     <VersionSearch v-if="searchOpen" :versions="versions" :room="currentRoomName" :action-for-version="(version) => versionAction(version).label" @close="searchOpen = false"
       @focus="activateAndFocusVersion($event); searchOpen = false" />
-    <VersionTags v-if="tagsOpen" :versions="versions" :editing="tagVersion"
-      @close="tagsOpen = false; tagVersionId = null" @save="saveTag($event)" @remove="saveTag()"
+    <VersionTags v-if="tagsOpen" :inert="sessionRecorder.replaying.value" :versions="versions" :editing="tagVersion" :draft="tagDraft"
+      @update:draft="updateTagDraft" @close="closeTags()" @save="saveTag($event)" @remove="saveTag()"
       @focus="activateAndFocusVersion($event); tagsOpen = false" />
     <StoryGuide v-if="tutorialOpen" :story="tutorial" :right-inset="(actionSidebarCollapsed ? 48 : 270) + 16" @close="tutorialOpen = false" />
     <div v-if="entryTooltip" class="entry-tooltip" role="tooltip" :style="entryTooltipStyle()">

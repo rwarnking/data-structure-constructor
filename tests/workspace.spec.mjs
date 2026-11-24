@@ -123,6 +123,67 @@ async function clearEntrySelection(page) {
   await expect(page.locator('.version-card.active .tree-tile.is-selected')).toHaveCount(0)
 }
 
+test('large room imports can be repeated and survive reload', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['Large imported entry'])
+  const saved = await state(page, room)
+  saved.versions.find((version) => version.id === saved.activeId).data[0].description = 'large room data '.repeat(190000)
+  const buffer = Buffer.from(JSON.stringify({ format: 'canopy-dataset', version: 1, room: 'large-import',
+    state: saved, interactions: [] }))
+  expect(buffer.length).toBeGreaterThan(2_500_000)
+  await page.getByRole('button', { name: 'Settings' }).click()
+  const chooser = page.waitForEvent('filechooser')
+  await page.getByRole('button', { name: 'Import data' }).click()
+  await (await chooser).setFiles({ name: 'large.json', mimeType: 'application/json', buffer })
+  await expect(page.getByRole('status').first()).toHaveText('Local only', { timeout: 60000 })
+  await page.getByRole('button', { name: 'Settings' }).click()
+  const secondChooser = page.waitForEvent('filechooser')
+  await page.getByRole('button', { name: 'Import data' }).click()
+  await (await secondChooser).setFiles({ name: 'large.json', mimeType: 'application/json', buffer })
+  await expect(page.locator('.current-room-name')).toHaveText('large-import_1', { timeout: 60000 })
+  await page.reload()
+  await expect(page.getByRole('status').first()).toHaveText('Local only', { timeout: 60000 })
+  await expect(page.locator('.version-card.active')).toContainText('Large imported entry')
+  await page.getByRole('button', { name: 'Settings' }).click()
+  const download = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Export data' }).click()
+  const exported = JSON.parse((await readFile(await (await download).path())).toString())
+  expect(exported.state.versions.find((version) => version.id === saved.activeId).data[0].description)
+    .toBe(saved.versions.find((version) => version.id === saved.activeId).data[0].description)
+})
+
+test('corrupt compressed room data is not overwritten on startup', async ({ page }) => {
+  const room = `test-${randomUUID()}`
+  const saved = 'canopy-gzip-v1:invalid'
+  await page.addInitScript(({ room, saved }) => {
+    localStorage.setItem(`canopy-room-data-v1-${encodeURIComponent(room)}`, saved)
+  }, { room, saved })
+  await page.goto(`/?room=${room}`)
+  await expect(page.getByRole('alert')).toContainText('Could not load saved data')
+  expect(await page.evaluate((name) => localStorage.getItem(`canopy-room-data-v1-${encodeURIComponent(name)}`), room))
+    .toBe(saved)
+})
+
+test('exported room data imports through the file chooser', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['Exported entry'])
+  await page.getByRole('button', { name: 'Settings' }).click()
+  const download = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Export data' }).click()
+  const buffer = await readFile(await (await download).path())
+  const exported = JSON.parse(buffer.toString())
+  await page.getByRole('button', { name: 'Settings' }).click()
+  const chooser = page.waitForEvent('filechooser')
+  await page.getByRole('button', { name: 'Import data' }).click()
+  await (await chooser).setFiles({ name: 'export.json', mimeType: 'application/json', buffer })
+  await expect(page.getByRole('status').first()).toHaveText('Local only')
+  await expect.poll(async () => (await state(page, `${room}_1`))?.versions
+    .some((version) => findNode(version.data, 'Exported entry'))).toBe(true)
+  const imported = await state(page, `${room}_1`)
+  expect(imported.versions.map(({ id, data }) => ({ id, data })))
+    .toEqual(exported.state.versions.map(({ id, data }) => ({ id, data })))
+})
+
 test('tutorial navigates content, highlights actions, completes and restarts', async ({ page }) => {
   await openRoom(page)
   await page.getByRole('button', { name: 'Open tutorial' }).click()
@@ -144,6 +205,97 @@ test('tutorial navigates content, highlights actions, completes and restarts', a
   await expect(guide).toHaveCount(0)
   await page.getByRole('button', { name: 'Open tutorial' }).click()
   await expect(guide).toContainText('1 / 4')
+})
+
+test('tag editor drafts, cancellation, save and removal round-trip through replay', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['Tagged data'])
+  const versionId = (await state(page, room)).activeId
+  await focusActive(page)
+  const openTag = async (label) => {
+    await page.locator('.version-card.active .card-menu').click()
+    await page.getByRole('button', { name: label, exact: true }).click()
+  }
+  await openTag('Add tag')
+  await page.getByLabel('Title', { exact: true }).fill('Release')
+  await page.getByLabel('Description', { exact: true }).fill('First description')
+  await page.getByRole('button', { name: 'Save tag' }).click()
+  await expect.poll(async () => (await state(page, room)).versions.find((version) => version.id === versionId)?.tag)
+    .toEqual({ title: 'Release', description: 'First description' })
+  await openTag('Edit tag')
+  await page.getByLabel('Title', { exact: true }).fill('Discarded')
+  await page.getByLabel('Description', { exact: true }).fill('Discarded description')
+  await page.getByRole('button', { name: 'Cancel' }).click()
+  await openTag('Edit tag')
+  await expect(page.getByLabel('Title', { exact: true })).toHaveValue('Release')
+  await page.getByRole('button', { name: 'Remove tag' }).click()
+  await expect.poll(async () => (await state(page, room)).versions.find((version) => version.id === versionId)?.tag).toBeUndefined()
+  const original = await state(page, room)
+  await page.getByRole('button', { name: 'Settings' }).click()
+  const download = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Export Interaction Log' }).click()
+  const buffer = await readFile(await (await download).path())
+  const log = JSON.parse(buffer.toString())
+  const open = log.events.findIndex((event) => event.action === 'Tag editor opened')
+  const draft = log.events.findIndex((event) => event.tagDialog?.title === 'Release'
+    && event.tagDialog.description === 'First description')
+  const saved = log.events.findIndex((event) => event.patch?.versions.some((version) => version.id === versionId && version.tag?.title === 'Release'))
+  const cancelledDraft = log.events.findIndex((event) => event.tagDialog?.title === 'Discarded'
+    && event.tagDialog.description === 'Discarded description')
+  const closed = log.events.findIndex((event, index) => index > cancelledDraft && event.action === 'Tag editor closed')
+  const reopened = log.events.findIndex((event, index) => index > closed && event.action === 'Tag editor opened')
+  const removed = log.events.findIndex((event) => event.action === 'Tag editor removed')
+  expect(open).toBeGreaterThanOrEqual(0)
+  expect(draft).toBeGreaterThan(open)
+  expect(log.events.some((event) => event.action === 'Tag editor confirmed' && event.tagDialog === null)).toBe(true)
+  expect(saved).toBeGreaterThan(draft)
+  expect(cancelledDraft).toBeGreaterThan(saved)
+  expect(closed).toBeGreaterThan(cancelledDraft)
+  expect(reopened).toBeGreaterThan(closed)
+  expect(removed).toBeGreaterThan(reopened)
+  if (await page.getByRole('button', { name: 'Settings' }).getAttribute('aria-expanded') === 'false') {
+    await page.getByRole('button', { name: 'Settings' }).click()
+  }
+  const chooser = page.waitForEvent('filechooser')
+  await page.getByRole('button', { name: 'Replay Interaction Log' }).click()
+  await (await chooser).setFiles({ name: 'tags.json', mimeType: 'application/json', buffer })
+  const dialog = page.getByRole('dialog', { name: 'Version tag' })
+  const seek = async (index) => page.getByLabel('Replay timeline').evaluate((slider, value) => {
+    slider.value = String(value + 1)
+    slider.dispatchEvent(new Event('input', { bubbles: true }))
+  }, index)
+  await seek(open)
+  await expect(dialog.getByLabel('Title', { exact: true })).toHaveValue('')
+  await seek(draft)
+  await expect(dialog.getByLabel('Title', { exact: true })).toHaveValue('Release')
+  await expect(dialog.getByLabel('Description', { exact: true })).toHaveValue('First description')
+  await expect(dialog.locator('..')).toHaveAttribute('inert', '')
+  await seek(saved)
+  await expect(dialog).toHaveCount(0)
+  await expect.poll(async () => (await state(page, 'Interaction Log Replay')).versions.find((version) => version.id === versionId)?.tag)
+    .toEqual({ title: 'Release', description: 'First description' })
+  await seek(cancelledDraft)
+  await expect(dialog.getByLabel('Title', { exact: true })).toHaveValue('Discarded')
+  await seek(closed)
+  await expect(dialog).toHaveCount(0)
+  await seek(reopened)
+  await expect(dialog.getByLabel('Title', { exact: true })).toHaveValue('Release')
+  await expect(dialog.getByLabel('Description', { exact: true })).toHaveValue('First description')
+  await seek(cancelledDraft)
+  await expect(dialog.getByLabel('Description', { exact: true })).toHaveValue('Discarded description')
+  await page.getByRole('button', { name: 'Jump to end' }).click()
+  await expect(dialog).toHaveCount(0)
+  await expect.poll(async () => (await state(page, 'Interaction Log Replay')).versions.find((version) => version.id === versionId)?.tag).toBeUndefined()
+  expect(await state(page, room)).toEqual(original)
+
+  const legacy = { ...log, events: log.events.filter((event) => event.tagDialog === undefined) }
+  await page.getByRole('button', { name: 'Settings' }).click()
+  const legacyChooser = page.waitForEvent('filechooser')
+  await page.getByRole('button', { name: 'Replay Interaction Log' }).click()
+  await (await legacyChooser).setFiles({ name: 'legacy-tags.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(legacy)) })
+  await expect(page.getByLabel('Replay timeline')).toHaveAttribute('max', String(legacy.events.length))
+  await page.getByRole('button', { name: 'Jump to end' }).click()
+  await expect.poll(async () => (await state(page, 'Interaction Log Replay')).versions.find((version) => version.id === versionId)?.tag).toBeUndefined()
 })
 
 test('tags can be edited, searched, listed, exported and removed', async ({ page }) => {
@@ -1782,6 +1934,126 @@ test('merge dialog and committed history put the higher step into the lower step
   }
 })
 
+test('entry merge dialog drafts and confirmation round-trip through replay', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['Alpha', 'Beta'])
+  await focusActive(page)
+  await page.keyboard.press('Control+a')
+  await (await activeTile(page, room, 'Alpha')).click({ button: 'right', position: { x: 8, y: 8 } })
+  await page.getByRole('button', { name: 'Merge selected entries' }).click()
+  await page.getByLabel('Resulting entry name').fill('Combined')
+  await page.locator('#merge-entry-description').fill('Merge description')
+  await page.getByRole('button', { name: 'Merge entries', exact: true }).click()
+  await expect.poll(async () => findNode(await activeData(page, room), 'Combined')?.description).toBe('Merge description')
+  const original = await state(page, room)
+  await page.getByRole('button', { name: 'Settings' }).click()
+  const download = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Export Interaction Log' }).click()
+  const buffer = await readFile(await (await download).path())
+  const log = JSON.parse(buffer.toString())
+  const draft = log.events.findIndex((event) => event.dialog?.operation?.mode === 'merge'
+    && event.dialog.operation.value === 'Combined' && event.dialog.operation.description === 'Merge description')
+  expect(draft).toBeGreaterThanOrEqual(0)
+  const chooser = page.waitForEvent('filechooser')
+  await page.getByRole('button', { name: 'Replay Interaction Log' }).click()
+  await (await chooser).setFiles({ name: 'entry-merge.json', mimeType: 'application/json', buffer })
+  await page.getByLabel('Replay timeline').evaluate((slider, value) => {
+    slider.value = String(value + 1)
+    slider.dispatchEvent(new Event('input', { bubbles: true }))
+  }, draft)
+  await expect(page.getByLabel('Resulting entry name')).toHaveValue('Combined')
+  await expect(page.locator('#merge-entry-description')).toHaveValue('Merge description')
+  await page.getByRole('button', { name: 'Jump to end' }).click()
+  await expect.poll(async () => findNode(await activeData(page, 'Interaction Log Replay'), 'Combined')?.description).toBe('Merge description')
+  expect((await state(page, 'Interaction Log Replay')).versions.map(({ id, data }) => ({ id, data })))
+    .toEqual(original.versions.map(({ id, data }) => ({ id, data })))
+})
+
+test('branch merge dialog choices and committed result round-trip through replay', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['Base'])
+  const base = (await state(page, room)).activeId
+  await addEntries(page, ['First branch'])
+  const first = (await state(page, room)).activeId
+  await page.keyboard.press('ArrowLeft')
+  await expect.poll(async () => (await state(page, room)).activeId).toBe(base)
+  await addEntries(page, ['Second branch'])
+  const second = (await state(page, room)).activeId
+  const saved = await state(page, room)
+  const firstLane = saved.versions.find((version) => version.id === first).lane
+  const secondLane = saved.versions.find((version) => version.id === second).lane
+  await page.keyboard.press(firstLane < secondLane ? 'ArrowUp' : 'ArrowDown')
+  await expect.poll(async () => (await state(page, room)).activeId).toBe(first)
+  await page.keyboard.press('4')
+
+  const openMerge = async () => {
+    await page.keyboard.press('Shift+m')
+    await page.locator(`.version-card[data-version="${second}"]`).click()
+    await expect(page.getByRole('dialog', { name: 'Branch merge' })).toBeVisible()
+  }
+  await openMerge()
+  const dialog = page.getByRole('dialog', { name: 'Branch merge' })
+  const row = dialog.locator('.merge-view-row').filter({ has: page.locator('.merge-entry-cell strong').getByText('First branch', { exact: true }) })
+  await row.getByRole('button', { name: 'Omit' }).click()
+  await row.getByRole('button', { name: 'Pick' }).click()
+  await row.getByLabel('Parent for First branch in merged result').selectOption({ label: 'Base' })
+  await dialog.getByRole('button', { name: 'Reset' }).click()
+  await dialog.getByRole('button', { name: 'Abort merge' }).click()
+  await openMerge()
+  await row.getByLabel('Parent for First branch in merged result').selectOption({ label: 'Base' })
+  await dialog.getByRole('button', { name: 'Confirm merge' }).click()
+  await expect(dialog).toHaveCount(0)
+  await expect.poll(async () => findNode(await activeData(page, room), 'Base')?.children.map((node) => node.value)).toContain('First branch')
+  const original = await state(page, room)
+  expect(new Set([original.versions.at(-1).parentId, original.versions.at(-1).mergeSourceId])).toEqual(new Set([first, second]))
+
+  await page.getByRole('button', { name: 'Settings' }).click()
+  const download = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Export Interaction Log' }).click()
+  const buffer = await readFile(await (await download).path())
+  const log = JSON.parse(buffer.toString())
+  const open = log.events.findIndex((event) => event.mergeDialog?.versionIds.length === 2)
+  const omitted = log.events.findIndex((event) => Object.values(event.mergeDialog?.decisions ?? {}).includes('omit'))
+  const parent = log.events.findIndex((event) => Object.values(event.mergeDialog?.parentOverrides ?? {}).some(Boolean))
+  const reset = log.events.findIndex((event, index) => index > parent && event.mergeDialog
+    && !Object.keys(event.mergeDialog.parentOverrides).length)
+  const aborted = log.events.findIndex((event, index) => index > reset && event.mergeDialog === null)
+  expect(open).toBeGreaterThanOrEqual(0)
+  expect(omitted).toBeGreaterThan(open)
+  expect(parent).toBeGreaterThan(omitted)
+  expect(reset).toBeGreaterThan(parent)
+  expect(aborted).toBeGreaterThan(reset)
+  const chooser = page.waitForEvent('filechooser')
+  await page.getByRole('button', { name: 'Replay Interaction Log' }).click()
+  await (await chooser).setFiles({ name: 'merge.json', mimeType: 'application/json', buffer })
+  const seek = async (index) => page.getByLabel('Replay timeline').evaluate((slider, value) => {
+    slider.value = String(value + 1)
+    slider.dispatchEvent(new Event('input', { bubbles: true }))
+  }, index)
+  await seek(omitted)
+  await expect(dialog.locator('.merge-preview-label[aria-label="First branch"]')).toHaveCount(0)
+  await expect(dialog).toHaveAttribute('inert', '')
+  await seek(parent)
+  await expect(dialog.locator('.merge-preview-tile.depth-1')).toHaveCount(1)
+  await seek(reset)
+  await expect(dialog.locator('.merge-preview-tile.depth-1')).toHaveCount(0)
+  await seek(aborted)
+  await expect(dialog).toHaveCount(0)
+  await seek(parent)
+  await expect(dialog.locator('.merge-preview-tile.depth-1')).toHaveCount(1)
+  await page.getByRole('button', { name: 'Jump to end' }).click()
+  await expect(dialog).toHaveCount(0)
+  await expect.poll(async () => findNode(await activeData(page, 'Interaction Log Replay'), 'Base')?.children.map((node) => node.value)).toContain('First branch')
+  const replayed = await state(page, 'Interaction Log Replay')
+  expect(replayed.versions.map(({ id, data, parentId, mergeSourceId }) => ({ id, data, parentId, mergeSourceId })))
+    .toEqual(original.versions.map(({ id, data, parentId, mergeSourceId }) => ({ id, data, parentId, mergeSourceId })))
+  expect(await state(page, room)).toEqual(original)
+  await seek(parent)
+  await page.getByRole('button', { name: 'Exit replay' }).click()
+  await expect(page.locator('.current-room-name')).toHaveText(room)
+  await expect(dialog).toHaveCount(0)
+})
+
 test('branching, comparison and merge result controls update the graph', async ({ page }) => {
   const room = await openRoom(page)
   await addEntries(page, ['Base'])
@@ -2048,8 +2320,6 @@ test('large treemaps cull offscreen tiles while keeping selection and duplicate 
   const [sourceId, targetId] = visibleChildren
   const sourceTile = card.locator(`[data-node="${sourceId}"]`)
   const targetTile = card.locator(`[data-node="${targetId}"]`)
-  await sourceTile.click()
-  await expect(sourceTile).toHaveClass(/is-selected/)
   const visibleCenter = (tile) => tile.evaluate((element) => {
     const tile = element.getBoundingClientRect()
     const map = element.closest('.mini-map').getBoundingClientRect()
@@ -2058,6 +2328,8 @@ test('large treemaps cull offscreen tiles while keeping selection and duplicate 
   })
   const source = await visibleCenter(sourceTile)
   const target = await visibleCenter(targetTile)
+  await page.mouse.click(source.x, source.y)
+  await expect(sourceTile).toHaveClass(/is-selected/)
   await page.mouse.move(source.x, source.y)
   await page.mouse.down()
   await page.mouse.move(target.x, target.y, { steps: 8 })
@@ -3324,6 +3596,7 @@ test('undo and redo synchronize versions and copy connectors with peers', async 
     await host.keyboard.press('Control+c')
     await host.keyboard.press('Control+v')
     await expect.poll(async () => (await state(guest, room)).copyLinks.length).toBe(1)
+    await expect.poll(async () => (await state(host, room)).activeId).not.toBe(parent)
     const target = (await state(host, room)).activeId
     await host.keyboard.press('Control+z')
     await expect.poll(async () => (await state(guest, room)).activeId).toBe(parent)
@@ -3472,6 +3745,32 @@ test('fit, focus, zoom, panning and keyboard navigation change the viewport and 
   await expect.poll(() => world.getAttribute('style')).not.toBe(focused)
   await page.keyboard.press('ArrowLeft')
   await expect.poll(async () => (await state(page, room)).activeId).not.toBe(lastId)
+})
+
+test('a burst of map wheel events is rendered together and fully persisted', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['Burst zoom'])
+  await focusActive(page)
+  const before = await state(page, room)
+  const version = before.versions.find((item) => item.id === before.activeId)
+  const map = page.locator('.version-card.active .mini-map')
+  const rendered = await map.evaluate(async (element) => {
+    const bounds = element.getBoundingClientRect()
+    const group = element.querySelector('svg > g')
+    let changes = 0
+    const observer = new MutationObserver((records) => { changes += records.length })
+    observer.observe(group, { attributes: true, attributeFilter: ['transform'] })
+    for (let index = 0; index < 10; index++) element.dispatchEvent(new WheelEvent('wheel', {
+      bubbles: true, cancelable: true, shiftKey: true, deltaY: -30,
+      clientX: bounds.left + bounds.width / 2, clientY: bounds.top + bounds.height / 2,
+    }))
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    observer.disconnect()
+    return changes
+  })
+  expect(rendered).toBe(1)
+  await expect.poll(async () => (await state(page, room)).versions.find((item) => item.id === version.id).mapView.zoom)
+    .toBeCloseTo(version.mapView.zoom * Math.exp(300 * 0.0012), 5)
 })
 
 test('regular wheel zooms the graph while shift wheel zooms the version map', async ({ page }) => {
@@ -4299,6 +4598,153 @@ test('peers follow new children only when viewing their parent', async ({ browse
   } finally {
     await hostContext.close()
     await guestContext.close()
+  }
+})
+
+for (const departure of ['switches rooms', 'closes unexpectedly']) test(`host ${departure}: connected peers elect a replacement`, async ({ browser }) => {
+  test.setTimeout(60000)
+  const contexts = await Promise.all([browser.newContext(), browser.newContext(), browser.newContext()])
+  for (const context of contexts.slice(1)) await context.addInitScript(() => {
+    const send = RTCDataChannel.prototype.send
+    RTCDataChannel.prototype.send = function (data) {
+      if (!window.dropRoomMessages) send.call(this, data)
+    }
+  })
+  const [host, first, second] = await Promise.all(contexts.map((context) => context.newPage()))
+  try {
+    const room = await openRoom(host)
+    await addEntries(host, ['Before handover'])
+    for (const guest of [first, second]) {
+      await guest.goto(`/?room=${room}`)
+      await expect(guest.getByRole('status').first()).toHaveText('Connected', { timeout: 20000 })
+      await expect.poll(async () => (await state(guest, room)).versions
+        .some((version) => findNode(version.data, 'Before handover'))).toBe(true)
+    }
+    await expect(first.locator('.collaborator-list .collaborator')).toHaveCount(3)
+    const peerIds = await Promise.all([first, second].map((page) => page.evaluate(() =>
+      window.testPeers.find((peer) => peer.open && !peer.destroyed).id)))
+    const elected = peerIds.indexOf([...peerIds].sort()[0])
+    const unsynced = [first, second][1 - elected]
+    await unsynced.evaluate(() => { window.dropRoomMessages = true })
+    await addEntries(unsynced, ['Unrelayed edit'])
+    await unsynced.evaluate(() => { window.dropRoomMessages = false })
+    if (departure === 'switches rooms') {
+      await host.getByRole('button', { name: 'Change Room' }).click()
+      await host.getByLabel('Create a new empty room').fill(`next-${randomUUID()}`)
+      await host.getByRole('button', { name: 'Create room' }).click()
+    } else await contexts[0].close()
+    await expect.poll(async () => Promise.all([first, second].map((page) => page.getByRole('status').first().textContent())),
+      { timeout: 40000 }).toEqual(expect.arrayContaining(['Hosting', 'Connected']))
+    await expect([first, second][elected].getByRole('status').first()).toHaveText('Hosting')
+    await expect.poll(async () => (await state([first, second][elected], room)).versions
+      .some((version) => findNode(version.data, 'Unrelayed edit')), { timeout: 20000 }).toBe(true)
+    await addEntries(first, ['After handover'])
+    await expect.poll(async () => (await state(second, room)).versions
+      .some((version) => findNode(version.data, 'After handover')), { timeout: 20000 }).toBe(true)
+  } finally {
+    await Promise.all(contexts.map((context) => context.close()))
+  }
+})
+
+test('a guest reconnects after its room connection closes', async ({ browser }) => {
+  const hostContext = await browser.newContext()
+  const guestContext = await browser.newContext()
+  await guestContext.addInitScript(() => {
+    const create = RTCPeerConnection.prototype.createDataChannel
+    RTCPeerConnection.prototype.createDataChannel = function (...args) {
+      const channel = create.apply(this, args)
+      window.testRoomChannel = channel
+      return channel
+    }
+  })
+  try {
+    const host = await hostContext.newPage()
+    const guest = await guestContext.newPage()
+    const room = await openRoom(host)
+    await guest.goto(`/?room=${room}`)
+    await expect(guest.getByRole('status').first()).toHaveText('Connected', { timeout: 20000 })
+    await guest.evaluate(() => window.testRoomChannel.close())
+    await expect(guest.getByRole('status').first()).toContainText('Reconnecting')
+    await expect(guest.getByRole('status').first()).toHaveText('Connected', { timeout: 20000 })
+    await addEntries(guest, ['After reconnect'])
+    await expect.poll(async () => (await state(host, room)).versions
+      .some((version) => findNode(version.data, 'After reconnect')), { timeout: 20000 }).toBe(true)
+  } finally {
+    await Promise.all([hostContext.close(), guestContext.close()])
+  }
+})
+
+test('the only guest becomes host when the host explicitly leaves', async ({ browser }) => {
+  const [hostContext, guestContext] = await Promise.all([browser.newContext(), browser.newContext()])
+  try {
+    const [host, guest] = await Promise.all([hostContext.newPage(), guestContext.newPage()])
+    const room = await openRoom(host)
+    await addEntries(host, ['Saved before leaving'])
+    await guest.goto(`/?room=${room}`)
+    await expect(guest.getByRole('status').first()).toHaveText('Connected', { timeout: 20000 })
+    await host.getByRole('button', { name: 'Change Room' }).click()
+    await host.getByLabel('Create a new empty room').fill(`next-${randomUUID()}`)
+    await host.getByRole('button', { name: 'Create room' }).click()
+    await expect(guest.getByRole('status').first()).toHaveText('Hosting', { timeout: 20000 })
+    await expect.poll(async () => (await state(guest, room)).versions
+      .some((version) => findNode(version.data, 'Saved before leaving'))).toBe(true)
+  } finally {
+    await Promise.all([hostContext.close(), guestContext.close()])
+  }
+})
+
+test('leaving during reconnection does not return to the previous room', async ({ browser }) => {
+  const [hostContext, guestContext] = await Promise.all([browser.newContext(), browser.newContext()])
+  await guestContext.addInitScript(() => {
+    const create = RTCPeerConnection.prototype.createDataChannel
+    RTCPeerConnection.prototype.createDataChannel = function (...args) {
+      const channel = create.apply(this, args)
+      window.testRoomChannel = channel
+      return channel
+    }
+  })
+  try {
+    const [host, guest] = await Promise.all([hostContext.newPage(), guestContext.newPage()])
+    const room = await openRoom(host)
+    await guest.goto(`/?room=${room}`)
+    await expect(guest.getByRole('status').first()).toHaveText('Connected', { timeout: 20000 })
+    await guest.evaluate(() => window.testRoomChannel.close())
+    await expect(guest.getByRole('status').first()).toContainText('Reconnecting')
+    const next = `next-${randomUUID()}`
+    await guest.getByRole('button', { name: 'Change Room' }).click()
+    await guest.getByLabel('Create a new empty room').fill(next)
+    await guest.getByRole('button', { name: 'Create room' }).click()
+    await expect(guest.getByRole('status').first()).toHaveText('Hosting')
+    await guest.waitForTimeout(2500)
+    await expect(guest.locator('.current-room-name')).toHaveText(next)
+    await expect(guest.getByRole('status').first()).toHaveText('Hosting')
+  } finally {
+    await Promise.all([hostContext.close(), guestContext.close()])
+  }
+})
+
+test('a disconnected guest is warned when the room cannot be resumed', async ({ browser }) => {
+  const [hostContext, guestContext] = await Promise.all([browser.newContext(), browser.newContext()])
+  await guestContext.addInitScript(() => {
+    const create = RTCPeerConnection.prototype.createDataChannel
+    RTCPeerConnection.prototype.createDataChannel = function (...args) {
+      const channel = create.apply(this, args)
+      window.testRoomChannel = channel
+      return channel
+    }
+  })
+  try {
+    const [host, guest] = await Promise.all([hostContext.newPage(), guestContext.newPage()])
+    const room = await openRoom(host)
+    await guest.goto(`/?room=${room}`)
+    await expect(guest.getByRole('status').first()).toHaveText('Connected', { timeout: 20000 })
+    await guest.evaluate(() => window.testRoomChannel.close())
+    await expect(guest.getByRole('status').first()).toContainText('Reconnecting')
+    await hostContext.close()
+    await expect(guest.getByRole('status').first()).toContainText('no longer available', { timeout: 30000 })
+    await expect(guest.locator('.current-room-name')).toHaveText(room)
+  } finally {
+    await Promise.all([hostContext.close(), guestContext.close()])
   }
 })
 

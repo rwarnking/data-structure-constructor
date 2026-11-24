@@ -32,6 +32,13 @@ export type InteractionDialog = {
   deleteOpen: boolean
   deleteMode: 'keep-children' | 'subtree' | 'detach-children'
 }
+export type InteractionMergeDialog = {
+  versionIds: string[]
+  decisions: Record<string, 'combine' | 'source' | 'target' | 'omit'>
+  parentOverrides: Record<string, string>
+  positionOverrides: Record<string, { x: number; y: number }>
+}
+export type InteractionTagDialog = { versionId: string; title: string; description: string }
 export type InteractionEvent = {
   id: string
   sessionId?: string
@@ -48,6 +55,8 @@ export type InteractionEvent = {
   viewport?: { zoom: number; panX: number; panY: number }
   selection?: { versionId: string; nodeIds: string[] }
   dialog?: InteractionDialog
+  mergeDialog?: InteractionMergeDialog | null
+  tagDialog?: InteractionTagDialog | null
 }
 export type InteractionSession = {
   id: string
@@ -192,6 +201,18 @@ function isInteractionDialog(value: unknown): value is InteractionDialog {
   return true
 }
 
+function isInteractionMergeDialog(value: unknown): value is InteractionMergeDialog {
+  return isRecord(value) && isStringArray(value.versionIds) && value.versionIds.length >= 1
+    && value.versionIds.length <= 2 && value.versionIds.every((id) => !!id)
+    && new Set(value.versionIds).size === value.versionIds.length
+    && isRecord(value.decisions) && Object.values(value.decisions)
+      .every((decision) => typeof decision === 'string' && ['combine', 'source', 'target', 'omit'].includes(decision))
+    && isRecord(value.parentOverrides) && Object.values(value.parentOverrides).every((parent) => typeof parent === 'string')
+    && isRecord(value.positionOverrides) && Object.values(value.positionOverrides).every((position) =>
+      isRecord(position) && typeof position.x === 'number' && Number.isFinite(position.x)
+      && typeof position.y === 'number' && Number.isFinite(position.y))
+}
+
 function isInteractionSession(value: unknown): value is InteractionSession {
   return isRecord(value) && typeof value.id === 'string' && !!value.id && isActor(value.actor)
     && typeof value.startedAt === 'number' && Number.isFinite(value.startedAt)
@@ -266,6 +287,10 @@ export function isInteractionEvent(value: unknown): value is InteractionEvent {
   if (value.selection !== undefined && (!isRecord(value.selection) || typeof value.selection.versionId !== 'string'
     || !Array.isArray(value.selection.nodeIds) || !value.selection.nodeIds.every((id) => typeof id === 'string'))) return false
   if (value.dialog !== undefined && !isInteractionDialog(value.dialog)) return false
+  if (value.mergeDialog !== undefined && value.mergeDialog !== null && !isInteractionMergeDialog(value.mergeDialog)) return false
+  if (value.tagDialog !== undefined && value.tagDialog !== null
+    && (!isRecord(value.tagDialog) || typeof value.tagDialog.versionId !== 'string' || !value.tagDialog.versionId
+      || typeof value.tagDialog.title !== 'string' || typeof value.tagDialog.description !== 'string')) return false
   if (value.patch !== undefined) {
     const patch = value.patch
     if (!isRecord(patch) || !Array.isArray(patch.versions) || !patch.versions.every(isVersion)

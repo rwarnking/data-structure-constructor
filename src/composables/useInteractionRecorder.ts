@@ -3,7 +3,7 @@ import type { InteractionEntry, SyncDelta } from '../types/collaboration'
 import type { StoredState } from '../types/workspace'
 import { shortcutAction } from '../config/hotkeys'
 import { interactionPatch, isInteractionEvent, parseInteractionLog, type InteractionActor, type InteractionCategory,
-  type InteractionDialog, type InteractionEvent, type InteractionLog, type InteractionMethod, type InteractionScreen, type InteractionSession } from '../utils/interactionLog'
+  type InteractionDialog, type InteractionMergeDialog, type InteractionTagDialog, type InteractionEvent, type InteractionLog, type InteractionMethod, type InteractionScreen, type InteractionSession } from '../utils/interactionLog'
 
 type Input = { time: number; method: InteractionMethod; cursor?: { x: number; y: number }; action: string }
 type Viewport = { zoom: number; panX: number; panY: number }
@@ -220,6 +220,14 @@ export function useInteractionRecorder(options: {
     if (!current.value || replaying.value) return
     record('input', 'Dialog state', { dialog: clone(dialog) })
   }
+  function recordMergeDialog(mergeDialog: InteractionMergeDialog | null) {
+    if (!current.value || replaying.value) return
+    record('input', 'Merge dialog state', { mergeDialog: clone(mergeDialog) })
+  }
+  function recordTagDialog(tagDialog: InteractionTagDialog | null, action: string) {
+    if (!current.value || replaying.value) return
+    record('input', action, { tagDialog: clone(tagDialog) })
+  }
   function recordRemoteDeparture(entry: InteractionEntry) {
     const boundary = entry.action === 'Left room' ? 'logout' : undefined
     append({ id: `session-${entry.id}`, actor: { id: entry.actorId, name: entry.actorName,
@@ -402,5 +410,5 @@ export function useInteractionRecorder(options: {
     window.removeEventListener('resize', recordScreen)
   })
   return { current, replaying, startRoom, stopRoom, forgetRoom, recordState, recordRemoteState, recordAction, recordRemoteDeparture,
-    receive, sendLog, exportLog, flushViewport, refreshSessionBaseline, recordDialog, recordScreen }
+    receive, sendLog, exportLog, flushViewport, refreshSessionBaseline, recordDialog, recordMergeDialog, recordTagDialog, recordScreen }
 }

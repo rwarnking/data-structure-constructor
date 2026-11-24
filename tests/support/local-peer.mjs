@@ -9,5 +9,6 @@ export default class LocalPeer extends Peer {
       secure: false,
       config: { iceServers: [] },
     })
+    ;(window.testPeers ??= []).push(this)
   }
 }

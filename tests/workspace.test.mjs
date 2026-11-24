@@ -84,6 +84,22 @@ test('interaction patches reproduce room changes and reject invalid replay data'
     dialog: { ...dialog, editor: { ...dialog.editor, entries: [{ id: 'draft', value: 3 }] } } }] }), /Invalid/)
   assert.throws(() => parseInteractionLog({ ...log, events: [{ ...log.events[0],
     dialog: { ...dialog, operation: { mode: 'split', nodeId: 'n', entries: [], assignments: {} } } }] }), /Invalid/)
+  const mergeDialog = { versionIds: ['v0', 'v1'], decisions: { n1: 'omit' },
+    parentOverrides: { n2: 'n1' }, positionOverrides: { n1: { x: 0.3, y: 0.7 } } }
+  assert.deepEqual(parseInteractionLog({ ...log, events: [{ ...log.events[0], mergeDialog }] }).events[0].mergeDialog, mergeDialog)
+  assert.equal(parseInteractionLog({ ...log, events: [{ ...log.events[0], mergeDialog: null }] }).events[0].mergeDialog, null)
+  for (const invalid of [
+    { ...mergeDialog, versionIds: ['v1', 'v1'] },
+    { ...mergeDialog, decisions: { n1: 'invalid' } },
+    { ...mergeDialog, parentOverrides: { n1: null } },
+    { ...mergeDialog, positionOverrides: { n1: { x: Infinity, y: 0 } } },
+  ]) assert.throws(() => parseInteractionLog({ ...log, events: [{ ...log.events[0], mergeDialog: invalid }] }), /Invalid/)
+  const tagDialog = { versionId: 'v1', title: 'Draft', description: 'Details' }
+  assert.deepEqual(parseInteractionLog({ ...log, events: [{ ...log.events[0], tagDialog }] }).events[0].tagDialog, tagDialog)
+  assert.equal(parseInteractionLog({ ...log, events: [{ ...log.events[0], tagDialog: null }] }).events[0].tagDialog, null)
+  for (const invalid of [
+    { ...tagDialog, versionId: '' }, { ...tagDialog, title: 1 }, { ...tagDialog, description: null },
+  ]) assert.throws(() => parseInteractionLog({ ...log, events: [{ ...log.events[0], tagDialog: invalid }] }), /Invalid/)
   assert.throws(() => parseInteractionLog({ ...log, events: [log.events[0], log.events[0]] }), /Invalid/)
   assert.throws(() => parseInteractionLog({ ...log, events: [{ ...log.events[0], patch: { ...patch, removed: ['v0'] } }] }), /invalid room state/)
 })
@@ -100,6 +116,37 @@ test('replay resolves concurrent version edits by collaboration revision rather 
   const afterWinner = applyInteractionPatch(initial, makePatch(winner, 'z'), revisions)
   const afterLoser = applyInteractionPatch(afterWinner, makePatch(loser, 'a'), revisions)
   assert.equal(afterLoser.versions.find((item) => item.id === 'v1').tag.title, 'winner')
+})
+
+test('tag dialog events retain independent drafts and are suppressed during replay', () => {
+  const previousWindow = globalThis.window
+  globalThis.window = { clearTimeout, setTimeout }
+  const scope = effectScope()
+  try {
+    const initial = { versions: [version('v0', [])], activeId: 'v0', nextNode: 1, nextVersion: 1, nextLane: 1, copyLinks: [] }
+    const recorder = scope.run(() => useInteractionRecorder({
+      state: ref(initial), room: ref('Room'), zoom: ref(1), pan: ref({ x: 0, y: 0 }), selectedNodes: ref([]),
+      screen: () => ({ width: 1440, height: 900 }), actor: () => ({ id: 'alice', name: 'Alice', color: '#123456' }),
+      send: () => {}, notify: () => {},
+    }))
+    recorder.startRoom('Room')
+    const draft = { versionId: 'v0', title: '', description: '' }
+    recorder.recordTagDialog(draft, 'Tag editor opened')
+    draft.title = 'Release'
+    draft.description = 'Details'
+    recorder.recordTagDialog(draft, 'Tag editor draft')
+    recorder.recordTagDialog(null, 'Tag editor confirmed')
+    recorder.replaying.value = true
+    recorder.recordTagDialog(draft, 'Should not record')
+    const events = parseInteractionLog(JSON.parse(JSON.stringify(recorder.current.value))).events.filter((event) => event.tagDialog !== undefined)
+    assert.deepEqual(events.map((event) => event.action), ['Tag editor opened', 'Tag editor draft', 'Tag editor confirmed'])
+    assert.equal(events[0].tagDialog.title, '')
+    assert.deepEqual(events[1].tagDialog, draft)
+    assert.equal(events[2].tagDialog, null)
+  } finally {
+    scope.stop()
+    globalThis.window = previousWindow
+  }
 })
 
 test('recorded dependencies make out-of-order and participant-specific replay possible', () => {
@@ -992,6 +1039,15 @@ test('deep treemap nodes retain at least 30 by 30 layout dimensions', () => {
     assert.ok(tile.width >= 30, `${tile.id} width was ${tile.width}`)
     assert.ok(tile.height >= 30, `${tile.id} height was ${tile.height}`)
   }
+})
+
+test('treemap entries have at least the width of a free-floating leaf', () => {
+  const forest = [node('free'), node('root', [
+    node('a'), node('b', [node('b1'), node('b2'), node('b3')]), node('c'), node('d'), node('e'),
+  ])]
+  const tiles = tilesForForest(forest)
+  const freeWidth = tiles.find((tile) => tile.id === 'free').width
+  for (const tile of tiles) assert.ok(tile.width >= freeWidth, `${tile.id} width was ${tile.width}`)
 })
 
 test('duplicate connectors retain the original choices across ties and nested duplicate groups', () => {

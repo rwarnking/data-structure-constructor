@@ -640,7 +640,7 @@ function tilesForWithCache(
     .paddingBottom(TREE_PADDING)
     .paddingInner(TREE_PADDING)
   const descendants = layout(tree).descendants()
-  if (descendants.some((node) => node.x1 - node.x0 < 30 || node.y1 - node.y0 < 30)) {
+  if (descendants.some((node) => node.x1 - node.x0 < LEAF_TILE_WIDTH || node.y1 - node.y0 < 30)) {
     const tiles: Tile[] = []
     const addTile = (node: TreeNode, x: number, y: number, width: number, height: number, depth: number) => {
       tiles.push({

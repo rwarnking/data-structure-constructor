@@ -3,11 +3,34 @@ import { findNode } from '../utils/tree'
 import { defaultPositions, MAP_ZOOM_MAX, MAP_ZOOM_MIN } from '../utils/treemap'
 import { assignMissingVersionNumbers, assignVersionSuffixes, compareCopyLinks } from '../utils/versions'
 import { hasRootEntries, isStoredState, RootNotEmptyError } from '../utils/validation'
+import { gzipSync, gunzipSync, strFromU8, strToU8 } from 'fflate'
 
 const STORAGE_KEY = 'canopy-data-structure-v1'
 const ROOMS_KEY = 'canopy-local-rooms-v1'
 export const LAST_ROOM_KEY = 'canopy-last-room-v1'
 const LEGACY_MIGRATION_KEY = 'canopy-room-data-migrated-v1'
+const COMPRESSED_PREFIX = 'canopy-gzip-v1:'
+const COMPRESSION_THRESHOLD = 512_000
+
+export function writeRoomSnapshot(key: string, snapshot: string) {
+  if (snapshot.length < COMPRESSION_THRESHOLD) {
+    localStorage.setItem(key, snapshot)
+    return
+  }
+  const bytes = gzipSync(strToU8(snapshot), { level: 3 })
+  let binary = ''
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000))
+  }
+  localStorage.setItem(key, COMPRESSED_PREFIX + btoa(binary))
+}
+
+function decodeRoomSnapshot(snapshot: string) {
+  if (!snapshot.startsWith(COMPRESSED_PREFIX)) return snapshot
+  const binary = atob(snapshot.slice(COMPRESSED_PREFIX.length))
+  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0))
+  return strFromU8(gunzipSync(bytes))
+}
 
 export function createRoomStorage() {
   const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
@@ -76,21 +99,22 @@ export function createRoomStorage() {
     if (savedRoomState) {
       let parsed: unknown
       try {
-        parsed = JSON.parse(savedRoomState) as unknown
+        parsed = JSON.parse(decodeRoomSnapshot(savedRoomState)) as unknown
       } catch {
-        console.warn(`Could not load saved data for room "${room}"`)
+        throw new Error(`Could not load saved data for room "${room}"`)
       }
       if (hasRootEntries(parsed)) throw new RootNotEmptyError()
       if (isStoredState(parsed)) {
         try { return normalizeState(parsed) }
         catch { console.warn(`Could not load saved data for room "${room}"`) }
       }
+      if (savedRoomState.startsWith(COMPRESSED_PREFIX)) throw new Error(`Could not load saved data for room "${room}"`)
     }
     if (migrateLegacy && localStorage.getItem(LEGACY_MIGRATION_KEY) !== 'true') {
       const legacy = localStorage.getItem(STORAGE_KEY)
       if (legacy) {
         const migrated = readState()
-        localStorage.setItem(roomDataKey(room), JSON.stringify(migrated))
+        writeRoomSnapshot(roomDataKey(room), JSON.stringify(migrated))
         localStorage.setItem(LEGACY_MIGRATION_KEY, 'true')
         return migrated
       }
