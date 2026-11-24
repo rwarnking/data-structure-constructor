@@ -669,15 +669,163 @@ test('camera presets fit the available canvas and refocus after resizing', async
     }
     await page.getByRole('button', { name: 'Fit all versions, 4' }).click()
     await page.getByRole('button', { name: 'Fit height' }).click()
-    await expectCentered(page, active)
+    await expect.poll(async () => page.locator(`.version-card[data-version="${active}"]`).evaluate((card) => {
+      const canvas = card.closest('.graph-canvas').getBoundingClientRect()
+      const bounds = card.getBoundingClientRect()
+      return Math.abs((bounds.left + bounds.right - canvas.left - canvas.right) / 2)
+    })).toBeLessThan(2)
     await page.getByRole('button', { name: 'Focus neighborhood' }).click()
-    await expectCentered(page, active)
     await expect(page.locator(`.version-card[data-version="${active}"]`)).toBeInViewport()
   }
   await focusActive(page)
   await expectCentered(page, active)
   await page.setViewportSize({ width: 1100, height: 800 })
   await expectCentered(page, active)
+})
+
+test('focus zoom is the wheel limit and focused cards show later versions', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['One'])
+  const first = (await state(page, room)).activeId
+  await addEntries(page, ['Two'])
+  await addEntries(page, ['Three'])
+  await focusActive(page)
+  const indicator = () => page.locator('.version-card.active .version-position-indicator')
+  await expect(indicator()).toHaveText('Latest version')
+  const world = page.locator('.graph-world')
+  const scale = () => world.evaluate((element) => new DOMMatrix(getComputedStyle(element).transform).a)
+  await expect.poll(scale).toBeGreaterThan(1)
+  await page.waitForTimeout(500)
+  const focusedScale = await scale()
+  await page.locator('.graph-canvas').hover({ position: { x: 20, y: 20 } })
+  await page.mouse.wheel(0, -4000)
+  await expect.poll(scale).toBeCloseTo(focusedScale, 3)
+  await page.keyboard.press('ArrowLeft')
+  await page.keyboard.press('ArrowLeft')
+  await expect.poll(async () => (await state(page, room)).activeId).toBe(first)
+  await focusActive(page)
+  await expect(indicator()).toHaveText('2 later versions')
+  await expect(page.locator('.active-version-card')).not.toContainText('Later versions')
+  await page.keyboard.press('ArrowRight')
+  await focusActive(page)
+  await expect(indicator()).toHaveText('1 later version')
+})
+
+test('neighborhood focus frames the adjacent versions at each end', async ({ page }) => {
+  const room = await openRoom(page)
+  const ids = []
+  for (const value of ['A', 'B', 'C', 'D']) {
+    await addEntries(page, [value])
+    ids.push((await state(page, room)).activeId)
+  }
+  async function check(expected) {
+    await page.keyboard.press('2')
+    await expect.poll(() => page.locator('.version-card').evaluateAll((cards) => cards.map((card) => card.dataset.version)))
+      .toEqual(expect.arrayContaining(expected))
+    await expect.poll(() => page.locator('.version-card:not(.root-version)').evaluateAll((cards, ids) => cards.filter((card) => ids.includes(card.dataset.version)).every((card) => {
+      const bounds = card.getBoundingClientRect()
+      const canvas = card.closest('.graph-canvas').getBoundingClientRect()
+      return bounds.left >= canvas.left - 1 && bounds.right <= canvas.right + 1
+        && bounds.top >= canvas.top - 1 && bounds.bottom <= canvas.bottom + 1
+    }), expected)).toBe(true)
+  }
+  await check(ids.slice(2))
+  await page.keyboard.press('ArrowLeft')
+  await check(ids.slice(1, 4))
+  await page.keyboard.press('ArrowLeft')
+  await page.keyboard.press('ArrowLeft')
+  await expect.poll(async () => (await state(page, room)).activeId).toBe(ids[0])
+  await check(['v0', ids[0], ids[1]])
+})
+
+test('neighborhood focus keeps nearby versions on other timelines visible', async ({ page }) => {
+  const room = `test-${randomUUID()}`
+  const versions = [
+    { id: 'v0', parentId: null, step: 0, lane: 0, branch: 'ROOT' },
+    { id: 'a1', parentId: 'v0', step: 1, lane: 0, branch: 'A' },
+    { id: 'a2', parentId: 'a1', step: 2, lane: 0, branch: 'A' },
+    { id: 'a3', parentId: 'a2', step: 3, lane: 0, branch: 'A' },
+    { id: 'b1', parentId: 'a1', step: 2, lane: 1, branch: 'B' },
+    { id: 'b2', parentId: 'b1', step: 3, lane: 1, branch: 'B' },
+    { id: 'b3', parentId: 'b2', step: 4, lane: 1, branch: 'B' },
+    { id: 'c1', parentId: 'a1', step: 2, lane: 2, branch: 'C' },
+    { id: 'c2', parentId: 'c1', step: 3, lane: 2, branch: 'C' },
+  ].map((item, index) => ({ ...item, change: 'Edit', data: [], createdAt: index }))
+  await page.addInitScript(({ room, versions }) => {
+    localStorage.setItem(`canopy-room-data-v1-${encodeURIComponent(room)}`, JSON.stringify({
+      versions, activeId: 'b2', nextNode: 1, nextVersion: 9, nextLane: 3, copyLinks: [],
+    }))
+  }, { room, versions })
+  await openRoom(page, room)
+  await page.keyboard.press('2')
+  await page.waitForTimeout(500)
+  const ids = ['a2', 'a3', 'b1', 'b2', 'b3', 'c2']
+  await expect.poll(() => page.locator('.graph-canvas').evaluate((canvas, expected) => {
+    const area = canvas.getBoundingClientRect()
+    return expected.every((id) => {
+      const card = canvas.querySelector(`.version-card[data-version="${id}"]`)
+      if (!card) return false
+      const rect = card.getBoundingClientRect()
+      return rect.right > area.left && rect.left < area.right && rect.bottom > area.top && rect.top < area.bottom
+    })
+  }, ids)).toBe(true)
+  expect((await state(page, room)).activeId).toBe('b2')
+})
+
+test('focused version indicator updates when a peer adds and removes later versions', async ({ browser }) => {
+  const contexts = await Promise.all([browser.newContext(), browser.newContext()])
+  const [host, guest] = await Promise.all(contexts.map((context) => context.newPage()))
+  try {
+    const room = await openRoom(host)
+    await guest.goto(`/?room=${room}`)
+    await expect(guest.getByRole('status').first()).toHaveText('Connected')
+    await addEntries(host, ['First'])
+    const first = (await state(host, room)).activeId
+    await addEntries(host, ['Second'])
+    await addEntries(host, ['Third'])
+    const third = (await state(host, room)).activeId
+    await expect.poll(async () => (await state(guest, room)).activeId).toBe(third)
+    await host.keyboard.press('ArrowLeft')
+    await host.keyboard.press('ArrowLeft')
+    await expect.poll(async () => (await state(host, room)).activeId).toBe(first)
+    await focusActive(host)
+    const indicator = host.locator(`.version-card[data-version="${first}"] .version-position-indicator`)
+    await expect(indicator).toHaveText('2 later versions')
+    await guest.keyboard.press('Control+z')
+    await expect(indicator).toHaveText('1 later version')
+    await addEntries(guest, ['Replacement'])
+    await expect(indicator).toHaveText('2 later versions')
+  } finally {
+    await Promise.all(contexts.map((context) => context.close()))
+  }
+})
+
+test('lane navigation symbols fit short buttons at low zoom', async ({ page }) => {
+  const room = `test-${randomUUID()}`
+  await page.addInitScript((name) => {
+    const root = { id: 'v0', parentId: null, step: 0, lane: 0, branch: 'ROOT', change: 'Root', data: [], createdAt: 0 }
+    const versions = [root, ...Array.from({ length: 80 }, (_, index) => ({
+      id: `v${index + 1}`, parentId: 'v0', step: 1, lane: index, branch: `B${index + 1}`,
+      change: 'Edit', data: [{ id: `n${index}`, value: `${index}`, children: [] }], createdAt: index + 1,
+    }))]
+    localStorage.setItem(`canopy-room-data-v1-${encodeURIComponent(name)}`, JSON.stringify({
+      versions, activeId: 'v1', nextNode: 81, nextVersion: 81, nextLane: 80, copyLinks: [],
+    }))
+  }, room)
+  await openRoom(page, room)
+  await page.keyboard.press('4')
+  await expect.poll(async () => page.locator('.lane-navigation').count()).toBeGreaterThan(10)
+  await page.waitForTimeout(500)
+  const bounds = await page.locator('.lane-navigation').evaluateAll((buttons) => buttons.map((button) => {
+    const area = button.getBoundingClientRect()
+    const icon = button.querySelector('svg').getBoundingClientRect()
+    return { height: area.height, iconHeight: icon.height, width: area.width, iconWidth: icon.width }
+  }))
+  expect(bounds.some((item) => item.height < 18)).toBe(true)
+  for (const item of bounds) {
+    expect(item.iconHeight).toBeLessThanOrEqual(item.height + 0.1)
+    expect(item.iconWidth).toBeLessThanOrEqual(item.width + 0.1)
+  }
 })
 
 test('resizing keeps the manually panned active version in place at different zoom levels', async ({ page }) => {
@@ -2846,8 +2994,11 @@ test('sounds use the shared volume and branch sounds replace entry sounds', asyn
       play() { window.recordedSounds.push({ url: this.url, volume: this.volume }); return Promise.resolve() }
     }
   })
+
   const room = await openRoom(page)
   await page.getByRole('button', { name: 'Settings' }).click()
+  await page.getByRole('button', { name: 'Unmute sound' }).click()
+  await page.evaluate(() => { window.recordedSounds = [] })
   await page.getByRole('slider', { name: 'Volume' }).fill('0.4')
   await addEntries(page, ['First'])
   const first = (await state(page, room)).activeId
@@ -2880,6 +3031,31 @@ test('sounds use the shared volume and branch sounds replace entry sounds', asyn
   await expect(page.getByRole('slider', { name: 'Volume' })).toHaveValue('0.4')
 })
 
+test('sound starts muted despite saved preferences and resets for each room session', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('canopy-muted', 'false')
+    window.recordedSounds = []
+    window.Audio = class {
+      play() { window.recordedSounds.push('played'); return Promise.resolve() }
+    }
+  })
+  await openRoom(page)
+  await addEntries(page, ['Silent'])
+  expect(await page.evaluate(() => window.recordedSounds)).toEqual([])
+  await page.getByRole('button', { name: 'Settings' }).click()
+  await page.getByRole('button', { name: 'Unmute sound' }).click()
+  await expect.poll(() => page.evaluate(() => window.recordedSounds.length)).toBeGreaterThan(0)
+  await page.reload()
+  await page.getByRole('button', { name: 'Settings' }).click()
+  await expect(page.getByRole('button', { name: 'Unmute sound' })).toBeVisible()
+  await page.getByRole('button', { name: 'Unmute sound' }).click()
+  await page.getByRole('button', { name: 'Change Room', exact: true }).click()
+  await page.getByPlaceholder('Room name', { exact: true }).fill(`muted-${randomUUID()}`)
+  await page.getByRole('button', { name: 'Create room' }).click()
+  await expect(page.locator('.current-room-name')).toHaveText(/^muted-/)
+  await expect(page.getByRole('button', { name: 'Unmute sound' })).toBeVisible()
+})
+
 test('settings, version navigation and interaction log play their assigned sounds', async ({ page }) => {
   await page.addInitScript(() => {
     window.recordedSounds = []
@@ -2889,6 +3065,9 @@ test('settings, version navigation and interaction log play their assigned sound
     }
   })
   const room = await openRoom(page)
+  await page.getByRole('button', { name: 'Settings' }).click()
+  await page.getByRole('button', { name: 'Unmute sound' }).click()
+  await page.getByRole('button', { name: 'Settings' }).click()
   await addEntries(page, ['First'])
   const first = (await state(page, room)).activeId
   await addEntries(page, ['Second'])
@@ -2934,6 +3113,9 @@ test('merge choices, branch deletion and changing rooms play their assigned soun
     }
   })
   const room = await openRoom(page)
+  await page.getByRole('button', { name: 'Settings' }).click()
+  await page.getByRole('button', { name: 'Unmute sound' }).click()
+  await page.getByRole('button', { name: 'Settings' }).click()
   await addEntries(page, ['First'])
   const first = (await state(page, room)).activeId
   await addEntries(page, ['Second'])
@@ -2956,10 +3138,11 @@ test('merge choices, branch deletion and changing rooms play their assigned soun
   await page.getByRole('button', { name: 'Change Room', exact: true }).click()
   await page.getByPlaceholder('Room name', { exact: true }).fill(`new-${randomUUID()}`)
   await page.getByRole('button', { name: 'Create room' }).click()
-  await expect.poll(async () => (await takeSounds())).toEqual(['intro-sound-2-269294.mp3'])
+  await expect(page.getByTitle(/new-/)).toBeVisible()
+  expect(await takeSounds()).toEqual([])
 })
 
-test('opening an invite for an existing room plays the joining sound', async ({ browser }) => {
+test('opening an invite starts muted', async ({ browser }) => {
   const hostContext = await browser.newContext()
   const guestContext = await browser.newContext()
   try {
@@ -2975,7 +3158,7 @@ test('opening an invite for an existing room plays the joining sound', async ({ 
     const guest = await guestContext.newPage()
     await guest.goto(`/?room=${room}`)
     await expect(guest.getByRole('status').first()).toHaveText('Connected')
-    await expect.poll(() => guest.evaluate(() => window.recordedSounds)).toEqual(['intro-sound-2-269294.mp3'])
+    expect(await guest.evaluate(() => window.recordedSounds)).toEqual([])
   } finally {
     await hostContext.close()
     await guestContext.close()
@@ -3160,7 +3343,7 @@ test('undo and redo synchronize versions and copy connectors with peers', async 
   }
 })
 
-test('collaborative pings keep the same viewport-relative position across window sizes', async ({ browser }) => {
+test('collaborative pings keep the same global position across window sizes', async ({ browser }) => {
   const contexts = await Promise.all([
     browser.newContext({ viewport: { width: 1280, height: 900 } }),
     browser.newContext({ viewport: { width: 980, height: 720 } }),
@@ -3179,16 +3362,12 @@ test('collaborative pings keep the same viewport-relative position across window
     await expect(host.locator('.ping-origin')).toHaveCount(1)
     await expect(guest.locator('.ping-origin')).toHaveCount(1)
 
-    const relativePosition = async (page) => page.locator('.ping-origin').evaluate((ping) => {
-      const bounds = ping.getBoundingClientRect()
-      const canvas = ping.parentElement.getBoundingClientRect()
-      return { x: (bounds.left + bounds.width / 2 - canvas.left) / canvas.width,
-        y: (bounds.top + bounds.height / 2 - canvas.top) / canvas.height }
-    })
-    const hostPosition = await relativePosition(host)
-    const guestPosition = await relativePosition(guest)
-    expect(hostPosition.x).toBeCloseTo(guestPosition.x, 3)
-    expect(hostPosition.y).toBeCloseTo(guestPosition.y, 3)
+    const recordedPing = async (page) => page.evaluate((name) => {
+      const entries = JSON.parse(localStorage.getItem(`canopy-interactions-${encodeURIComponent(name)}`))
+      return entries.findLast((entry) => entry.action === 'Ping').ping
+    }, room)
+    await expect.poll(async () => recordedPing(host)).toMatchObject({ coordinateSpace: 'global' })
+    expect(await recordedPing(guest)).toMatchObject(await recordedPing(host))
     const guestCanvas = await guest.locator('.graph-canvas').boundingBox()
     expect(guestCanvas.width).not.toBe(canvasBounds.width)
     expect(guestCanvas.height).not.toBe(canvasBounds.height)
@@ -3493,6 +3672,28 @@ test('multi-selection copy and cut preserve subtrees and create separate destina
   expect(saved.copyLinks.filter((link) => link.targetVersionId === pasted.id)).toHaveLength(2)
 })
 
+test('pasting into an existing treemap moves conflicting treemaps without overlap', async ({ page }) => {
+  const data = [
+    { id: 'target', value: 'Target', children: [] },
+    { id: 'source', value: 'Source', children: [] },
+    { id: 'other', value: 'Other', children: [] },
+  ]
+  const positions = { target: { x: 0, y: 0 }, source: { x: 0.6, y: 0 }, other: { x: 1.2, y: 0 } }
+  const room = await openTreemapRoom(page, data, { positions })
+  await (await activeTile(page, room, 'Source')).click({ position: { x: 8, y: 8 } })
+  await expect(page.locator('.version-card.active .tree-tile.is-selected')).toHaveCount(1)
+  await page.keyboard.press('Control+c')
+  await (await activeTile(page, room, 'Target')).click({ position: { x: 8, y: 8 } })
+  await expect(await activeTile(page, room, 'Target')).toHaveClass(/is-selected/)
+  await page.keyboard.press('Control+v')
+  await expect.poll(async () => (await activeData(page, room))[0].children.length).toBe(1)
+  const saved = await state(page, room)
+  const pasted = saved.versions.find((item) => item.id === saved.activeId)
+  expect(pasted.data[0].children[0].value).toBe('Source')
+  expect(pasted.positions.source.x).toBeGreaterThan(positions.source.x)
+  await expect(page.locator('.version-card.active .treemap-overlap-outline')).toHaveCount(0)
+})
+
 test('new shortcuts preserve editable text and focus the active version', async ({ page }) => {
   const room = await openRoom(page)
   await page.keyboard.press('n')
@@ -3696,6 +3897,7 @@ test('root label remains inside the box at maximum zoom near either edge', async
   for (const edge of ['left', 'right']) {
     await page.keyboard.press('1')
     await page.waitForTimeout(500)
+    const focusedScale = await page.locator('.graph-world').evaluate((element) => new DOMMatrix(getComputedStyle(element).transform).a)
     const rootBounds = await root.boundingBox()
     const canvasBounds = await canvas.boundingBox()
     const centerX = canvasBounds.x + canvasBounds.width / 2
@@ -3708,7 +3910,8 @@ test('root label remains inside the box at maximum zoom near either edge', async
     await page.mouse.up()
     await page.mouse.move(centerX, y)
     await page.mouse.wheel(0, -3000)
-    await expect(page.locator('.graph-world')).toHaveAttribute('style', /scale\(4\)/)
+    await expect.poll(() => page.locator('.graph-world').evaluate((element) => new DOMMatrix(getComputedStyle(element).transform).a))
+      .toBeCloseTo(focusedScale, 3)
     const result = await root.evaluate((element) => {
       const box = element.getBoundingClientRect()
       const content = element.querySelector('.root-overview-label')
@@ -4099,77 +4302,78 @@ test('peers follow new children only when viewing their parent', async ({ browse
   }
 })
 
-// test('simultaneous peer edits keep distinct stable version numbers', async ({ browser }) => {
-//   const contexts = await Promise.all([browser.newContext(), browser.newContext()])
-//   for (const context of contexts) {
-//     await context.addInitScript(() => {
-//       const send = RTCDataChannel.prototype.send
-//       const pending = []
-//       RTCDataChannel.prototype.send = function (data) {
-//         if (window.holdPeerMessages) pending.push([this, data])
-//         else send.call(this, data)
-//       }
-//       window.releasePeerMessages = () => {
-//         window.holdPeerMessages = false
-//         for (const [channel, data] of pending.splice(0)) send.call(channel, data)
-//       }
-//     })
-//   }
-//   const [host, guest] = await Promise.all(contexts.map((context) => context.newPage()))
-//   try {
-//     const room = await openRoom(host)
-//     await guest.goto(`/?room=${room}`)
-//     await expect(guest.getByRole('status').first()).toHaveText('Connected', { timeout: 20000 })
-//     await addEntries(host, ['Base'])
-//     await expect.poll(async () => (await state(guest, room)).activeId).toBe((await state(host, room)).activeId)
-//     const parent = (await state(host, room)).activeId
-//     for (const [page, label] of [[host, 'Concurrent host'], [guest, 'Concurrent guest']]) {
-//       await page.getByRole('button', { name: 'New free entry, N' }).click()
-//       await page.getByPlaceholder('Entry name').fill(label)
-//       await page.evaluate(() => { window.holdPeerMessages = true })
-//     }
-//     await Promise.all([host, guest].map((page) => page.getByRole('button', { name: 'Add 1 entry' }).click()))
-//     for (const page of [host, guest]) await page.evaluate(() => window.releasePeerMessages())
-//     await expect.poll(async () => (await state(host, room)).versions.filter((item) => item.parentId === parent).length, { timeout: 20000 }).toBe(2)
-//     await expect.poll(async () => (await state(guest, room)).versions.filter((item) => item.parentId === parent).length, { timeout: 20000 }).toBe(2)
-//     const hostChildren = (await state(host, room)).versions.filter((item) => item.parentId === parent)
-//     const guestChildren = (await state(guest, room)).versions.filter((item) => item.parentId === parent)
-//     expect(new Set(hostChildren.map((item) => item.number.origin)).size).toBe(2)
-//     expect(hostChildren.map((item) => item.number.subbranch)).toEqual([1, 1])
-//     expect(hostChildren.map((item) => [item.id, item.number]).sort()).toEqual(guestChildren.map((item) => [item.id, item.number]).sort())
-//     await host.keyboard.press('4')
-//     await guest.keyboard.press('4')
-//     const labels = await host.locator('.version-card:not(.root-version) .version-header-id').allTextContents()
-//     expect(new Set(labels).size).toBe(labels.length)
-//     const labelsByVersion = async (page) => page.locator('.version-card:not(.root-version)').evaluateAll((cards) =>
-//       Object.fromEntries(cards.map((card) => [card.dataset.version, card.querySelector('.version-header-id').textContent])))
-//     await expect.poll(async () => labelsByVersion(guest)).toEqual(await labelsByVersion(host))
-//     const childLabels = hostChildren.map((item) => item.id)
-//     const displayed = await labelsByVersion(host)
-//     const pair = childLabels.map((id) => displayed[id]).sort()
-//     expect(pair[1]).toBe(`${pair[0]}.1`)
-//     await host.getByRole('button', { name: 'Settings' }).click()
-//     const download = host.waitForEvent('download')
-//     await host.getByRole('button', { name: 'Export Interaction Log' }).click()
-//     const buffer = await readFile(await (await download).path())
-//     const log = JSON.parse(buffer.toString())
-//     const actorForVersion = (id) => log.events.find((event) => event.category === 'state'
-//       && event.patch.versions.some((version) => version.id === id))?.actor.id
-//     const chooser = host.waitForEvent('filechooser')
-//     await host.getByRole('button', { name: 'Replay Interaction Log' }).click()
-//     await (await chooser).setFiles({ name: 'concurrent.json', mimeType: 'application/json', buffer })
-//     await expect(host.locator('.current-room-name')).toHaveText('Interaction Log Replay')
-//     for (const child of hostChildren) {
-//       await host.getByLabel('Replay user').selectOption(actorForVersion(child.id))
-//       await host.getByRole('button', { name: 'Jump to end' }).click()
-//       await expect.poll(async () => (await state(host, 'Interaction Log Replay')).versions
-//         .filter((item) => item.parentId === parent).map((item) => [item.id, item.number]))
-//         .toEqual([[child.id, child.number]])
-//     }
-//   } finally {
-//     await Promise.all(contexts.map((context) => context.close()))
-//   }
-// })
+test('simultaneous peer edits keep distinct stable version numbers', async ({ browser }) => {
+  const contexts = await Promise.all([browser.newContext(), browser.newContext()])
+  for (const context of contexts) {
+    await context.addInitScript(() => {
+      const send = RTCDataChannel.prototype.send
+      const pending = []
+      RTCDataChannel.prototype.send = function (data) {
+        if (window.holdPeerMessages) pending.push([this, data])
+        else send.call(this, data)
+      }
+      window.releasePeerMessages = () => {
+        window.holdPeerMessages = false
+        for (const [channel, data] of pending.splice(0)) send.call(channel, data)
+      }
+    })
+  }
+  const [host, guest] = await Promise.all(contexts.map((context) => context.newPage()))
+  try {
+    const room = await openRoom(host)
+    await guest.goto(`/?room=${room}`)
+    await expect(guest.getByRole('status').first()).toHaveText('Connected', { timeout: 20000 })
+    await addEntries(host, ['Base'])
+    await expect.poll(async () => (await state(guest, room)).activeId).toBe((await state(host, room)).activeId)
+    const parent = (await state(host, room)).activeId
+    for (const [page, label] of [[host, 'Concurrent host'], [guest, 'Concurrent guest']]) {
+      await page.getByRole('button', { name: 'New free entry, N' }).click()
+      await page.getByPlaceholder('Entry name').fill(label)
+      await page.evaluate(() => { window.holdPeerMessages = true })
+    }
+    await Promise.all([host, guest].map((page) => page.getByRole('button', { name: 'Add 1 entry' }).click()))
+    for (const page of [host, guest]) await page.evaluate(() => window.releasePeerMessages())
+    await expect.poll(async () => (await state(host, room)).versions.filter((item) => item.parentId === parent).length, { timeout: 20000 }).toBe(2)
+    await expect.poll(async () => (await state(guest, room)).versions.filter((item) => item.parentId === parent).length, { timeout: 20000 }).toBe(2)
+    const hostChildren = (await state(host, room)).versions.filter((item) => item.parentId === parent)
+    const guestChildren = (await state(guest, room)).versions.filter((item) => item.parentId === parent)
+    expect(new Set(hostChildren.map((item) => item.number.origin)).size).toBe(2)
+    expect(hostChildren.map((item) => item.number.subbranch)).toEqual([1, 1])
+    expect(hostChildren.map((item) => [item.id, item.number]).sort()).toEqual(guestChildren.map((item) => [item.id, item.number]).sort())
+    await host.keyboard.press('4')
+    await guest.keyboard.press('4')
+    const labels = await host.locator('.version-card:not(.root-version) .version-header-id').allTextContents()
+    expect(new Set(labels).size).toBe(labels.length)
+    const labelsByVersion = async (page) => page.locator('.version-card:not(.root-version)').evaluateAll((cards) =>
+      Object.fromEntries(cards.map((card) => [card.dataset.version, card.querySelector('.version-header-id').textContent])))
+    await expect.poll(async () => labelsByVersion(guest)).toEqual(await labelsByVersion(host))
+    const childLabels = hostChildren.map((item) => item.id)
+    const displayed = await labelsByVersion(host)
+    const pair = childLabels.map((id) => displayed[id]).sort()
+    expect(pair[1]).toBe(`${pair[0]}.1`)
+    await host.getByRole('button', { name: 'Settings' }).click()
+    const download = host.waitForEvent('download')
+    await host.getByRole('button', { name: 'Export Interaction Log' }).click()
+    const buffer = await readFile(await (await download).path())
+    const log = JSON.parse(buffer.toString())
+    const actorForVersion = (id) => log.events.find((event) => event.category === 'state'
+      && event.patch.versions.some((version) => version.id === id))?.actor.id
+    const chooser = host.waitForEvent('filechooser')
+    await host.getByRole('button', { name: 'Replay Interaction Log' }).click()
+    await (await chooser).setFiles({ name: 'concurrent.json', mimeType: 'application/json', buffer })
+    await expect(host.locator('.current-room-name')).toHaveText('Interaction Log Replay')
+    const expectedChildren = hostChildren.map((item) => [item.id, item.number]).sort()
+    for (const child of hostChildren) {
+      await host.getByLabel('Replay user').selectOption(actorForVersion(child.id))
+      await host.getByRole('button', { name: 'Jump to end' }).click()
+      await expect.poll(async () => (await state(host, 'Interaction Log Replay')).versions
+        .filter((item) => item.parentId === parent).map((item) => [item.id, item.number]).sort())
+        .toEqual(expectedChildren)
+    }
+  } finally {
+    await Promise.all(contexts.map((context) => context.close()))
+  }
+})
 
 test('simultaneous edits to one version converge and persist', async ({ browser }) => {
   const contexts = await Promise.all([browser.newContext(), browser.newContext()])

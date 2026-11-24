@@ -39,7 +39,8 @@ export function isInteractionEntry(value: unknown): value is InteractionEntry {
     || (value.nodeLabel !== undefined && typeof value.nodeLabel !== 'string')) return false
   return value.ping === undefined || (isRecord(value.ping)
     && Number.isFinite(value.ping.x) && Number.isFinite(value.ping.y)
-    && (value.ping.coordinateSpace === undefined || value.ping.coordinateSpace === 'viewport'))
+    && (value.ping.coordinateSpace === undefined
+      || value.ping.coordinateSpace === 'global' || value.ping.coordinateSpace === 'viewport'))
 }
 
 function isTreeNode(value: unknown): value is TreeNode {

@@ -42,7 +42,7 @@ import { CARD_WIDTH, TREE_MAP_HEIGHT, tilesForForest, tileForNode } from '../uti
 import { shortcutAction, shortcutLabel, type ShortcutAction } from '../config/hotkeys'
 import { actionIcons, actionSymbols } from '../config/icons'
 const { add: Plus, focusVersion: FocusIcon,
-  copy: Copy, delete: Trash2, previous: ChevronLeft, next: ChevronRight, edit: Pencil,
+  copy: Copy, delete: Trash2, edit: Pencil,
   detach: Unlink, close: X, fitAll: FitAllIcon, paste: ClipboardPaste,
   tutorial: TutorialIcon, tag: TagIcon } = actionIcons
 const { addChild: AddChildIcon, group: GroupIcon, compact: CompactIcon, center: CenterIcon,
@@ -54,7 +54,6 @@ const { volume, muted, play: playSound, ping: playPing, toggleMute } = useSounds
 const GRAPH_GAP_X = 300
 const TERMINAL_TAIL_LENGTH = GRAPH_GAP_X
 const TERMINAL_ARROW_BASE_INSET = 0.3
-const ZOOM_MAX = 4
 const ENTRY_TOOLTIP_DELAY = 500
 const { seed, roomDataKey, persistLocalRooms, initializeLocalRooms, readRoomState, normalizeState } = createRoomStorage()
 const initialRooms = initializeLocalRooms()
@@ -199,7 +198,7 @@ watch([compareMode, mergeMode], () => {
 const graphCamera = useGraphCamera({ versions, active, state, compareIds, draggedVersionId: () => treeDrag.value?.versionId,
   zoom, pan, canvasSize, windowDimensions, suppressClicks: suppressGraphClicks,
   isReplaying: () => recorder?.replaying.value ?? false })
-const { versionArrival, cardPosition, cardWidth, cardHeight, rootLabelOffset, rootLabelX, rootLabelWidth, displayCardPosition, graphBounds,
+const { focusedVersionId, focusZoom, versionArrival, cardPosition, cardWidth, cardHeight, rootLabelOffset, rootLabelX, rootLabelWidth, displayCardPosition, graphBounds,
   visibleVersions, visibleConnectionVersions, visibleMergeConnectionVersions, fitGraph, fitHeight, focusNeighborhood,
   stepPreset,
   startCanvasPan, moveCanvasPan, endCanvasPan, onWheel, focusVersion, focusActive, animateCamera,
@@ -367,9 +366,10 @@ const replay = useInteractionReplay({
       selectedNodeIds: event.selection?.nodeIds ?? previous?.selectedNodeIds ?? [], lastSeen: Date.now(),
     } }
     if (parameters?.meaningful === true) {
-      const ping = typeof parameters.x === 'number' && typeof parameters.y === 'number'
-        ? { x: parameters.x, y: parameters.y,
-          ...(parameters.coordinateSpace === 'viewport' ? { coordinateSpace: 'viewport' as const } : {}) } : undefined
+      const coordinateSpace = parameters.coordinateSpace === 'global' || parameters.coordinateSpace === 'viewport'
+        ? parameters.coordinateSpace : undefined
+      const ping: InteractionEntry['ping'] = typeof parameters.x === 'number' && typeof parameters.y === 'number'
+        ? { x: parameters.x, y: parameters.y, ...(coordinateSpace ? { coordinateSpace } : {}) } : undefined
       addReplayInteraction({ id: event.id, actorId: event.actor.id, actorName: event.actor.name,
         actorColor: event.actor.color, action: event.action, createdAt: event.changeTime,
         ...(typeof parameters.versionId === 'string' ? { versionId: parameters.versionId } : {}),
@@ -528,8 +528,8 @@ function focusCollaborator(userId: string) {
   if (version) { playSound('focus'); focusVersion(version) }
 }
 
-function focusPingLocation(location: { x: number; y: number; coordinateSpace?: 'viewport' }) {
-  const targetZoom = Math.min(ZOOM_MAX, Math.max(1, zoom.value))
+function focusPingLocation(location: { x: number; y: number; coordinateSpace?: 'global' | 'viewport' }) {
+  const targetZoom = Math.min(focusZoom.value, Math.max(1, zoom.value))
   const screenX = location.coordinateSpace === 'viewport'
     ? location.x * canvasSize.value.width
     : pan.value.x + location.x * zoom.value
@@ -681,7 +681,7 @@ async function activateRoom(room: string, createEmpty = false, replayStartup = f
       sidebarBeforeReplay = undefined
     }
   }
-  playSound('room')
+  muted.value = true
   peerRoom.close()
   remoteUsers.value = {}
   clearTransientMapViews()
@@ -1033,6 +1033,9 @@ function onCanvasClick(event: MouseEvent) {
 const activeNodes = computed(() => countNodes(active.value.data))
 const branchCount = computed(() => new Set(versions.value.filter((version) => version.id !== 'v0').map((version) => version.branch.split('.')[0])).size)
 const activeChildren = computed(() => versions.value.filter((version) => version.parentId === active.value.id).length)
+function laterVersionCount(version: Version) {
+  return versions.value.filter((candidate) => candidate.lane === version.lane && candidate.step > version.step).length
+}
 const visibleLanes = computed(() => {
   const lanes = new Map<number, Version[]>()
   for (const version of versions.value) {
@@ -1674,6 +1677,8 @@ const cardModel: VersionCardModel = reactive({
   versionAuthorColor,
   activeUsersFor,
   descendantsCount,
+  laterVersionCount,
+  focusedVersionId,
   isPreviewing,
   previewLabel,
   versionAction,
@@ -1769,11 +1774,11 @@ const cardModel: VersionCardModel = reactive({
             <button type="button" class="lane-navigation lane-navigation-left" :class="{ 'active-lane': active.id !== 'v0' && active.lane === lane.lane }" :data-lane="lane.lane"
               :aria-label="`Go to beginning of lane ${lane.lane + 1}`" title="Go to beginning of lane"
               :style="{ top: `${lane.top}px`, height: `${lane.height}px`, '--lane-color': versionColor(lane.first) }"
-              @pointerdown.stop @click.stop="navigateLane(lane.first)"><ChevronLeft :size="Math.min(18, lane.height)" /></button>
+              @pointerdown.stop @click.stop="navigateLane(lane.first)"><svg :width="Math.min(18, lane.height)" :height="Math.min(18, lane.height)" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path d="M11 5l-7 7 7 7M20 5l-7 7 7 7" /></svg></button>
             <button type="button" class="lane-navigation lane-navigation-right" :class="{ 'active-lane': active.id !== 'v0' && active.lane === lane.lane }" :data-lane="lane.lane"
               :aria-label="`Go to end of lane ${lane.lane + 1}`" title="Go to end of lane"
               :style="{ top: `${lane.top}px`, height: `${lane.height}px`, '--lane-color': versionColor(lane.last) }"
-              @pointerdown.stop @click.stop="navigateLane(lane.last)"><ChevronRight :size="Math.min(18, lane.height)" /></button>
+              @pointerdown.stop @click.stop="navigateLane(lane.last)"><svg :width="Math.min(18, lane.height)" :height="Math.min(18, lane.height)" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path d="M4 5l7 7-7 7M13 5l7 7-7 7" /></svg></button>
           </template>
 
           <div v-if="pingMode && compareIds.length !== 2" class="canvas-controls" @pointerdown.stop @click.stop @wheel.stop>

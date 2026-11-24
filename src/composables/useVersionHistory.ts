@@ -159,11 +159,13 @@ export function useVersionHistory(options: {
       id: `v${state.value.nextVersion++}-${CLIENT_ID}-${crypto.randomUUID().replace(/-/g, '')}`, parentId: parent.id, step: parent.step + 1,
       lane, branch, change, data, createdBy: CLIENT_ID, positions,
       ...(parent.treemapOrder ? { treemapOrder: [...parent.treemapOrder] } : {}),
+      ...(parent.compact && sound === 'entryAdded' && /^(Add|Create|Paste)/.test(change) ? { compact: true } : {}),
       ...(currentMapView.manual ? { mapView: clone(fittedMapView) } : {}),
       createdAt: Date.now(),
     }
     numberVersion(version, parent, branch !== parent.branch)
     state.value.versions.push(version)
+    if (version.compact) compactVersionTreemaps(version.id, false)
     if (sound !== 'silent' && (sound !== 'none' || branch !== parent.branch)) {
       options.playChange(sound, branch !== parent.branch)
     }

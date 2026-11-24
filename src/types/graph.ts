@@ -25,6 +25,8 @@ export type VersionCardModel = {
   versionAuthorColor: (version: Version) => string
   activeUsersFor: (id: string) => { id: string; color: string }[]
   descendantsCount: (nodes: TreeNode[]) => number
+  laterVersionCount: (version: Version) => number
+  focusedVersionId: string | null
   isPreviewing: (version: Version) => boolean
   previewLabel: () => string
   versionAction: (version: Version) => { label: string; symbol: string }

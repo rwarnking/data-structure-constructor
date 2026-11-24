@@ -131,7 +131,7 @@ export function useCollaboration(options: {
 
   function logInteraction(
     action: string,
-    reference: { versionId?: string; nodeId?: string; nodeLabel?: string; ping?: { x: number; y: number; coordinateSpace?: 'viewport' } } = {},
+    reference: { versionId?: string; nodeId?: string; nodeLabel?: string; ping?: { x: number; y: number; coordinateSpace?: 'global' | 'viewport' } } = {},
   ) {
     const entry: InteractionEntry = {
       id: `${CLIENT_ID}-${Date.now()}-${++interactionSequence}`,
@@ -564,9 +564,9 @@ export function useCollaboration(options: {
       const ping = message as { id?: unknown; userId?: unknown; x?: unknown; y?: unknown; coordinateSpace?: unknown }
       if (typeof ping.id !== 'string' || typeof ping.userId !== 'string' || ping.userId === CLIENT_ID
         || !Number.isFinite(ping.x) || !Number.isFinite(ping.y)
-        || (ping.coordinateSpace !== undefined && ping.coordinateSpace !== 'viewport')) return
+        || (ping.coordinateSpace !== undefined && ping.coordinateSpace !== 'global' && ping.coordinateSpace !== 'viewport')) return
       const entry = { id: ping.id, userId: ping.userId, x: ping.x as number, y: ping.y as number,
-        ...(ping.coordinateSpace === 'viewport' ? { coordinateSpace: 'viewport' as const } : {}), createdAt: Date.now() }
+        ...(ping.coordinateSpace ? { coordinateSpace: ping.coordinateSpace as 'global' | 'viewport' } : {}), createdAt: Date.now() }
       showPing(entry)
     } else if (packet.type === 'interaction') {
       const entry = (message as { entry?: unknown }).entry
@@ -617,9 +617,9 @@ export function useCollaboration(options: {
     const ping = {
       id: `${CLIENT_ID}-${Date.now()}-${++pingSequence}`,
       userId: CLIENT_ID,
-      x: (clientX - rect.left) / rect.width,
-      y: (clientY - rect.top) / rect.height,
-      coordinateSpace: 'viewport' as const,
+      x: (clientX - rect.left - options.pan.value.x) / options.zoom.value,
+      y: (clientY - rect.top - options.pan.value.y) / options.zoom.value,
+      coordinateSpace: 'global' as const,
       createdAt: Date.now(),
     }
     showPing(ping)

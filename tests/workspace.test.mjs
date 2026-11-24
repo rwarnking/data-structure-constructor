@@ -18,7 +18,7 @@ const { useVersionComparison } = await vite.ssrLoadModule('/src/composables/useV
 const { useVersionHistory } = await vite.ssrLoadModule('/src/composables/useVersionHistory.ts')
 const { changedEntryIds } = await vite.ssrLoadModule('/src/utils/versionDifferences.ts')
 const { reflowVersionLayout, allocateVersionNumber, assignMissingVersionNumbers, assignVersionSuffixes, displayVersionId, isLatestOnBranch, retireVersionNumbers } = await vite.ssrLoadModule('/src/utils/versions.ts')
-const { layoutTileLabel, tilesForForest, tilesFor, fitMapViewAfterDrag, outOfViewDirections, positionsAfterMove, overlappingTreemapIds, resolveTreemapExpansion, positionsAfterAttachment, outerTreemapDimensions, CARD_WIDTH
+const { layoutTileLabel, tilesForForest, tilesFor, fitMapViewAfterDrag, outOfViewDirections, positionsAfterMove, positionsForData, overlappingTreemapIds, resolveTreemapExpansion, positionsAfterAttachment, outerTreemapDimensions, CARD_WIDTH
 } = await vite.ssrLoadModule('/src/utils/treemap.ts')
 const { duplicateLinks } = await vite.ssrLoadModule('/src/utils/duplicateLinks.ts')
 const { nodeParentIds } = await vite.ssrLoadModule('/src/utils/tree.ts')
@@ -886,6 +886,34 @@ test('attaching an entry preserves positions except for treemaps in the expanded
   assert.ok(newSize.height > oldSize.height)
 })
 
+test('adding or pasting subtrees pushes existing treemaps out of an expanded root', () => {
+  const root = node('target')
+  const added = node('copied', [node('child'), node('grandchild')])
+  const grown = node('target', [added])
+  const oldWidth = outerTreemapDimensions(root).width
+  for (const count of [0, 1, 3]) {
+    const blockers = Array.from({ length: count }, (_, index) => node(`blocker${index}`))
+    const before = [root, ...blockers]
+    const after = [grown, ...blockers]
+    const initial = { target: { x: 0, y: 0 },
+      ...Object.fromEntries(blockers.map((item, index) => [item.id, { x: (oldWidth + index * (oldWidth + 12)) / CARD_WIDTH, y: 0 }])) }
+    const positions = positionsForData(before, after, initial, { zoom: 2, panX: -100, panY: 0, manual: true }, { width: 120, height: 100 })
+    assert.deepEqual(positions.target, initial.target)
+    if (count) assert.ok(positions.blocker0.x > initial.blocker0.x)
+    assert.deepEqual([...overlappingTreemapIds(tilesForForest(after, positions))], [])
+  }
+})
+
+test('new free pasted roots avoid existing treemaps even in a constrained viewport', () => {
+  for (const count of [0, 1, 3]) {
+    const before = Array.from({ length: count }, (_, index) => node(`existing${index}`))
+    const after = [...before, node('pasted', [node('nested')])]
+    const initial = Object.fromEntries(before.map((item, index) => [item.id, { x: index * 1.1, y: 0 }]))
+    const positions = positionsForData(before, after, initial, { zoom: 3, panX: -80, panY: -10, manual: true }, { width: 80, height: 60 })
+    assert.deepEqual([...overlappingTreemapIds(tilesForForest(after, positions))], [])
+  }
+})
+
 test('treemap stacking outlines only roots above an overlapping root', () => {
   const data = [node('one', [node('child')]), node('two'), node('three'), node('separate')]
   const positions = { one: { x: 0, y: 0 }, two: { x: 0, y: 0 }, three: { x: 0, y: 0 }, separate: { x: 5, y: 0 } }
@@ -1054,6 +1082,67 @@ test('connections crossing the viewport remain visible without either endpoint c
     assert.ok(!camera.visibleMergeConnectionVersions.value.some((item) => item.id === 'destination'))
   })
   scope.stop()
+})
+
+test('camera presets frame the exact neighborhood and complete branch height', () => {
+      const scope = effectScope()
+      scope.run(() => {
+        const root = version('v0', [])
+        const chain = Array.from({ length: 4 }, (_, index) =>
+          version(`v${index + 1}`, [], index ? `v${index}` : 'v0', index + 1))
+        const branch = { ...version('branch', [], 'v1', 2), lane: 2 }
+        const state = ref({ versions: [root, ...chain, branch], activeId: 'v4', nextNode: 1, nextVersion: 5, nextLane: 3, copyLinks: [] })
+        const zoom = ref(1)
+        const pan = ref({ x: 0, y: 0 })
+        const canvasSize = ref({ width: 900, height: 600 })
+        const camera = useGraphCamera({
+          versions: computed(() => state.value.versions),
+          active: computed(() => state.value.versions.find((item) => item.id === state.value.activeId)),
+          state, compareIds: ref([]), draggedVersionId: () => undefined, zoom, pan, canvasSize,
+          windowDimensions: computed(() => ({ width: 200, height: 120 })), suppressClicks: () => {},
+        })
+        const assertFrame = (ids) => {
+          for (const id of ids) assert.ok(camera.visibleVersions.value.some((item) => item.id === id))
+          for (const id of ids.filter((id) => id !== 'v0')) {
+            const item = state.value.versions.find((value) => value.id === id)
+            const position = camera.cardPosition(item)
+            assert.ok(position.x * zoom.value + pan.value.x >= -0.001)
+            assert.ok((position.x + camera.cardWidth(item)) * zoom.value + pan.value.x <= canvasSize.value.width + 0.001)
+            assert.ok(position.y * zoom.value + pan.value.y >= -0.001)
+            assert.ok((position.y + camera.cardHeight(item)) * zoom.value + pan.value.y <= canvasSize.value.height + 0.001)
+          }
+        }
+        camera.focusNeighborhood(chain[3], false)
+        assertFrame(['v3', 'v4'])
+        camera.focusNeighborhood(chain[1], false)
+        assertFrame(['v1', 'v2', 'v3'])
+        camera.focusNeighborhood(chain[0], false)
+        assertFrame(['v0', 'v1', 'v2'])
+        camera.focusNeighborhood(branch, false)
+        assertFrame(['v1', 'branch'])
+        state.value.versions = [root]
+        state.value.activeId = 'v0'
+        camera.focusNeighborhood(root, false)
+        assertFrame(['v0'])
+
+        state.value.versions = [root, ...chain, branch]
+        for (const id of ['v1', 'v4', 'branch']) {
+          state.value.activeId = id
+          camera.fitHeight(false)
+          const top = camera.cardPosition(chain[0]).y
+          const bottom = camera.cardPosition(branch).y + camera.cardHeight(branch)
+          assert.ok(Math.abs((bottom - top) * zoom.value - (canvasSize.value.height - 100)) < 0.001)
+          assert.ok(Math.abs((top + bottom) / 2 * zoom.value + pan.value.y - canvasSize.value.height / 2) < 0.001)
+          const item = state.value.versions.find((value) => value.id === id)
+          assert.ok(Math.abs((camera.cardPosition(item).x + camera.cardWidth(item) / 2) * zoom.value + pan.value.x - canvasSize.value.width / 2) < 0.001)
+        }
+        state.value.activeId = 'v4'
+        camera.focusVersion(chain[3], false)
+        const limit = zoom.value
+        camera.zoomAt(limit * 100)
+        assert.equal(zoom.value, limit)
+      })
+      scope.stop()
 })
 
 test('attachment rejects cycles and moves a subtree without losing descendants', () => {

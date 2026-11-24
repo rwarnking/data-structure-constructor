@@ -507,20 +507,25 @@ export function positionsAfterAttachment(
   const target = previousData.find((root) => !!findNode([root], targetId))
   const nextTarget = target && data.find((root) => root.id === target.id)
   if (!target || !nextTarget) throw new Error(`Missing attachment target treemap: ${targetId}`)
-  function bounds(node: TreeNode, position: { x: number; y: number }): TreemapBounds {
-    const size = outerTreemapDimensions(node)
+  pushExpandedTreemap(target, nextTarget, data, positions)
+  return positions
+}
+
+function pushExpandedTreemap(previous: TreeNode, current: TreeNode, roots: TreeNode[],
+  positions: Record<string, { x: number; y: number }>) {
+  function bounds(node: TreeNode): TreemapBounds {
+    const position = positions[node.id]!
+    const size = outerTreemapDimensions(node, positions)
     const left = position.x * CARD_WIDTH
     const top = position.y * TREE_MAP_HEIGHT
     return { id: node.id, left, top, right: left + size.width, bottom: top + size.height }
   }
-  const before = bounds(target, oldPositions[target.id]!)
-  const after = bounds(nextTarget, positions[target.id]!)
-  const treemaps = data.map((root) => bounds(root, positions[root.id]!))
-  for (const [id, delta] of resolveTreemapExpansion(before, after, treemaps)) {
+  const before = bounds(previous)
+  const after = bounds(current)
+  for (const [id, delta] of resolveTreemapExpansion(before, after, roots.map(bounds))) {
     const position = positions[id]!
     positions[id] = { x: position.x + delta.x / CARD_WIDTH, y: position.y + delta.y / TREE_MAP_HEIGHT }
   }
-  return positions
 }
 
 export function positionsForData(
@@ -537,6 +542,19 @@ export function positionsForData(
   const positions = { ...defaultPositions(nextData, inherited), ...inherited }
   const newRoots = nextData.filter((node) => previousParents.get(node.id) !== null)
   const occupied = nextData.filter((node) => !newRoots.some((added) => added.id === node.id))
+  const previousRoots = new Map(previousData.map((root) => [root.id, root]))
+  for (const root of occupied) {
+    const previous = previousRoots.get(root.id)
+    if (!previous) continue
+    const pending = [root]
+    let added = false
+    while (pending.length && !added) {
+      const current = pending.pop()!
+      added = !previousParents.has(current.id)
+      pending.push(...current.children)
+    }
+    if (added) pushExpandedTreemap(previous, root, occupied, positions)
+  }
   const view = mapView ?? { zoom: 1, panX: 0, panY: 0, manual: false }
   const anchor = {
     x: (viewport.width / 2 - view.panX) / view.zoom,

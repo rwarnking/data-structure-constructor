@@ -17,9 +17,8 @@ const files: Record<Sound, string> = {
 export function useSounds() {
   const saved = Number(localStorage.getItem('canopy-volume') ?? '1')
   const volume = ref(Number.isFinite(saved) ? Math.max(0, Math.min(1, saved)) : 1)
-  const muted = ref(localStorage.getItem('canopy-muted') === 'true')
+  const muted = ref(true)
   watch(volume, (value) => localStorage.setItem('canopy-volume', String(value)))
-  watch(muted, (value) => localStorage.setItem('canopy-muted', String(value)))
   function play(sound: Sound, allowMuted = false) {
     if (muted.value && !allowMuted) return
     const audio = new Audio(`${import.meta.env.BASE_URL}sounds/${files[sound]}`)

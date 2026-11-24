@@ -10,7 +10,7 @@ import { outOfViewDirections, overlappingTreemapIds, type MapDirection } from '.
 
 const props = defineProps<{ version: Version; model: VersionCardModel }>()
 const { menu: MoreHorizontal, tag: TagIcon } = actionIcons
-const { active, compareIds, compareMode, zoom, overNode, hoveredNode, selectedNodes, draggedSubtreeIds, draggedOriginalTile, selectionBox, clientId, colorForUser, isReadOnly, versionTiles, duplicateValueLinks, displayCardPosition, cardWidth, cardHeight, rootLabelOffset, rootLabelX, rootLabelWidth, versionAuthorColor, activeUsersFor, descendantsCount, isPreviewing, previewLabel, versionAction, cardData, mapViewport, cardMapView, mapTransform, changedEntries, tileSelectionColor, dragOverlayTiles, handleVersionClick, handleVersionDoubleClick, onVersionContext, onVersionMenu, startMapPan, zoomMap, startMapTileGesture, enterTile, moveTileTooltip, leaveTile, onTileClick, onTileDoubleClick, onTileContext } = toRefs(props.model)
+const { active, compareIds, compareMode, zoom, overNode, hoveredNode, selectedNodes, draggedSubtreeIds, draggedOriginalTile, selectionBox, clientId, colorForUser, isReadOnly, versionTiles, duplicateValueLinks, displayCardPosition, cardWidth, cardHeight, rootLabelOffset, rootLabelX, rootLabelWidth, versionAuthorColor, activeUsersFor, descendantsCount, laterVersionCount, focusedVersionId, isPreviewing, previewLabel, versionAction, cardData, mapViewport, cardMapView, mapTransform, changedEntries, tileSelectionColor, dragOverlayTiles, handleVersionClick, handleVersionDoubleClick, onVersionContext, onVersionMenu, startMapPan, zoomMap, startMapTileGesture, enterTile, moveTileTooltip, leaveTile, onTileClick, onTileDoubleClick, onTileContext } = toRefs(props.model)
 const overlayTiles = computed(() => dragOverlayTiles.value(props.version))
 const overviewHover = ref(false)
 const previewPosition = ref({ left: 8, top: 8, width: 280, height: 240 })
@@ -100,6 +100,10 @@ const dropTarget = computed(() => props.version.id === active.value.id
     @click="handleVersionClick(version, $event)" @dblclick.stop="handleVersionDoubleClick(version)" @contextmenu="onVersionContext(version, $event)" :data-over="overNode === version.id">
     <span v-for="(user, index) in activeUsersFor(version.id)" :key="`active-${user.id}`"
       class="version-user-outline" :style="{ borderColor: user.color, borderWidth: `${2 / Math.min(1, zoom)}px`, inset: `${(-2 - index * 3) / Math.min(1, zoom)}px` }"></span>
+    <span v-if="focusedVersionId === version.id" class="version-position-indicator"
+      :style="version.id === 'v0' ? { top: `${rootLabelOffset()}px` } : undefined">
+      {{ laterVersionCount(version) ? `${laterVersionCount(version)} later ${laterVersionCount(version) === 1 ? 'version' : 'versions'}` : 'Latest version' }}
+    </span>
     <span v-if="version.id === 'v0' && version.tag" class="version-tag-indicator" :title="`${version.tag.title}\n${version.tag.description}`"
       :style="{ transform: `scale(${1 / zoom})`, top: `${rootLabelOffset() - 42}px`, left: `${rootLabelX()}px` }"
       :aria-label="`Tag: ${version.tag.title}. ${version.tag.description}`" role="img"><TagIcon :size="18" /></span>

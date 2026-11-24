@@ -135,6 +135,7 @@ export function useTreemapViews(options: {
   function compactVersionTreemaps(versionId: string, notifyUser = true) {
     const version = versions.value.find((item) => item.id === versionId)
     if (!version || !version.data.length) return
+    version.compact = true
     version.positions = compactTreemapPositions(version.data, mapViewport(version))
     centerVersionTreemaps(version.id, false)
     if (notifyUser) notify('Treemap layout compacted')
