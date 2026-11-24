@@ -77,7 +77,7 @@ const groups: { name: string; items: Item[] }[] = [
         <component :is="collapsed ? icons.previous : icons.next" :size="18" />
       </button>
     </header>
-    <div class="action-sidebar-list">
+    <div class="action-sidebar-list" data-scroll-key="action-sidebar">
       <section v-for="group in groups" :key="group.name" :aria-label="group.name">
         <h2 v-if="!collapsed">{{ group.name }}</h2>
         <template v-for="item in group.items.filter((item) => !collapsed || !item.expandedOnly)" :key="item.name">

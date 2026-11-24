@@ -305,9 +305,10 @@ recorder = useInteractionRecorder({
   send: (message) => peerRoom.send(message), notify,
 })
 const sessionRecorder = recorder
-watch([sidebarCollapsed, actionSidebarCollapsed], () => sessionRecorder.recordScreen())
+watch([sidebarCollapsed, actionSidebarCollapsed], () => sessionRecorder.recordScreen(), { flush: 'sync' })
 const analysisOpen = ref(false)
 let replayRevisions = newInteractionRevisions()
+let menuClosePending = false
 const replay = useInteractionReplay({
   setScreen: (screen) => {
     hasRecordedScreen.value = !!screen
@@ -319,6 +320,7 @@ const replay = useInteractionReplay({
     stopGraphAnimations()
     clearTransientMapViews()
     menu.value = null
+    menuClosePending = false
     editor.value = null
     entryOperation.value = null
     bulkDeleteDialog.value = false
@@ -370,19 +372,37 @@ const replay = useInteractionReplay({
     } else if (!dialogSessions.value.has(event.sessionId)) {
       replayLegacyDialog(event)
     }
-    if (parameters?.menuKind === 'entry' || parameters?.menuKind === 'version' || parameters?.menuKind === 'canvas') {
-      menu.value = { x: typeof parameters.x === 'number' ? parameters.x : event.cursor?.x ?? 0,
-        y: typeof parameters.y === 'number' ? parameters.y : event.cursor?.y ?? 0,
-        kind: parameters.menuKind,
-        ...(typeof parameters.nodeId === 'string' ? { nodeId: parameters.nodeId } : {}),
-        ...(typeof parameters.versionId === 'string' ? { versionId: parameters.versionId } : {}),
+    if (event.category === 'input' && event.action.startsWith('Button: Go to ')) {
+      replayLaneNavigation(event.action)
+    }
+    const menuKind = parameters?.menuKind
+    const opensMenu = menuKind === 'entry' || menuKind === 'version' || menuKind === 'canvas'
+    // A menu item stays visible under the cursor for its own click and closes on the next step.
+    if (menuClosePending) { menu.value = null; menuClosePending = false }
+    if (typeof parameters?.menuAction === 'string') menuClosePending = !!menu.value
+    else if (menu.value && !opensMenu && event.category === 'input'
+      && (event.method === 'mouse' || event.method === 'button' || event.action === 'dismiss')
+      && !/^(Graph zoom|Version zoom|Scroll)$/.test(event.action)) {
+      // A click outside the menu, or Escape, dismisses it in the live app; wheel and scroll do not.
+      if (event.method === 'button') menuClosePending = true
+      else menu.value = null
+    }
+    if (opensMenu) {
+      menu.value = { x: typeof parameters?.x === 'number' ? parameters.x : event.cursor?.x ?? 0,
+        y: typeof parameters?.y === 'number' ? parameters.y : event.cursor?.y ?? 0,
+        kind: menuKind,
+        ...(typeof parameters?.nodeId === 'string' ? { nodeId: parameters.nodeId } : {}),
+        ...(typeof parameters?.versionId === 'string' ? { versionId: parameters.versionId } : {}),
       }
     }
-    if (typeof parameters?.menuAction === 'string') menu.value = null
+    if (typeof parameters?.scrollKey === 'string') {
+      replayScroll(parameters.scrollKey, Number(parameters.scrollTop ?? 0), Number(parameters.scrollLeft ?? 0))
+    }
     if (event.patch) {
       state.value = applyInteractionPatch(state.value, event.patch, replayRevisions)
       clearTransientMapViews()
     }
+    if (!mergeDialogSessions.value.has(event.sessionId)) replayLegacyMerge(event)
     if (event.viewport && event.parameters?.scope !== 'version') {
       stopGraphAnimations()
       zoom.value = event.viewport.zoom
@@ -414,7 +434,26 @@ const replay = useInteractionReplay({
     }
   },
 })
+function formatReplayClock(ms: number) {
+  const seconds = Math.floor(Math.max(0, ms) / 1000)
+  return [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60].map((part) => String(part).padStart(2, '0')).join(':')
+}
+function replayScroll(key: string, top: number, left: number) {
+  void nextTick(() => {
+    const element = document.querySelector<HTMLElement>(`[data-scroll-key="${key}"]`)
+    if (element) { element.scrollTop = top; element.scrollLeft = left }
+  })
+}
+const replayCurrentAction = computed(() => {
+  const event = replay.events.value[replay.index.value - 1]
+  if (!event) return 'No action yet'
+  if (event.method === 'hotkey' && (editor.value || entryOperation.value || bulkDeleteDialog.value)
+    && typeof event.parameters?.key === 'string') return `Key press: ${event.parameters.key} (dialog open)`
+  return event.action
+})
 const dialogSessions = computed(() => new Set(replay.log.value?.events.filter((event) => event.dialog)
+  .map((event) => event.sessionId) ?? []))
+const mergeDialogSessions = computed(() => new Set(replay.log.value?.events.filter((event) => event.mergeDialog !== undefined)
   .map((event) => event.sessionId) ?? []))
 const replayUsers = computed(() => Object.entries(remoteUsers.value).map(([id, user]) => ({
   id, name: user.name, activeVersionId: user.activeVersionId,
@@ -442,6 +481,15 @@ const { editor, setEntryValueInput, entryOperation, bulkDeleteMode, bulkDeleteDi
   removeSplitEntry, commitEntryOperation, detachEntry, canAttach, attachEntry,
 } = useHierarchyEditor({ clientId: CLIENT_ID, state, active, selectedNodes, isReadOnly, createVersion, canCreateFrom, setSelectedNodes, notify })
 
+// Recordings made before scroll tracking only show added rows; the browser scrolled each new row into view.
+watch(() => (editor.value?.mode === 'create' ? editor.value.entries.length : 0), (count, previous) => {
+  if (!sessionRecorder.replaying.value || count <= previous) return
+  void nextTick(() => {
+    const element = document.querySelector<HTMLElement>('[data-scroll-key="entry-draft"]')
+    if (element) element.scrollTop = element.scrollHeight
+  })
+})
+
 watch([editor, entryOperation, bulkDeleteDialog, bulkDeleteMode], () => {
   sessionRecorder.recordDialog({ editor: editor.value, operation: entryOperation.value,
     deleteOpen: bulkDeleteDialog.value, deleteMode: bulkDeleteMode.value })
@@ -466,7 +514,7 @@ watch([mergeMode, compareIds, comparisonController.mergeDecisions, comparisonCon
 }, { deep: true })
 
 function replayLegacyDialog(event: InteractionEvent) {
-  if (event.patch) {
+  if (event.patch && event.parameters?.localObservation !== true) {
     editor.value = null
     entryOperation.value = null
     bulkDeleteDialog.value = false
@@ -512,6 +560,38 @@ function replayLegacyDialog(event: InteractionEvent) {
   else if (action === 'mergeEntries' || /^Merge (selected )?entries\b/i.test(action)) openMergeEntries()
   else if ((action === 'split' || /^Split entry\b/i.test(action)) && nodeId) openSplitEntry(nodeId)
   else if (action === 'deleteNode' || /^Delete entry\b/i.test(action)) openBulkDelete()
+}
+
+function replayLegacyMerge(event: InteractionEvent) {
+  if (event.patch && mergeMode.value && /^Merged\b/.test(event.action)) {
+    closeVersionSelection()
+    return
+  }
+  if (event.category !== 'input') return
+  if (event.action === 'merge' && !editor.value && !entryOperation.value && !bulkDeleteDialog.value) {
+    if (mergeMode.value) closeVersionSelection()
+    else startVersionSelection('merge', active.value.id)
+  } else if (mergeMode.value && compareIds.value.length < 2 && event.action === 'Select version'
+    && event.parameters?.button === 0 && typeof event.parameters.versionId === 'string'
+    && versionsById.value.has(event.parameters.versionId)) {
+    chooseCompare(event.parameters.versionId)
+  } else if (mergeMode.value && (event.action === 'Button: Abort merge'
+    || event.action === 'Button: Abort and close' || event.action === 'dismiss')) {
+    closeVersionSelection()
+  }
+}
+
+function replayLaneNavigation(action: string) {
+  const match = /^Button: Go to (beginning|end) of lane (\d+)$/.exec(action)
+  if (!match) return
+  const lane = Number(match[2]) - 1
+  const items = versions.value.filter((version) => version.id !== 'v0' && version.lane === lane)
+    .sort((a, b) => a.step - b.step || a.createdAt - b.createdAt || a.id.localeCompare(b.id))
+  const version = match[1] === 'beginning' ? items[0] : items.at(-1)
+  if (!version) return
+  stopGraphAnimations()
+  const position = cardPosition(version)
+  pan.value = { x: canvasSize.value.width / 2 - (position.x + cardWidth(version) / 2) * zoom.value, y: pan.value.y }
 }
 
 function suppressGraphClicks() {
@@ -1540,7 +1620,21 @@ function performAction(action: ShortcutAction) {
   }
 }
 function onKeydown(event: KeyboardEvent) {
-  if (sessionRecorder.replaying.value) return
+  if (sessionRecorder.replaying.value) {
+    const target = event.target
+    if (analysisOpen.value || event.ctrlKey || event.metaKey || event.altKey
+      || target instanceof Element && (target.closest('input, textarea, select, [role="textbox"]')
+        || target instanceof HTMLElement && target.isContentEditable)) return
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault()
+      replay.seek(replay.index.value - 1)
+    } else if (event.key === 'ArrowRight') {
+      event.preventDefault()
+      replay.pause()
+      replay.next()
+    }
+    return
+  }
   if (compareIds.value.length === 2 && event.shiftKey && event.key.toLowerCase() === 'a'
     && !event.ctrlKey && !event.metaKey && !event.altKey) return
   if (mergeMode.value && compareIds.value.length === 2) {
@@ -1775,7 +1869,7 @@ const cardModel: VersionCardModel = reactive({
     <RoomManager v-if="roomDialogOpen" v-model="newRoomName" :local-rooms="localRooms" :current-room-name="currentRoomName"
       @close="roomDialogOpen = false" @activate="switchFromBlockedRoom" @delete="deleteLocalRoom" @create="switchFromBlockedRoom(newRoomName)" @error="playSound('error')" />
   </main>
-  <main v-else class="app-shell" :class="{ dark: darkMode }" :style="replayStageStyle" @click.capture="handleAppClickCapture">
+  <main v-else class="app-shell" :class="{ dark: darkMode, replaying: sessionRecorder.replaying.value }" :style="replayStageStyle" @click.capture="handleAppClickCapture">
     <div class="workspace">
       <WorkspaceSidebar :inert="mergeMode && compareIds.length === 2" :sidebar-collapsed="sidebarCollapsed" :dark-mode="darkMode" :current-room-name="currentRoomName"
         :volume="volume" :muted="muted" :branching-enabled="state.branching?.enabled !== false"
@@ -1849,52 +1943,64 @@ const cardModel: VersionCardModel = reactive({
         @toggle="actionSidebarCollapsed = !actionSidebarCollapsed" @action="performAction" />
     </div>
 
-    <div v-if="sessionRecorder.replaying.value" class="replay-toolbar" role="toolbar" aria-label="Interaction log replay controls">
-      <label class="replay-user-control">
-        <span>User</span>
-        <select aria-label="Replay user" :value="replay.selectedActorId.value ?? ''"
-          @change="replay.selectActor(($event.target as HTMLSelectElement).value)">
-          <option v-for="actor in replay.actors.value" :key="actor.id" :value="actor.id">{{ actor.name }}</option>
+    <Teleport to="body">
+    <div v-if="sessionRecorder.replaying.value" class="replay-overlay" :class="{ dark: darkMode }">
+    <div class="replay-toolbar" role="toolbar" aria-label="Interaction log replay controls">
+      <div class="replay-toolbar-row replay-toolbar-primary">
+        <label class="replay-user-control">
+          <span>User</span>
+          <select aria-label="Replay user" :value="replay.selectedActorId.value ?? ''"
+            @change="replay.selectActor(($event.target as HTMLSelectElement).value)">
+            <option v-for="actor in replay.actors.value" :key="actor.id" :value="actor.id">{{ actor.name }}</option>
+          </select>
+        </label>
+        <label v-if="!hasRecordedScreen" class="replay-size-control" title="Older recordings do not contain the original browser size">
+          Original size
+          <input v-model.number="legacyScreenWidth" type="number" min="760" aria-label="Recording width" />
+          ×
+          <input v-model.number="legacyScreenHeight" type="number" min="1" aria-label="Recording height" />
+          <button type="button" aria-label="Apply recording size" @click="applyLegacyScreen">Set</button>
+        </label>
+        <label v-if="!hasRecordedScreen || replayScreen?.sidebarCollapsed === undefined" class="replay-size-control"><input v-model="sidebarCollapsed" type="checkbox" /> Left collapsed</label>
+        <label v-if="!hasRecordedScreen || replayScreen?.actionSidebarCollapsed === undefined" class="replay-size-control"><input v-model="actionSidebarCollapsed" type="checkbox" /> Right collapsed</label>
+        <span class="replay-clock" aria-label="Replay time">{{ formatReplayClock(replay.elapsed.value) }}/{{ formatReplayClock(replay.duration.value) }}</span>
+        <span class="replay-current-action" aria-live="polite">Action: {{ replayCurrentAction }}</span>
+        <div class="replay-toolbar-actions">
+          <button type="button" aria-label="Export Interaction Log" title="Export Interaction Log" @click="exportInteractionLog"><DownloadIcon :size="17" /></button>
+          <button type="button" aria-label="Analyze Interaction Log" title="Analyze Interaction Log" @click="analysisOpen = true"><AnalysisIcon :size="17" /></button>
+          <button type="button" aria-label="Exit replay" title="Exit replay" @click="exitReplay"><ExitIcon :size="17" /></button>
+        </div>
+      </div>
+      <div class="replay-toolbar-row replay-toolbar-secondary">
+        <button type="button" aria-label="Jump to beginning" title="Jump to beginning" @click="replay.beginning"><FirstIcon :size="17" /></button>
+        <button type="button" :aria-label="replay.playing.value ? 'Pause' : 'Play'"
+          :title="replay.playing.value ? 'Pause' : 'Play'" @click="replay.playing.value ? replay.pause() : replay.play()">
+          <component :is="replay.playing.value ? PauseIcon : PlayIcon" :size="17" />
+        </button>
+        <button type="button" aria-label="Skip to next step" title="Skip to next step"
+          :disabled="replay.index.value >= replay.events.value.length" @click="replay.next"><NextIcon :size="17" /></button>
+        <button type="button" aria-label="Jump to end" title="Jump to end" @click="replay.end"><LastIcon :size="17" /></button>
+        <label class="replay-timeline">
+          <span>{{ replay.index.value }} / {{ replay.events.value.length }}</span>
+          <input type="range" min="0" :max="replay.events.value.length" step="1" aria-label="Replay timeline"
+            :disabled="!replay.events.value.length" :value="replay.index.value"
+            @input="replay.seek(Number(($event.target as HTMLInputElement).value))" />
+        </label>
+        <select aria-label="Playback speed" :value="replay.speed.value"
+          @change="replay.speed.value = Number(($event.target as HTMLSelectElement).value)">
+          <option :value="0.25">0.25×</option><option :value="0.5">0.5×</option><option :value="1">1×</option>
+          <option :value="2">2×</option><option :value="4">4×</option><option :value="8">8×</option>
         </select>
-      </label>
-      <label v-if="!hasRecordedScreen" class="replay-size-control" title="Older recordings do not contain the original browser size">
-        Original size
-        <input v-model.number="legacyScreenWidth" type="number" min="760" aria-label="Recording width" />
-        ×
-        <input v-model.number="legacyScreenHeight" type="number" min="1" aria-label="Recording height" />
-        <button type="button" aria-label="Apply recording size" @click="applyLegacyScreen">Set</button>
-      </label>
-      <label v-if="!hasRecordedScreen" class="replay-size-control"><input v-model="sidebarCollapsed" type="checkbox" /> Left collapsed</label>
-      <label v-if="!hasRecordedScreen" class="replay-size-control"><input v-model="actionSidebarCollapsed" type="checkbox" /> Right collapsed</label>
-      <button type="button" aria-label="Jump to beginning" title="Jump to beginning" @click="replay.beginning"><FirstIcon :size="17" /></button>
-      <button type="button" :aria-label="replay.playing.value ? 'Pause' : 'Play'"
-        :title="replay.playing.value ? 'Pause' : 'Play'" @click="replay.playing.value ? replay.pause() : replay.play()">
-        <component :is="replay.playing.value ? PauseIcon : PlayIcon" :size="17" />
-      </button>
-      <button type="button" aria-label="Skip to next step" title="Skip to next step"
-        :disabled="replay.index.value >= replay.events.value.length" @click="replay.next"><NextIcon :size="17" /></button>
-      <button type="button" aria-label="Jump to end" title="Jump to end" @click="replay.end"><LastIcon :size="17" /></button>
-      <label class="replay-timeline">
-        <span>{{ replay.index.value }} / {{ replay.events.value.length }}</span>
-        <input type="range" min="0" :max="replay.events.value.length" step="1" aria-label="Replay timeline"
-          :disabled="!replay.events.value.length" :value="replay.index.value"
-          @input="replay.seek(Number(($event.target as HTMLInputElement).value))" />
-      </label>
-      <select aria-label="Playback speed" :value="replay.speed.value"
-        @change="replay.speed.value = Number(($event.target as HTMLSelectElement).value)">
-        <option :value="0.25">0.25×</option><option :value="0.5">0.5×</option><option :value="1">1×</option>
-        <option :value="2">2×</option><option :value="4">4×</option><option :value="8">8×</option>
-      </select>
-      <button type="button" aria-label="Export Interaction Log" title="Export Interaction Log" @click="exportInteractionLog"><DownloadIcon :size="17" /></button>
-      <button type="button" aria-label="Analyze Interaction Log" title="Analyze Interaction Log" @click="analysisOpen = true"><AnalysisIcon :size="17" /></button>
-      <button type="button" aria-label="Exit replay" title="Exit replay" @click="exitReplay"><ExitIcon :size="17" /></button>
+      </div>
     </div>
+    <InteractionAnalysis v-if="analysisOpen && replay.log.value" :log="replay.log.value" @close="analysisOpen = false" />
+    </div>
+    </Teleport>
 
     <div v-if="sessionRecorder.replaying.value" class="replay-cursors" aria-hidden="true">
       <div v-for="(cursor, id) in replay.cursorPositions.value" :key="id" class="replay-cursor"
         :style="{ left: `${cursor.x}px`, top: `${cursor.y}px`, '--cursor-color': cursor.color }">▲ <span>{{ cursor.name }}</span></div>
     </div>
-    <InteractionAnalysis v-if="analysisOpen && replay.log.value" :log="replay.log.value" @close="analysisOpen = false" />
     <VersionComparison :inert="sessionRecorder.replaying.value" :model="comparisonModel" :versions="versions" :sidebar-collapsed="sidebarCollapsed"
       :action-sidebar-collapsed="actionSidebarCollapsed" @confirm="confirmMerge" @entry-click="playSound('entryClick')"
       @pick="playSound('entryAdded')" @omit="playSound('entryClick')" />

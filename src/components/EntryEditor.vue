@@ -19,7 +19,7 @@ async function addEntryRow() {
     <form class="entry-editor" :class="{ 'table-editor': editor.mode === 'create' }" @submit.prevent="emit('commit')">
       <div class="editor-heading"><span class="section-label">{{ editor.mode === 'create' ? (editor.parentOf ? 'NEW PARENT' : 'NEW ENTRY') : 'CHANGE VALUE' }}</span><button type="button" class="quiet-icon" title="Close" @click="emit('close')"><X :size="17" /></button></div>
       <template v-if="editor.mode === 'create'">
-        <div class="entry-draft-table-wrap">
+        <div class="entry-draft-table-wrap" data-scroll-key="entry-draft">
           <table class="entry-draft-table">
             <thead><tr><th scope="col">Name / Value</th><th scope="col">Description</th><th scope="col"><span class="sr-only">Remove</span></th></tr></thead>
             <tbody>

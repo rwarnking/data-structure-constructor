@@ -1109,6 +1109,7 @@ test('replay scales the recorded screen and keeps cursor and graph aligned after
   await focusActive(page)
   await page.getByRole('button', { name: 'New free entry, N' }).click()
   await page.getByPlaceholder('Entry name').fill('Replay target')
+  await page.getByPlaceholder('Entry name').press('m')
   const addButton = page.getByRole('button', { name: 'Add 1 entry' })
   const originalButton = await addButton.boundingBox()
   await page.evaluate(() => window.addEventListener('pointerdown', () => {
@@ -1122,6 +1123,7 @@ test('replay scales the recorded screen and keeps cursor and graph aligned after
   await page.getByRole('button', { name: 'Export Interaction Log' }).click()
   const buffer = await readFile(await (await download).path())
   const log = JSON.parse(buffer.toString())
+  expect(log.events.some((event) => event.action === 'mergeEntries' && event.parameters?.key === 'm')).toBe(false)
   const index = log.events.findLastIndex((event) => event.action === 'Button: Add 1 entry')
   expect(log.events[index].screen).toMatchObject({ width: 1440, height: 900 })
   await page.setViewportSize({ width: 1000, height: 700 })
@@ -1138,6 +1140,10 @@ test('replay scales the recorded screen and keeps cursor and graph aligned after
   const replayButton = await page.getByRole('button', { name: 'Add 1 entry' }).boundingBox()
   const replayCard = await page.locator('.version-card.active').boundingBox()
   const cursor = await page.locator('.replay-cursor').boundingBox()
+  const toolbar = await page.getByRole('toolbar', { name: 'Interaction log replay controls' }).boundingBox()
+  expect(toolbar.width).toBe(940)
+  expect(toolbar.x).toBe(30)
+  expect(toolbar.y + toolbar.height).toBe(688)
   const scale = 1000 / 1440
   const top = (700 - 900 * scale) / 2
   expect(Math.abs(cursor.x - (log.events[index].cursor.x * scale))).toBeLessThan(2)
@@ -1163,7 +1169,34 @@ test('older recordings can use a manually supplied screen size', async ({ page }
   const chooser = page.waitForEvent('filechooser')
   await page.getByRole('button', { name: 'Replay Interaction Log' }).click()
   await (await chooser).setFiles({ name: 'legacy.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(log)) })
+  const replayToolbar = page.getByRole('toolbar', { name: 'Interaction log replay controls' })
+  const primaryRow = replayToolbar.locator('.replay-toolbar-primary')
+  const secondaryRow = replayToolbar.locator('.replay-toolbar-secondary')
+  await expect(primaryRow.getByLabel('Replay user')).toBeVisible()
+  await expect(primaryRow.getByLabel('Recording width')).toBeVisible()
+  await expect(primaryRow.getByRole('button', { name: 'Export Interaction Log' })).toBeVisible()
+  await expect(primaryRow.getByRole('button', { name: 'Analyze Interaction Log' })).toBeVisible()
+  await expect(primaryRow.getByRole('button', { name: 'Exit replay' })).toBeVisible()
+  await expect(primaryRow.getByLabel('Left collapsed')).toBeVisible()
+  await expect(primaryRow.getByLabel('Right collapsed')).toBeVisible()
+  await expect(primaryRow.locator('.replay-current-action')).toBeVisible()
+  await expect(secondaryRow.locator('.replay-current-action')).toHaveCount(0)
+  await expect(secondaryRow.getByRole('button', { name: 'Jump to beginning' })).toBeVisible()
+  await expect(secondaryRow.getByLabel('Left collapsed')).toHaveCount(0)
+  const [primaryTop, secondaryTop] = await Promise.all([
+    primaryRow.evaluate((row) => row.getBoundingClientRect().top),
+    secondaryRow.evaluate((row) => row.getBoundingClientRect().top),
+  ])
+  expect(secondaryTop).toBeGreaterThan(primaryTop)
+  await page.keyboard.press('ArrowRight')
+  await expect(replayToolbar.locator('.replay-current-action')).toHaveText('Action: Mouse interaction')
+  await expect(page.getByLabel('Replay timeline')).toHaveValue('1')
+  await page.keyboard.press('ArrowLeft')
+  await expect(replayToolbar.locator('.replay-current-action')).toHaveText('Action: No action yet')
+  await expect(page.getByLabel('Replay timeline')).toHaveValue('0')
   await page.getByLabel('Recording width').fill('1800')
+  await page.getByLabel('Recording width').press('ArrowRight')
+  await expect(page.getByLabel('Replay timeline')).toHaveValue('0')
   await page.getByLabel('Recording height').fill('1000')
   await page.getByRole('button', { name: 'Apply recording size' }).click()
   await expect(page.locator('.app-shell')).toHaveCSS('width', '1800px')
@@ -1172,6 +1205,89 @@ test('older recordings can use a manually supplied screen size', async ({ page }
   expect(Math.abs(cursor.x - 1200 * (1000 / 1800))).toBeLessThan(2)
   await page.getByRole('button', { name: 'Jump to beginning' }).click()
   await expect(page.locator('.app-shell')).toHaveCSS('width', '1800px')
+})
+
+test('recorded sidebar layout changes replay in order and on backward seeks', async ({ page }) => {
+  await openRoom(page)
+  await page.getByRole('button', { name: 'Collapse sidebar', exact: true }).click()
+  await page.getByRole('button', { name: 'Expand action sidebar', exact: true }).click()
+  await page.getByRole('button', { name: 'Expand sidebar', exact: true }).click()
+  await page.getByRole('button', { name: 'Collapse action sidebar', exact: true }).click()
+  await page.getByRole('button', { name: 'Settings' }).click()
+  const download = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Export Interaction Log' }).click()
+  const buffer = await readFile(await (await download).path())
+  const log = JSON.parse(buffer.toString())
+  const layouts = [
+    { sidebarCollapsed: true, actionSidebarCollapsed: true },
+    { sidebarCollapsed: true, actionSidebarCollapsed: false },
+    { sidebarCollapsed: false, actionSidebarCollapsed: false },
+    { sidebarCollapsed: false, actionSidebarCollapsed: true },
+  ]
+  const indexes = layouts.map((layout) => log.events.findIndex((event) => event.action === 'Window layout'
+    && event.screen?.sidebarCollapsed === layout.sidebarCollapsed
+    && event.screen?.actionSidebarCollapsed === layout.actionSidebarCollapsed))
+  expect(indexes.every((index, i) => index >= 0 && (i === 0 || index > indexes[i - 1]))).toBe(true)
+  const chooser = page.waitForEvent('filechooser')
+  await page.getByRole('button', { name: 'Replay Interaction Log' }).click()
+  await (await chooser).setFiles({ name: 'layout.json', mimeType: 'application/json', buffer })
+  const slider = page.getByLabel('Replay timeline')
+  const seek = async (position) => slider.evaluate((element, value) => {
+    element.value = String(value + 1)
+    element.dispatchEvent(new Event('input', { bubbles: true }))
+  }, position)
+  for (const i of [0, 1, 2, 3, 1, 0]) {
+    await seek(indexes[i])
+    await expect(page.locator('.sidebar')).toHaveClass(layouts[i].sidebarCollapsed ? /collapsed/ : /^(?!.*collapsed)/)
+    await expect(page.locator('.action-sidebar')).toHaveClass(layouts[i].actionSidebarCollapsed ? /collapsed/ : /^(?!.*collapsed)/)
+  }
+})
+
+test('legacy replay reconstructs merge selection and lane navigation', async ({ page }) => {
+  const room = await openRoom(page)
+  await addEntries(page, ['First'])
+  const first = (await state(page, room)).activeId
+  await addEntries(page, ['Second'])
+  const initialState = await state(page, room)
+  const lane = initialState.versions.find((version) => version.id === first).lane
+  const firstInLane = initialState.versions.filter((version) => version.id !== 'v0' && version.lane === lane)
+    .sort((a, b) => a.step - b.step || a.createdAt - b.createdAt || a.id.localeCompare(b.id))[0]
+  const actor = { id: 'alice', name: 'Alice', color: '#123456' }
+  const actions = [
+    { action: 'merge', method: 'hotkey', parameters: { key: 'M', shift: true, control: false, alt: false } },
+    { action: 'Select version', method: 'mouse', parameters: { versionId: first, button: 0 } },
+    { action: 'Button: Confirm merge', method: 'button' },
+    { action: 'Button: Abort merge', method: 'button' },
+    { action: `Button: Go to beginning of lane ${lane + 1}`, method: 'button' },
+  ]
+  const events = actions.map((action, index) => ({ ...action, id: `step-${index}`, actor, category: 'input',
+    inputTime: 1000 + index * 1000, changeTime: 1000 + index * 1000 }))
+  const log = { format: 'canopy-interaction-log', version: 1, room, initialState,
+    initialViewport: { zoom: 1, panX: -20000, panY: 0 }, events }
+  await page.getByRole('button', { name: 'Settings' }).click()
+  const chooser = page.waitForEvent('filechooser')
+  await page.getByRole('button', { name: 'Replay Interaction Log' }).click()
+  await (await chooser).setFiles({ name: 'legacy-merge.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(log)) })
+  const slider = page.getByLabel('Replay timeline')
+  const seek = async (position) => slider.evaluate((element, value) => {
+    element.value = String(value)
+    element.dispatchEvent(new Event('input', { bubbles: true }))
+  }, position)
+  await seek(2)
+  const dialog = page.getByRole('dialog', { name: 'Branch merge' })
+  await expect(dialog).toBeVisible()
+  await seek(3)
+  await expect(dialog).toBeVisible()
+  await seek(4)
+  await expect(dialog).toHaveCount(0)
+  await seek(5)
+  await expect.poll(async () => page.locator(`.version-card[data-version="${firstInLane.id}"]`).evaluate((card) => {
+    const canvas = card.closest('.graph-canvas').getBoundingClientRect()
+    const bounds = card.getBoundingClientRect()
+    return Math.abs((bounds.left + bounds.right - canvas.left - canvas.right) / 2)
+  })).toBeLessThan(2)
+  await seek(2)
+  await expect(dialog).toBeVisible()
 })
 
 test('interaction analysis visualizes and inspects user, flow, viewport and version activity', async ({ page }) => {
@@ -1245,7 +1361,7 @@ test('new recordings combine committed sidebar actions and abstract their trigge
   await page.getByLabel('Replay timeline').evaluate((slider, value) => {
     slider.value = String(value)
     slider.dispatchEvent(new Event('input', { bubbles: true }))
-  }, menuActionIndex + 1)
+  }, menuActionIndex + 2)
   await expect(page.locator('.context-menu')).toHaveCount(0)
   await page.getByRole('button', { name: 'Analyze Interaction Log' }).click()
   const analysis = page.getByRole('dialog', { name: 'Interaction log analysis' })
@@ -1402,7 +1518,7 @@ test('replay pause, speed, and cursor interpolation follow recorded time', async
     initialViewport: { zoom: 1, panX: 0, panY: 0 }, events: [
       { id: 'first', actor, action: 'Start', category: 'input', method: 'mouse',
         inputTime: 1000, changeTime: 1000, cursor: { x: 100, y: 120 } },
-      { id: 'second', actor, action: 'Zoom', category: 'viewport', method: 'mouse',
+      { id: 'second', actor, action: 'Zoom', category: 'input', method: 'mouse',
         inputTime: 3000, changeTime: 3000, cursor: { x: 300, y: 120 },
         viewport: { zoom: 1.5, panX: 20, panY: 30 } },
     ] }
@@ -1413,6 +1529,7 @@ test('replay pause, speed, and cursor interpolation follow recorded time', async
   await expect(page.locator('.current-room-name')).toHaveText('Interaction Log Replay')
   await page.getByRole('button', { name: 'Pause', exact: true }).click()
   await expect(page.locator('.replay-timeline span')).toHaveText('1 / 2')
+  await expect(page.locator('.replay-clock')).toHaveText('00:00:00/00:00:02')
   const paused = await page.locator('.replay-cursor').getAttribute('style')
   await page.waitForTimeout(300)
   expect(await page.locator('.replay-cursor').getAttribute('style')).toBe(paused)
@@ -1434,7 +1551,7 @@ test('skip to next step crosses idle gaps without changing playback or pause tim
   const log = { format: 'canopy-interaction-log', version: 1, room, initialState,
     initialViewport: { zoom: 1, panX: 0, panY: 0 }, events: [
       event('one', 1000), event('two', 1001), event('three', 1002),
-      event('four', 355000, { category: 'viewport', viewport: { zoom: 1.5, panX: 20, panY: 30 }, cursor: { x: 120, y: 120 } }),
+      event('four', 355000, { viewport: { zoom: 1.5, panX: 20, panY: 30 }, cursor: { x: 120, y: 120 } }),
       event('five', 365000), event('six', 375000),
     ] }
   await page.getByRole('button', { name: 'Settings' }).click()

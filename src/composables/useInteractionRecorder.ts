@@ -288,6 +288,9 @@ export function useInteractionRecorder(options: {
   }
   function captureKey(event: KeyboardEvent) {
     if (replaying.value || !event.isTrusted || event.repeat) return
+    const target = event.target
+    if (target instanceof Element && (target.closest('input, textarea, select, [role="textbox"]')
+      || target instanceof HTMLElement && target.isContentEditable)) return
     const action = shortcutAction(event)
     if (event.key === 'Escape') pendingIntent = null
     const undoRedo = (event.ctrlKey || event.metaKey) && !event.altKey && ['z', 'y'].includes(event.key.toLowerCase())
@@ -298,11 +301,25 @@ export function useInteractionRecorder(options: {
       shift: event.shiftKey, alt: event.altKey } })
   }
   function captureWheel(event: WheelEvent) {
-    if (replaying.value || !event.isTrusted) return
+    if (replaying.value || !event.isTrusted || !document.hasFocus()) return
     if (!(event.target instanceof Element) || !event.target.closest('.graph-canvas')) return
     input = { time: Date.now(), method: 'mouse', action: event.shiftKey ? 'Version zoom' : 'Graph zoom',
       cursor: { x: event.clientX, y: event.clientY } }
     record('input', input.action, { parameters: { deltaX: event.deltaX, deltaY: event.deltaY, shift: event.shiftKey } })
+  }
+  const scrollTimers = new Map<string, number>()
+  function captureScroll(event: Event) {
+    if (replaying.value || !current.value || !(event.target instanceof HTMLElement)) return
+    const target = event.target
+    const key = target.dataset.scrollKey
+    if (!key) return
+    window.clearTimeout(scrollTimers.get(key))
+    scrollTimers.set(key, window.setTimeout(() => {
+      scrollTimers.delete(key)
+      if (replaying.value || !current.value) return
+      record('input', 'Scroll', { parameters: { scrollKey: key, scrollTop: Math.round(target.scrollTop),
+        scrollLeft: Math.round(target.scrollLeft) } }, { time: Date.now(), method: 'mouse', action: 'Scroll' })
+    }, 120))
   }
   function captureText(event: Event) {
     if (replaying.value || !event.isTrusted) return
@@ -397,6 +414,7 @@ export function useInteractionRecorder(options: {
     window.addEventListener('keydown', captureKey, true)
     window.addEventListener('wheel', captureWheel, true)
     window.addEventListener('input', captureText, true)
+    window.addEventListener('scroll', captureScroll, true)
     window.addEventListener('resize', recordScreen)
   })
   onUnmounted(() => {
@@ -407,6 +425,8 @@ export function useInteractionRecorder(options: {
     window.removeEventListener('keydown', captureKey, true)
     window.removeEventListener('wheel', captureWheel, true)
     window.removeEventListener('input', captureText, true)
+    window.removeEventListener('scroll', captureScroll, true)
+    for (const timer of scrollTimers.values()) window.clearTimeout(timer)
     window.removeEventListener('resize', recordScreen)
   })
   return { current, replaying, startRoom, stopRoom, forgetRoom, recordState, recordRemoteState, recordAction, recordRemoteDeparture,

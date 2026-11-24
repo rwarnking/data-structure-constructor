@@ -131,7 +131,7 @@ function clickedEntry(event: MouseEvent) { if (event.button === 0 && !event.shif
             </section>
             <section class="merge-entry-list">
               <header><strong>Entry selection</strong><span>Pick entries and choose their result parent</span></header>
-              <div class="merge-list-scroll">
+              <div class="merge-list-scroll" data-scroll-key="merge-list">
               <div class="merge-list-head">
                 <strong>{{ mergeResult && displayVersionId(mergeResult.source) }} source</strong>
                 <strong>Result</strong>

@@ -18,10 +18,10 @@ const { useVersionComparison } = await vite.ssrLoadModule('/src/composables/useV
 const { useVersionHistory } = await vite.ssrLoadModule('/src/composables/useVersionHistory.ts')
 const { changedEntryIds } = await vite.ssrLoadModule('/src/utils/versionDifferences.ts')
 const { reflowVersionLayout, allocateVersionNumber, assignMissingVersionNumbers, assignVersionSuffixes, displayVersionId, isLatestOnBranch, retireVersionNumbers } = await vite.ssrLoadModule('/src/utils/versions.ts')
-const { layoutTileLabel, tilesForForest, tilesFor, fitMapViewAfterDrag, outOfViewDirections, positionsAfterMove, positionsForData, overlappingTreemapIds, resolveTreemapExpansion, positionsAfterAttachment, outerTreemapDimensions, CARD_WIDTH
+const { layoutTileLabel, tilesForForest, tilesFor, fitMapViewAfterDrag, outOfViewDirections, positionsAfterMove, positionsForData, defaultPositions, overlappingTreemapIds, resolveTreemapExpansion, positionsAfterAttachment, outerTreemapDimensions, CARD_WIDTH, CARD_HEIGHT, TREE_MAP_HEIGHT, MAP_PADDING
 } = await vite.ssrLoadModule('/src/utils/treemap.ts')
 const { duplicateLinks } = await vite.ssrLoadModule('/src/utils/duplicateLinks.ts')
-const { nodeParentIds } = await vite.ssrLoadModule('/src/utils/tree.ts')
+const { nodeParentIds, flattenNodes, flattenPaths } = await vite.ssrLoadModule('/src/utils/tree.ts')
 const { useGraphCamera } = await vite.ssrLoadModule('/src/composables/useGraphCamera.ts')
 const { parseDataset } = await vite.ssrLoadModule('/src/services/dataset.ts')
 const { isStoredState, isVersion } = await vite.ssrLoadModule('/src/utils/validation.ts')
@@ -30,6 +30,7 @@ const { actionIcons, actionSymbols } = await vite.ssrLoadModule('/src/config/ico
 const { collaboratorColors } = await vite.ssrLoadModule('/src/utils/colors.ts')
 const { interactionPatch, applyInteractionPatch, newInteractionRevisions, parseInteractionLog } = await vite.ssrLoadModule('/src/utils/interactionLog.ts')
 const { useInteractionRecorder } = await vite.ssrLoadModule('/src/composables/useInteractionRecorder.ts')
+const { useInteractionReplay } = await vite.ssrLoadModule('/src/composables/useInteractionReplay.ts')
 const { analyzeInteractions, abstractInteractions, interactionVersionLabels } = await vite.ssrLoadModule('/src/utils/interactionAnalysis.ts')
 
 function node(id, children = []) {
@@ -39,6 +40,69 @@ function node(id, children = []) {
 function version(id, data, parentId = null, step = 0) {
   return { id, data, parentId, step, lane: 0, branch: id, change: id, createdAt: step }
 }
+
+test('replay cursor interpolation ignores stale positions on derived events', () => {
+  const previousRequest = globalThis.requestAnimationFrame
+  const previousCancel = globalThis.cancelAnimationFrame
+  let frame
+  globalThis.requestAnimationFrame = (callback) => { frame = callback; return 1 }
+  globalThis.cancelAnimationFrame = () => {}
+  const scope = effectScope()
+  try {
+    const actor = { id: 'alice', name: 'Alice', color: '#123456' }
+    const event = (id, action, changeTime, x, extra = {}) => ({ id, actor, action, category: 'input',
+      method: 'mouse', inputTime: changeTime, changeTime, cursor: { x, y: 0 }, ...extra })
+    const replay = scope.run(() => useInteractionReplay({ reset: () => {}, initialize: () => {},
+      apply: () => {}, setScreen: () => {} }))
+    replay.load({ format: 'canopy-interaction-log', version: 1, room: 'Room',
+      initialState: {}, initialViewport: { zoom: 1, panX: 0, panY: 0 }, events: [
+        event('open', 'Open entry menu', 1000, 100),
+        event('selection', 'Selection', 1200, 100, { category: 'selection', inputTime: 1000 }),
+        event('derived', 'Committed change', 1300, 900, { category: 'state' }),
+        event('dialog', 'Dialog state', 1400, 800, { dialog: {} }),
+        event('click', 'Button: Delete entry', 2000, 300, { method: 'button' }),
+      ] })
+    replay.seek(2)
+    assert.equal(replay.cursorPositions.value.alice.x, 100)
+    replay.beginning()
+    replay.play()
+    frame(100)
+    frame(600)
+    assert.equal(replay.cursorPositions.value.alice.x, 175)
+    replay.pause()
+  } finally {
+    scope.stop()
+    globalThis.requestAnimationFrame = previousRequest
+    globalThis.cancelAnimationFrame = previousCancel
+  }
+})
+
+test('tree flatteners preserve depth-first order, paths, parents, and sibling indexes', () => {
+  const tree = [
+    { ...node('root', [
+      node('first', [node('grandchild')]),
+      node('second'),
+    ]), value: 'Root' },
+    { ...node('other'), value: 'Other' },
+  ]
+
+  const flat = flattenNodes(tree)
+  assert.deepEqual([...flat.keys()], ['root', 'first', 'grandchild', 'second', 'other'])
+  assert.deepEqual([...flat.values()].map(({ parentId, path, order }) => ({ parentId, path, order })), [
+    { parentId: null, path: 'Root', order: 0 },
+    { parentId: 'root', path: 'Root/first', order: 0 },
+    { parentId: 'first', path: 'Root/first/grandchild', order: 0 },
+    { parentId: 'root', path: 'Root/second', order: 1 },
+    { parentId: null, path: 'Other', order: 1 },
+  ])
+  assert.deepEqual([...flattenPaths(tree)], [
+    ['root', { value: 'Root', parentId: null, path: 'Root' }],
+    ['first', { value: 'first', parentId: 'root', path: 'Root/first' }],
+    ['grandchild', { value: 'grandchild', parentId: 'first', path: 'Root/first/grandchild' }],
+    ['second', { value: 'second', parentId: 'root', path: 'Root/second' }],
+    ['other', { value: 'Other', parentId: null, path: 'Other' }],
+  ])
+})
 
 test('interaction patches reproduce room changes and reject invalid replay data', () => {
   const initial = { versions: [version('v0', [])], activeId: 'v0', nextNode: 1, nextVersion: 1, nextLane: 1, copyLinks: [] }
@@ -1027,6 +1091,67 @@ test('squarified sibling subtrees fill their parent without overlapping', () => 
   }
   const area = children.reduce((sum, tile) => sum + tile.width * tile.height, 0)
   assert.ok(area / ((root.width - 16) * (root.height - 60)) > 0.95)
+})
+
+test('uniform wide sibling layouts choose the same best grid dimensions', () => {
+  const count = 500
+  const forest = [node('root', Array.from({ length: count }, (_, index) => node(`leaf-${index}`)))]
+  const root = tilesForForest(forest).find((tile) => tile.id === 'root')
+  const childWidth = 152
+  const childHeight = 106
+  const aspect = (CARD_WIDTH - 14) / (CARD_HEIGHT - 47)
+  let best = null
+
+  for (let columns = 1; columns <= count; columns += 1) {
+    const rows = Math.ceil(count / columns)
+    const width = columns * childWidth + (columns + 1) * 8
+    const height = rows * childHeight + (rows + 1) * 8 + 44
+    const waste = Math.max(0, (width * height - count * childWidth * childHeight) / (count * childWidth * childHeight))
+    const score = Math.abs(Math.log((width / height) / aspect)) + waste * 0.025
+    if (!best || score < best.score) best = { score, columns, rows, width, height }
+  }
+
+  assert.equal(root.width, Math.max(best.width, best.height * aspect))
+  assert.equal(root.height, Math.max(best.height, root.width / aspect))
+})
+
+test('default positions retain their grid for uneven treemap sizes', () => {
+  const forest = [
+    node('a'),
+    node('b', [node('b1'), node('b2')]),
+    node('c', [node('c1', [node('c2')])]),
+    node('d'),
+    node('e', [node('e1'), node('e2'), node('e3')]),
+    node('f'),
+    node('g', [node('g1')]),
+  ]
+  const positions = defaultPositions(forest)
+  const columns = Math.ceil(Math.sqrt(forest.length))
+  const sizes = forest.map((root) => outerTreemapDimensions(root))
+  const columnWidths = Array(columns).fill(0)
+  const rowHeights = Array(Math.ceil(forest.length / columns)).fill(0)
+  for (let index = 0; index < forest.length; index += 1) {
+    columnWidths[index % columns] = Math.max(columnWidths[index % columns], sizes[index].width)
+    rowHeights[Math.floor(index / columns)] = Math.max(rowHeights[Math.floor(index / columns)], sizes[index].height)
+  }
+
+  const columnOffsets = []
+  const rowOffsets = []
+  let offset = MAP_PADDING
+  for (const width of columnWidths) {
+    columnOffsets.push(offset)
+    offset += width + MAP_PADDING
+  }
+  offset = MAP_PADDING
+  for (const height of rowHeights) {
+    rowOffsets.push(offset)
+    offset += height + MAP_PADDING
+  }
+  assert.deepEqual(positions, Object.fromEntries(forest.map((root, index) => [
+    root.id,
+    { x: columnOffsets[index % columns] / CARD_WIDTH,
+      y: rowOffsets[Math.floor(index / columns)] / TREE_MAP_HEIGHT },
+  ])))
 })
 
 test('deep treemap nodes retain at least 30 by 30 layout dimensions', () => {

@@ -238,6 +238,29 @@ function childLayouts(node: TreeNode, positions: Record<string, { x: number; y: 
   const children = node.children.map((child) => ({ node: child, ...treeDimensions(child, positions, cache) }))
   if (!children.length) return []
 
+  const first = children[0]!
+  if (children.every((child) => child.width === first.width && child.height === first.height)) {
+    let bestColumns = 1
+    let bestScore = Infinity
+    const childArea = children.length * first.width * first.height
+    for (let columns = 1; columns <= children.length; columns += 1) {
+      const rows = Math.ceil(children.length / columns)
+      const width = columns * first.width + TREE_PADDING * (columns + 1)
+      const height = rows * first.height + TREE_PADDING * (rows + 1) + TREE_HEADER_HEIGHT
+      const waste = Math.max(0, (width * height - childArea) / Math.max(1, childArea))
+      const score = Math.abs(Math.log((width / height) / VERSION_TREEMAP_ASPECT)) + waste * 0.025
+      if (score < bestScore) {
+        bestScore = score
+        bestColumns = columns
+      }
+    }
+    return children.map((child, index) => ({
+      ...child,
+      x: TREE_PADDING + (index % bestColumns) * (first.width + TREE_PADDING),
+      y: TREE_PADDING + TREE_HEADER_HEIGHT + Math.floor(index / bestColumns) * (first.height + TREE_PADDING),
+    }))
+  }
+
   let best: { score: number; layouts: Array<typeof children[number] & { x: number; y: number }> } | null = null
   const childArea = children.reduce((sum, child) => sum + child.width * child.height, 0)
   for (let columns = 1; columns <= children.length; columns += 1) {
@@ -391,15 +414,28 @@ function defaultPositionsWithCache(
   cache: LayoutCache,
 ): Record<string, { x: number; y: number }> {
   const columns = Math.max(1, Math.ceil(Math.sqrt(data.length)))
-  const columnWidths = Array.from({ length: Math.min(columns, data.length) }, (_, column) =>
-    Math.max(...data.filter((_, index) => index % columns === column).map((node) => outerDimensions(node, positions, cache).width)))
   const rowCount = Math.ceil(data.length / columns)
-  const rowHeights = Array.from({ length: rowCount }, (_, row) =>
-    Math.max(...data.slice(row * columns, (row + 1) * columns).map((node) => outerDimensions(node, positions, cache).height)))
-  const columnOffsets = columnWidths.map((_, column) =>
-    columnWidths.slice(0, column).reduce((sum, width) => sum + width + MAP_PADDING, MAP_PADDING))
-  const rowOffsets = rowHeights.map((_, row) =>
-    rowHeights.slice(0, row).reduce((sum, height) => sum + height + MAP_PADDING, MAP_PADDING))
+  const columnWidths = Array<number>(Math.min(columns, data.length)).fill(0)
+  const rowHeights = Array<number>(rowCount).fill(0)
+  for (let index = 0; index < data.length; index += 1) {
+    const size = outerDimensions(data[index]!, positions, cache)
+    const column = index % columns
+    const row = Math.floor(index / columns)
+    columnWidths[column] = Math.max(columnWidths[column]!, size.width)
+    rowHeights[row] = Math.max(rowHeights[row]!, size.height)
+  }
+  const columnOffsets: number[] = []
+  const rowOffsets: number[] = []
+  let offset = MAP_PADDING
+  for (const width of columnWidths) {
+    columnOffsets.push(offset)
+    offset += width + MAP_PADDING
+  }
+  offset = MAP_PADDING
+  for (const height of rowHeights) {
+    rowOffsets.push(offset)
+    offset += height + MAP_PADDING
+  }
   return Object.fromEntries(data.map((node, index) => [
     node.id,
     { x: columnOffsets[index % columns]! / CARD_WIDTH, y: rowOffsets[Math.floor(index / columns)]! / TREE_MAP_HEIGHT },

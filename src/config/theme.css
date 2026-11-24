@@ -44,7 +44,7 @@
   --theme-branch-6: #5b7d46;
 }
 
-.app-shell.dark {
+.app-shell.dark, .replay-overlay.dark {
   --theme-background: #151d19;
   --theme-canvas: #151d19;
   --theme-surface: #1d2722;

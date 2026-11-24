@@ -19,6 +19,8 @@ export function useInteractionReplay(options: {
     return [...found.values()]
   })
   const events = computed(() => log.value?.events.filter((event) => event.actor.id === selectedActorId.value) ?? [])
+  const elapsed = ref(0)
+  const duration = computed(() => (events.value.at(-1)?.changeTime ?? 0) - (events.value[0]?.changeTime ?? 0))
   const cursorPositions = ref<Record<string, { x: number; y: number; name: string; color: string }>>({})
   let frame = 0
   let time = 0
@@ -59,7 +61,8 @@ export function useInteractionReplay(options: {
       || event.action === 'Joined room' || event.action === 'Left room') return
     options.apply(event)
   }
-  function updateCursors(position: number) {
+  function updateCursors(position: number, interpolate = true) {
+    elapsed.value = Math.max(0, Math.min(position, duration.value))
     const selected = selectedActorId.value
     const positions = selected ? tracks.get(selected) ?? [] : []
     const first = events.value[0]?.changeTime ?? 0
@@ -77,7 +80,7 @@ export function useInteractionReplay(options: {
       return
     }
     const next = positions[low]
-    const amount = next && next.changeTime > previous.changeTime
+    const amount = interpolate && next && next.changeTime > previous.changeTime
       ? Math.min(1, (at - previous.changeTime) / (next.changeTime - previous.changeTime)) : 0
     cursorPositions.value = { [selected!]: {
       x: previous.cursor.x + ((next?.cursor?.x ?? previous.cursor.x) - previous.cursor.x) * amount,
@@ -94,7 +97,7 @@ export function useInteractionReplay(options: {
     activeSessionId = null
     cursorPositions.value = {}
     startBaseline()
-    updateCursors(time)
+    updateCursors(time, false)
   }
   function load(value: InteractionLog) {
     log.value = value
@@ -103,6 +106,14 @@ export function useInteractionReplay(options: {
     for (const event of value.events) {
       if (!event.cursor) continue
       const track = tracks.get(event.actor.id) ?? []
+      const previous = track.at(-1)
+      const pointerInput = event.category === 'input' && ['mouse', 'button'].includes(event.method)
+        && event.dialog === undefined && event.mergeDialog === undefined && event.tagDialog === undefined
+        && event.parameters?.meaningful !== true
+      const sameInputPosition = previous?.cursor && event.sessionId === previous.sessionId
+        && Math.abs(event.inputTime - previous.inputTime) <= 2
+        && event.cursor.x === previous.cursor.x && event.cursor.y === previous.cursor.y
+      if (!pointerInput && !sameInputPosition) continue
       track.push(event)
       tracks.set(event.actor.id, track)
     }
@@ -138,7 +149,7 @@ export function useInteractionReplay(options: {
     time = Math.max(time, event.changeTime - first)
     execute(event)
     index.value++
-    updateCursors(time)
+    updateCursors(time, false)
     lastFrame = 0
     if (index.value >= sequence.length) pause()
   }
@@ -153,7 +164,7 @@ export function useInteractionReplay(options: {
     }
     const sequence = events.value
     time = bounded ? sequence[bounded - 1]!.changeTime - (sequence[0]?.changeTime ?? 0) : 0
-    updateCursors(time)
+    updateCursors(time, false)
   }
   function end() {
     if (!log.value) return
@@ -165,7 +176,7 @@ export function useInteractionReplay(options: {
       index.value++
     }
     time = (sequence.at(-1)?.changeTime ?? 0) - (sequence[0]?.changeTime ?? 0)
-    updateCursors(time)
+    updateCursors(time, false)
   }
   function selectActor(id: string) {
     if (id === selectedActorId.value || !actors.value.some((actor) => actor.id === id)) return
@@ -182,6 +193,6 @@ export function useInteractionReplay(options: {
     cursorPositions.value = {}
   }
   onUnmounted(pause)
-  return { log, playing, speed, index, actors, events, selectedActorId, cursorPositions,
+  return { log, playing, speed, index, actors, events, selectedActorId, cursorPositions, elapsed, duration,
     load, play, pause, beginning, next, seek, end, selectActor, close }
 }

@@ -25,7 +25,7 @@ const emit = defineEmits<{ close: []; commit: []; 'add-split': []; 'remove-split
       </template>
       <template v-else>
         <p class="operation-note">Each original child must be assigned to exactly one resulting entry.</p>
-        <div class="entry-draft-table-wrap">
+        <div class="entry-draft-table-wrap" data-scroll-key="entry-draft">
           <table class="entry-draft-table">
             <thead><tr><th scope="col">Name / Value</th><th scope="col">Description</th><th scope="col"><span class="sr-only">Remove</span></th></tr></thead>
             <tbody>

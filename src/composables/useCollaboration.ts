@@ -89,8 +89,8 @@ export function useCollaboration(options: {
     persistRoomSnapshot(snapshot)
     if (!applyingRemoteState && snapshot !== lastObservedState) {
       const before = JSON.parse(lastObservedState) as StoredState
-      const delta = publishLocalChanges(value)
-      options.onLocalChanges?.(before, clone(value), delta)
+      const delta = publishLocalChanges(value, before)
+      options.onLocalChanges?.(before, JSON.parse(snapshot) as StoredState, delta)
     }
     lastObservedState = snapshot
   }, { deep: true })
@@ -217,8 +217,7 @@ export function useCollaboration(options: {
     }
   }
 
-  function publishLocalChanges(value: StoredState) {
-    const previous = JSON.parse(lastObservedState) as StoredState
+  function publishLocalChanges(value: StoredState, previous: StoredState) {
     if (!collaborationMetadata || !collaborationRoom) return
     const clock = ++collaborationMetadata.clock
     const revision = newRevision(clock)
