@@ -81,7 +81,7 @@ const emit = defineEmits<{
   <aside class="sidebar" :class="{ collapsed: sidebarCollapsed }">
     <div class="sidebar-head">
       <span class="brand-mark"><Layers3 :size="19" :stroke-width="2.2" /></span>
-      <span class="brand-name">DSC</span>
+      <span class="brand-name">HIVERSE</span>
       <button class="quiet-icon sidebar-settings" title="Settings" aria-label="Settings" :aria-expanded="settingsOpen"
         @click="settingsOpen = !settingsOpen"><Settings :size="16" /></button>
       <button class="quiet-icon sidebar-toggle" :title="sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'"

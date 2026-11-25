@@ -10,7 +10,7 @@ export function parseDataset(value: unknown): Dataset {
   if (!isRecord(value) || value.format !== 'canopy-dataset' || value.version !== 1
     || typeof value.room !== 'string' || !value.room.trim() || value.room.length > 80
     || !isStoredState(value.state) || !Array.isArray(value.interactions)
-    || !value.interactions.every(isInteractionEntry)) throw new Error('Invalid or unsupported Canopy dataset')
+    || !value.interactions.every(isInteractionEntry)) throw new Error('Invalid or unsupported HIVERSE dataset')
   const state = value.state
   if (![state.nextNode, state.nextVersion, state.nextLane].every((item) => Number.isSafeInteger(item) && item > 0)) {
     throw new Error('Invalid dataset counters')

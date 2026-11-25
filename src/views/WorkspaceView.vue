@@ -484,6 +484,7 @@ const { editor, setEntryValueInput, entryOperation, bulkDeleteMode, bulkDeleteDi
 // Recordings made before scroll tracking only show added rows; the browser scrolled each new row into view.
 watch(() => (editor.value?.mode === 'create' ? editor.value.entries.length : 0), (count, previous) => {
   if (!sessionRecorder.replaying.value || count <= previous) return
+  if (replay.log.value?.events.some((event) => event.parameters?.scrollKey === 'entry-draft')) return
   void nextTick(() => {
     const element = document.querySelector<HTMLElement>('[data-scroll-key="entry-draft"]')
     if (element) element.scrollTop = element.scrollHeight
@@ -1654,6 +1655,30 @@ function onKeydown(event: KeyboardEvent) {
   event.preventDefault()
   performAction(action)
 }
+let centerAllTimer = 0
+let centerAllFrame = 0
+// Re-tiling every version is expensive, so wait for resizing to settle and work through the versions in short frame slices.
+function runCenterAll() {
+  const ids = [active.value, ...versions.value.filter((version) => version.id !== active.value.id)].map((version) => version.id)
+  let index = 0
+  const step = () => {
+    const started = performance.now()
+    while (index < ids.length && performance.now() - started < 8) centerVersionTreemaps(ids[index++]!, false)
+    centerAllFrame = index < ids.length ? requestAnimationFrame(step) : 0
+  }
+  centerAllFrame = requestAnimationFrame(step)
+}
+function scheduleCenterAll() {
+  window.clearTimeout(centerAllTimer)
+  cancelAnimationFrame(centerAllFrame)
+  centerAllTimer = window.setTimeout(runCenterAll, 250)
+}
+let measuredCanvasSize = ''
+watch(() => `${canvasSize.value.width}x${canvasSize.value.height}`, (size) => {
+  if (size === measuredCanvasSize || sessionRecorder.replaying.value) return
+  measuredCanvasSize = size
+  scheduleCenterAll()
+})
 function measureCanvas() {
   browserSize.value = { width: window.innerWidth, height: window.innerHeight }
   if (graphCanvas.value) canvasSize.value = { width: graphCanvas.value.clientWidth, height: graphCanvas.value.clientHeight }
@@ -1663,6 +1688,7 @@ onMounted(() => {
   canvasObserver = new ResizeObserver(measureCanvas)
   if (graphCanvas.value) canvasObserver.observe(graphCanvas.value)
   measureCanvas()
+  measuredCanvasSize = `${canvasSize.value.width}x${canvasSize.value.height}`
   window.addEventListener('resize', measureCanvas)
   window.addEventListener('pagehide', recordRoomDeparture)
   window.addEventListener('keydown', onKeydown)
@@ -1700,6 +1726,8 @@ onUnmounted(() => {
   window.removeEventListener('pointerup', endBoxSelection)
   window.removeEventListener('pointercancel', cancelBoxSelection)
   window.clearInterval(presenceTimer)
+  window.clearTimeout(centerAllTimer)
+  cancelAnimationFrame(centerAllFrame)
 })
 
 function createFreeEntry() { addEntry() }

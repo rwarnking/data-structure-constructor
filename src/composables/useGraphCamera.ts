@@ -118,28 +118,14 @@ export function useGraphCamera(options: {
   const focusZoom = computed(() => Math.max(0.005, Math.min(ZOOM_MAX,
     Math.max(1, canvasSize.value.width - 100) / windowDimensions.value.width,
     Math.max(1, canvasSize.value.height - 100) / windowDimensions.value.height)))
-  watch([canvasSize, windowDimensions], ([size, dimensions], [oldSize, oldDimensions]) => {
+  watch([canvasSize, windowDimensions], () => {
     if (options.isReplaying?.()) return
     const current = preset.value
-    if (!current) {
-      const anchor = active.value
-      if (anchor.id !== 'v0') {
-        const step = anchor.step
-        const lane = anchor.lane
-        pan.value = {
-          x: pan.value.x + step * (oldDimensions.width - dimensions.width) * zoom.value,
-          y: pan.value.y + (oldSize.height / 2 - oldDimensions.height / 2 + lane * oldDimensions.height
-            - size.height / 2 + dimensions.height / 2 - lane * dimensions.height) * zoom.value,
-        }
-      }
-      if (zoom.value > focusZoom.value) zoomAt(focusZoom.value)
-      return
-    }
-    const version = current.versionId && versions.value.find((item) => item.id === current.versionId)
-    if (current.mode === 'version' && version) focusVersion(version, false)
-    else if (current.mode === 'neighborhood' && version) focusNeighborhood(version, false)
-    else if (current.mode === 'height') fitHeight(false)
-    else if (current.mode === 'all') fitGraph(false)
+    const version = current?.versionId && versions.value.find((item) => item.id === current.versionId)
+    if (current?.mode === 'neighborhood' && version) focusNeighborhood(version, false)
+    else if (current?.mode === 'height') fitHeight(false)
+    else if (current?.mode === 'all') fitGraph(false)
+    else focusVersion(current?.mode === 'version' && version ? version : active.value, false)
   })
   function zoomAt(nextZoom: number, x = canvasSize.value.width / 2, y = canvasSize.value.height / 2) {
     preset.value = null

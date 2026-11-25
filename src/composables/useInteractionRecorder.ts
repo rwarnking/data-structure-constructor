@@ -198,7 +198,11 @@ export function useInteractionRecorder(options: {
     return true
   }
   function recordAction(entry: InteractionEntry) {
-    if (entry.action === 'Joined room') { refreshSessionBaseline(); return }
+    if (entry.action === 'Joined room') {
+      // Peers only learn the refreshed baseline when it is sent explicitly.
+      if (refreshSessionBaseline()) sendLog(options.send)
+      return
+    }
     if (/^(Created |Merged |Undid |Redid |Tagged |Removed tag )/.test(entry.action)) {
       if (pendingAction) record('input', pendingAction.action, { parameters: actionParameters(pendingAction) })
       pendingAction = entry

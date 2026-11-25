@@ -187,7 +187,7 @@ test('exported room data imports through the file chooser', async ({ page }) => 
 test('tutorial navigates content, highlights actions, completes and restarts', async ({ page }) => {
   await openRoom(page)
   await page.getByRole('button', { name: 'Open tutorial' }).click()
-  const guide = page.getByRole('dialog', { name: 'Welcome to Canopy' })
+  const guide = page.getByRole('dialog', { name: 'Welcome to HIVERSE' })
   await expect(guide.getByRole('img', { name: 'Three connected version windows' })).toBeVisible()
   await expect(guide.locator('ul li')).toHaveCount(3)
   await guide.getByRole('button', { name: 'Next' }).click()
@@ -980,33 +980,34 @@ test('lane navigation symbols fit short buttons at low zoom', async ({ page }) =
   }
 })
 
-test('resizing keeps the manually panned active version in place at different zoom levels', async ({ page }) => {
+test('resizing refocuses the active version and recenters every version after the resize settles', async ({ page }) => {
   const room = await openRoom(page)
   for (let index = 0; index < 6; index++) await addEntries(page, [`Resize ${index}`])
   const id = (await state(page, room)).activeId
-  for (const zoomOut of [false, true]) {
-    if (zoomOut) await page.keyboard.press('4')
-    else await focusActive(page)
-    await page.waitForTimeout(600)
-    const canvas = page.locator('.graph-canvas')
-    const bounds = await canvas.boundingBox()
-    await page.mouse.move(bounds.x + 30, bounds.y + 30)
-    await page.mouse.down()
-    await page.mouse.move(bounds.x + 65, bounds.y + 65, { steps: 4 })
-    await page.mouse.up()
-    const position = () => page.locator(`.version-card[data-version="${id}"]`).evaluate((element) => {
-      const bounds = element.getBoundingClientRect()
-      return { x: bounds.left, y: bounds.top }
-    })
-    const before = await position()
-    for (const width of [1200, 1440]) {
-      await page.setViewportSize({ width, height: 900 })
-      await expect.poll(async () => {
-        const after = await position()
-        return Math.max(Math.abs(after.x - before.x), Math.abs(after.y - before.y))
-      }).toBeLessThan(2)
-    }
+  await focusActive(page)
+  await page.waitForTimeout(600)
+  const canvas = page.locator('.graph-canvas')
+  const bounds = await canvas.boundingBox()
+  await page.mouse.move(bounds.x + 30, bounds.y + 30)
+  await page.mouse.down()
+  await page.mouse.move(bounds.x + 65, bounds.y + 65, { steps: 4 })
+  await page.mouse.up()
+  for (const width of [1200, 1440]) {
+    await page.setViewportSize({ width, height: 900 })
+    await expectCentered(page, id)
   }
+  const treemapBounds = () => page.locator(`.version-card[data-version="${id}"]`).evaluate((card) => {
+    const frame = card.querySelector('svg.treemap-svg').getBoundingClientRect()
+    const content = [...card.querySelectorAll('rect.tree-tile')].map((tile) => tile.getBoundingClientRect())
+    return {
+      left: Math.min(...content.map((item) => item.left)) - frame.left,
+      right: frame.right - Math.max(...content.map((item) => item.right)),
+    }
+  })
+  await expect.poll(async () => {
+    const { left, right } = await treemapBounds()
+    return Math.abs(left - right)
+  }, { timeout: 5000 }).toBeLessThan(4)
 })
 
 test('settings export and import create an isolated local room without overwriting the source', async ({ page }) => {
@@ -3094,18 +3095,40 @@ test('number shortcuts select the four camera presets directly', async ({ page }
     const matrix = new DOMMatrix(getComputedStyle(element).transform)
     return { zoom: matrix.a, x: matrix.e, y: matrix.f }
   })
+  const settledCamera = async () => {
+    let previous = await readCamera()
+    let stable = 0
+    for (let attempt = 0; attempt < 60 && stable < 4; attempt++) {
+      await page.waitForTimeout(100)
+      const next = await readCamera()
+      stable = next.zoom === previous.zoom && next.x === previous.x && next.y === previous.y ? stable + 1 : 0
+      previous = next
+    }
+    return previous
+  }
   const presets = []
+  // Versions keep arriving and re-laying out for a moment, so repeat each preset until it yields the same camera twice.
+  const settledPreset = async (name) => {
+    let previous = null
+    for (let attempt = 0; attempt < 8; attempt++) {
+      await page.getByRole('button', { name }).click()
+      const next = await settledCamera()
+      if (previous && next.zoom === previous.zoom && next.x === previous.x && next.y === previous.y) return next
+      previous = next
+    }
+    return previous
+  }
   for (const name of ['Fit all versions, 4', 'Fit height', 'Focus neighborhood', 'Focus active version, 1']) {
-    await page.getByRole('button', { name }).click()
-    await page.waitForTimeout(500)
-    presets.push(await readCamera())
+    presets.push(await settledPreset(name))
   }
   async function expectPreset(index) {
-    await page.waitForTimeout(500)
-    const actual = await readCamera()
-    expect(actual.zoom).toBeCloseTo(presets[index].zoom, 3)
-    expect(actual.y).toBeCloseTo(presets[index].y, 0)
-    if (index !== 1) expect(actual.x).toBeCloseTo(presets[index].x, 0)
+    const expected = presets[index]
+    // The camera animates towards its target, so poll instead of sampling once.
+    await expect.poll(async () => {
+      const actual = await readCamera()
+      return [actual.zoom - expected.zoom, actual.y - expected.y, index === 1 ? 0 : actual.x - expected.x]
+        .every((difference) => Math.abs(difference) < 0.5 && Math.abs(actual.zoom - expected.zoom) < 0.0005)
+    }, { timeout: 10000, message: `camera for preset ${index}` }).toBe(true)
   }
   await expect(page.getByRole('button', { name: 'Zoom in, plus' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Zoom out, minus' })).toHaveCount(0)
@@ -3708,7 +3731,7 @@ test('undo and redo synchronize versions and copy connectors with peers', async 
     await expect(guest.getByRole('status').first()).toHaveText('Connected', { timeout: 20000 })
     await addEntries(host, ['Shared'])
     const parent = (await state(host, room)).activeId
-    await (await activeTile(host, room, 'Shared')).click()
+    // The new entry is already selected; clicking it again would deselect it after the double-click window.
     await expect(await activeTile(host, room, 'Shared')).toHaveClass(/is-selected/)
     await host.keyboard.press('Control+c')
     await host.keyboard.press('Control+v')
@@ -4094,7 +4117,7 @@ test('pasting into an existing treemap moves conflicting treemaps without overla
     { id: 'source', value: 'Source', children: [] },
     { id: 'other', value: 'Other', children: [] },
   ]
-  const positions = { target: { x: 0, y: 0 }, source: { x: 0.6, y: 0 }, other: { x: 1.2, y: 0 } }
+  const positions = { target: { x: 0, y: 0 }, source: { x: 0.78, y: 0 }, other: { x: 1.6, y: 0 } }
   const room = await openTreemapRoom(page, data, { positions })
   await (await activeTile(page, room, 'Source')).click({ position: { x: 8, y: 8 } })
   await expect(page.locator('.version-card.active .tree-tile.is-selected')).toHaveCount(1)
@@ -5035,4 +5058,117 @@ test('simultaneous joiners receive unique stable names from the room host', asyn
   } finally {
     await Promise.all(contexts.map((context) => context.close()))
   }
+})
+
+async function openSettings(page) {
+  if (!await page.getByRole('button', { name: 'Export Interaction Log' }).isVisible()) await page.getByRole('button', { name: 'Settings' }).click()
+}
+
+async function exportLog(page) {
+  await openSettings(page)
+  const download = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Export Interaction Log' }).click()
+  return readFile(await (await download).path())
+}
+
+async function loadReplay(page, buffer, name = 'replay.json') {
+  await openSettings(page)
+  const chooser = page.waitForEvent('filechooser')
+  await page.getByRole('button', { name: 'Replay Interaction Log' }).click()
+  await (await chooser).setFiles({ name, mimeType: 'application/json', buffer })
+  await expect(page.locator('.current-room-name')).toHaveText('Interaction Log Replay')
+}
+
+async function seekReplay(page, value) {
+  await page.getByLabel('Replay timeline').evaluate((slider, next) => {
+    slider.value = String(next)
+    slider.dispatchEvent(new Event('input', { bubbles: true }))
+  }, value)
+  await expect(page.locator('.replay-timeline span')).toHaveText(new RegExp(`^${value} / `))
+}
+
+test('scrolling a dialog list is recorded and restored during replay', async ({ page }) => {
+  await openRoom(page)
+  await page.getByRole('button', { name: 'New free entry, N' }).click()
+  for (let index = 0; index < 14; index++) await page.getByRole('button', { name: 'Add another entry' }).click()
+  const wrap = page.locator('[data-scroll-key="entry-draft"]')
+  expect(await wrap.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true)
+  await wrap.evaluate((element) => { element.scrollTop = 0 })
+  await page.waitForTimeout(300)
+  await wrap.evaluate((element) => { element.scrollTop = 60 })
+  await page.waitForTimeout(400)
+  await page.getByRole('button', { name: 'Cancel' }).click()
+  const buffer = await exportLog(page)
+  const log = JSON.parse(buffer.toString())
+  const index = log.events.findLastIndex((event) => event.action === 'Scroll')
+  expect(log.events[index].parameters).toMatchObject({ scrollKey: 'entry-draft', scrollTop: 60 })
+  await loadReplay(page, buffer)
+  await seekReplay(page, index + 1)
+  await expect.poll(() => page.locator('[data-scroll-key="entry-draft"]')
+    .evaluate((element) => Math.round(element.scrollTop))).toBe(60)
+})
+
+test('mouse wheel input is not recorded while the window is unfocused', async ({ page }) => {
+  await openRoom(page)
+  const canvas = page.locator('.graph-canvas')
+  const box = await canvas.boundingBox()
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+  await page.evaluate(() => { document.hasFocus = () => false })
+  await page.mouse.wheel(0, 120)
+  await page.waitForTimeout(100)
+  let log = JSON.parse((await exportLog(page)).toString())
+  expect(log.events.some((event) => event.action === 'Graph zoom')).toBe(false)
+  await page.getByRole('button', { name: 'Settings' }).click()
+  await page.evaluate(() => { document.hasFocus = () => true })
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+  await page.mouse.wheel(0, 120)
+  await page.waitForTimeout(100)
+  log = JSON.parse((await exportLog(page)).toString())
+  expect(log.events.some((event) => event.action === 'Graph zoom')).toBe(true)
+})
+
+test('replayed context menus close on the next click and reopen when stepping back', async ({ page }) => {
+  const room = await openRoom(page)
+  const initialState = await state(page, room)
+  const actor = { id: 'recorded-user', name: 'Recorded user', color: '#0075b8' }
+  const event = (id, action, time, extra = {}) => ({ id, actor, action, category: 'input', method: 'mouse',
+    inputTime: time, changeTime: time, cursor: { x: 300, y: 300 }, ...extra })
+  const log = { format: 'canopy-interaction-log', version: 1, room, initialState,
+    initialViewport: { zoom: 1, panX: 0, panY: 0 }, events: [
+      event('open', 'Open canvas menu', 1000, { parameters: { menuKind: 'canvas', x: 300, y: 300 } }),
+      event('scroll', 'Graph zoom', 1500),
+      event('click', 'Click', 2000, { cursor: { x: 700, y: 500 } }),
+    ] }
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await loadReplay(page, Buffer.from(JSON.stringify(log)))
+  await page.getByRole('button', { name: 'Pause', exact: true }).click()
+  await seekReplay(page, 1)
+  await expect(page.locator('.context-menu')).toHaveCount(1)
+  await seekReplay(page, 2)
+  await expect(page.locator('.context-menu')).toHaveCount(1)
+  await seekReplay(page, 3)
+  await expect(page.locator('.context-menu')).toHaveCount(0)
+  await seekReplay(page, 2)
+  await expect(page.locator('.context-menu')).toHaveCount(1)
+  await seekReplay(page, 1)
+  await expect(page.locator('.context-menu')).toHaveCount(1)
+})
+
+test('replay applies versions observed from other participants without a patch from the replayed user', async ({ page }) => {
+  const room = await openRoom(page)
+  const initialState = await state(page, room)
+  const actor = { id: 'recorded-user', name: 'Recorded user', color: '#0075b8' }
+  const created = { id: 'v1', parentId: 'v0', step: 1, lane: 0, branch: 'B1', change: 'Created', createdAt: 5,
+    data: [{ id: 'n1', value: 'Observed', children: [] }] }
+  const event = (id, action, time, extra = {}) => ({ id, actor, action, category: 'input', method: 'mouse',
+    inputTime: time, changeTime: time, cursor: { x: 300, y: 300 }, ...extra })
+  const log = { format: 'canopy-interaction-log', version: 1, room, initialState,
+    initialViewport: { zoom: 1, panX: 0, panY: 0 }, events: [
+      event('observe', 'Observed change', 1000, { category: 'state', method: 'system', parameters: { localObservation: true },
+        patch: { versions: [created], removed: [], activeId: 'v1', nextNode: 2, nextVersion: 2, nextLane: 1 } }),
+    ] }
+  await loadReplay(page, Buffer.from(JSON.stringify(log)))
+  await seekReplay(page, 1)
+  await expect(page.locator('.version-card')).toHaveCount(2)
+  await expect(page.locator('.version-card.active')).toContainText('1 Entries')
 })

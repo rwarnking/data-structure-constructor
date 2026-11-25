@@ -71,7 +71,7 @@ function wrapLongWord(word: string, width: number, measure: (text: string) => nu
 export function layoutTileLabel(tile: Tile) {
   const width = Math.max(0, tile.width - 10)
   const height = Math.max(0, Math.min(tile.height, tile.hasChildren ? TREE_HEADER_HEIGHT : tile.height) - 6)
-  const fontSize = tile.hasChildren ? 32 : 36
+  const fontSize = tile.hasChildren ? PARENT_FONT_SIZE : LEAF_FONT_SIZE
   const maxLines = tile.hasChildren ? Math.min(1, Math.floor(height / (fontSize * 1.15))) : Math.floor(height / (fontSize * 1.15))
   if (!maxLines) return { fontSize, lines: [] as string[] }
   if (labelContext === undefined && typeof document !== 'undefined') {
@@ -128,10 +128,19 @@ export function layoutTileLabel(tile: Tile) {
 export const CARD_WIDTH = 260
 export const CARD_HEIGHT = 260
 export const TREE_MAP_HEIGHT = CARD_HEIGHT - 40
-const LEAF_TILE_WIDTH = 152
+const LEAF_FONT_SIZE = 36
+const PARENT_FONT_SIZE = 32
+const LABEL_PADDING = 10
+// Minimum width: 8 letters at the label width estimate plus the label padding.
+const minimumWidth = (fontSize: number) => Math.ceil(fontSize * 0.65 * 8 + LABEL_PADDING)
+const LEAF_TILE_WIDTH = minimumWidth(LEAF_FONT_SIZE)
 const LEAF_TILE_HEIGHT = 106
+const PARENT_TILE_WIDTH = minimumWidth(PARENT_FONT_SIZE)
 const TREE_PADDING = 8
 const TREE_HEADER_HEIGHT = 44
+const PARENT_TILE_HEIGHT = TREE_HEADER_HEIGHT + TREE_PADDING * 2
+const ALTERNATIVE_ASPECTS = [0.8, 1, 1.5]
+const MAX_ROOT_SCALE = 1.5
 export const MAP_PADDING = 12
 export const MAP_GAP = 12
 const VERSION_TREEMAP_ASPECT = (CARD_WIDTH - 14) / (CARD_HEIGHT - 47)
@@ -230,7 +239,9 @@ export function outOfViewDirections(tiles: Tile[], view: MapView, viewport: { wi
     .filter((direction) => found.has(direction))
 }
 type ChildLayout = { node: TreeNode; x: number; y: number; width: number; height: number }
-type LayoutCache = Map<TreeNode, { width: number; height: number; children: ChildLayout[] }>
+type SolvedLayout = { width: number; height: number; tiles: Tile[] }
+type LayoutEntry = { width: number; height: number; children: ChildLayout[]; solved?: SolvedLayout }
+type LayoutCache = Map<TreeNode, LayoutEntry>
 
 function childLayouts(node: TreeNode, positions: Record<string, { x: number; y: number }> | undefined, cache: LayoutCache): ChildLayout[] {
   const cached = cache.get(node)
@@ -303,13 +314,87 @@ function childLayouts(node: TreeNode, positions: Record<string, { x: number; y: 
   }
   return best!.layouts
 }
-function outerDimensions(node: TreeNode, positions: Record<string, { x: number; y: number }> | undefined, cache: LayoutCache) {
-  const size = treeDimensions(node, positions, cache)
-  const width = Math.max(size.width, size.height * VERSION_TREEMAP_ASPECT)
-  return {
-    width,
-    height: Math.max(size.height, width / VERSION_TREEMAP_ASPECT),
+function squarifiedNodes(root: TreeNode, width: number, height: number, ratio?: number) {
+  const layout = treemap<TreeNode>()
+    .size([width, height])
+    .tile(ratio ? treemapSquarify.ratio(ratio) : treemapSquarify)
+    .paddingTop(TREE_HEADER_HEIGHT + TREE_PADDING)
+    .paddingLeft(TREE_PADDING)
+    .paddingRight(TREE_PADDING)
+    .paddingBottom(TREE_PADDING)
+    .paddingInner(TREE_PADDING)
+  return layout(hierarchy(root).sum((node) => node.children.length ? 0 : 1)).descendants()
+}
+// Factor by which the whole root must grow for its tightest entry to reach the minimum (1 = satisfied).
+function minimumSizeFactor(nodes: ReturnType<typeof squarifiedNodes>) {
+  let factor = 1
+  for (const node of nodes) {
+    const width = Math.max(1, node.x1 - node.x0)
+    const height = Math.max(1, node.y1 - node.y0)
+    const parent = !!node.children?.length
+    factor = Math.max(
+      factor,
+      (parent ? PARENT_TILE_WIDTH : LEAF_TILE_WIDTH) / width,
+      (parent ? PARENT_TILE_HEIGHT : LEAF_TILE_HEIGHT) / height,
+    )
   }
+  return factor
+}
+function alternativeAspects() {
+  const byDistance = ALTERNATIVE_ASPECTS
+    .map((aspect) => ({ aspect, distance: Math.abs(Math.log(aspect / VERSION_TREEMAP_ASPECT)) }))
+    .sort((left, right) => left.distance - right.distance)
+  const excluded = byDistance[0]!.aspect
+  return ALTERNATIVE_ASPECTS.filter((aspect) => aspect !== excluded)
+}
+function solveTreemap(root: TreeNode, base: { width: number; height: number }): SolvedLayout {
+  const area = base.width * base.height
+  const attempts = [
+    { aspect: VERSION_TREEMAP_ASPECT, ratio: undefined as number | undefined },
+    ...alternativeAspects().map((aspect) => ({ aspect, ratio: 1 })),
+  ]
+  const run = (attempt: typeof attempts[number], scale: number) => {
+    const height = Math.sqrt(area / attempt.aspect) * scale
+    const width = height * attempt.aspect
+    return { width, height, nodes: squarifiedNodes(root, width, height, attempt.ratio) }
+  }
+  const finish = (result: ReturnType<typeof run>): SolvedLayout => ({
+    width: result.width,
+    height: result.height,
+    tiles: result.nodes.map((node) => ({
+      id: node.data.id, label: node.data.value,
+      x: node.x0, y: node.y0, width: node.x1 - node.x0, height: node.y1 - node.y0,
+      depth: node.depth, hasChildren: !!node.children?.length,
+    })),
+  })
+  const tolerance = 1.0005
+  for (const attempt of attempts) {
+    const result = run(attempt, 1)
+    if (minimumSizeFactor(result.nodes) <= tolerance) return finish(result)
+  }
+  // No attempt fits at scale 1: find the scale each one needs and apply the smallest, capped.
+  let best = { attempt: attempts[0]!, scale: Infinity }
+  for (const attempt of attempts) {
+    let scale = 1
+    for (let step = 0; step < 12 && scale < 4; step += 1) {
+      const factor = minimumSizeFactor(run(attempt, scale).nodes)
+      if (factor <= tolerance) break
+      scale *= Math.min(2, Math.max(1.01, factor))
+    }
+    if (scale < best.scale) best = { attempt, scale }
+  }
+  return finish(run(best.attempt, Math.min(best.scale, MAX_ROOT_SCALE)))
+}
+function outerDimensions(node: TreeNode, positions: Record<string, { x: number; y: number }> | undefined, cache: LayoutCache) {
+  return solvedLayout(node, positions, cache)
+}
+function solvedLayout(node: TreeNode, positions: Record<string, { x: number; y: number }> | undefined, cache: LayoutCache) {
+  const entry = treeDimensions(node, positions, cache)
+  if (entry.solved) return entry.solved
+  const width = Math.max(entry.width, entry.height * VERSION_TREEMAP_ASPECT)
+  const solved = solveTreemap(node, { width, height: Math.max(entry.height, width / VERSION_TREEMAP_ASPECT) })
+  entry.solved = solved
+  return solved
 }
 export function outerTreemapDimensions(node: TreeNode, positions?: Record<string, { x: number; y: number }>) {
   return outerDimensions(node, positions, new Map())
@@ -362,7 +447,7 @@ export function compactTreemapPositions(data: TreeNode[], viewport: { width: num
   }
   return best?.positions ?? {}
 }
-function treeDimensions(node: TreeNode, positions: Record<string, { x: number; y: number }> | undefined, cache: LayoutCache): { width: number; height: number } {
+function treeDimensions(node: TreeNode, positions: Record<string, { x: number; y: number }> | undefined, cache: LayoutCache): LayoutEntry {
   const cached = cache.get(node)
   if (cached) return cached
   if (!node.children.length) {
@@ -663,38 +748,10 @@ function tilesForWithCache(
   cache: LayoutCache,
 ): Tile[] {
   const position = positions?.[root.id] ?? defaultPositionsWithCache(forest, positions, cache)[root.id]!
-  const size = outerDimensions(root, undefined, cache)
   const offsetX = position.x * CARD_WIDTH
   const offsetY = position.y * TREE_MAP_HEIGHT
-  const tree = hierarchy(root).sum((node) => node.children.length ? 0 : 1)
-  const layout = treemap<TreeNode>()
-    .size([size.width, size.height])
-    .tile(treemapSquarify)
-    .paddingTop(TREE_HEADER_HEIGHT + TREE_PADDING)
-    .paddingLeft(TREE_PADDING)
-    .paddingRight(TREE_PADDING)
-    .paddingBottom(TREE_PADDING)
-    .paddingInner(TREE_PADDING)
-  const descendants = layout(tree).descendants()
-  if (descendants.some((node) => node.x1 - node.x0 < LEAF_TILE_WIDTH || node.y1 - node.y0 < 30)) {
-    const tiles: Tile[] = []
-    const addTile = (node: TreeNode, x: number, y: number, width: number, height: number, depth: number) => {
-      tiles.push({
-        id: node.id, label: node.value, x: offsetX + x, y: offsetY + y,
-        width, height, depth, hasChildren: node.children.length > 0,
-      })
-      for (const child of childLayouts(node, undefined, cache)) {
-        addTile(child.node, x + child.x, y + child.y, child.width, child.height, depth + 1)
-      }
-    }
-    addTile(root, 0, 0, size.width, size.height, 0)
-    return tiles
-  }
-  return descendants.map((node) => ({
-    id: node.data.id, label: node.data.value,
-    x: offsetX + node.x0, y: offsetY + node.y0,
-    width: node.x1 - node.x0, height: node.y1 - node.y0,
-    depth: node.depth, hasChildren: !!node.children?.length,
+  return solvedLayout(root, undefined, cache).tiles.map((tile) => ({
+    ...tile, x: offsetX + tile.x, y: offsetY + tile.y,
   }))
 }
 export function orderedTreemapRoots(data: TreeNode[], order?: string[]) {

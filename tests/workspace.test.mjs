@@ -32,6 +32,12 @@ const { interactionPatch, applyInteractionPatch, newInteractionRevisions, parseI
 const { useInteractionRecorder } = await vite.ssrLoadModule('/src/composables/useInteractionRecorder.ts')
 const { useInteractionReplay } = await vite.ssrLoadModule('/src/composables/useInteractionReplay.ts')
 const { analyzeInteractions, abstractInteractions, interactionVersionLabels } = await vite.ssrLoadModule('/src/utils/interactionAnalysis.ts')
+const { findNode: findTreeNode, findParent, removeNode, countNodes, descendants } = await vite.ssrLoadModule('/src/utils/tree.ts')
+const { isRevision, revisionIsNewer, hasRootEntries, isCopyLink, isCollaborationMetadata, hasValidVersionStep, RootNotEmptyError } = await vite.ssrLoadModule('/src/utils/validation.ts')
+const { structureSignature, compareCopyLinks } = await vite.ssrLoadModule('/src/utils/versions.ts')
+const { userColor, selectionColor, versionColor } = await vite.ssrLoadModule('/src/utils/colors.ts')
+const { createRoomStorage, writeRoomSnapshot } = await vite.ssrLoadModule('/src/services/roomStorage.ts')
+const { compactTreemapPositions } = await vite.ssrLoadModule('/src/utils/treemap.ts')
 
 function node(id, children = []) {
   return { id, value: id, children }
@@ -1093,11 +1099,11 @@ test('squarified sibling subtrees fill their parent without overlapping', () => 
   assert.ok(area / ((root.width - 16) * (root.height - 60)) > 0.95)
 })
 
-test('uniform wide sibling layouts choose the same best grid dimensions', () => {
+test('uniform wide sibling layouts start from the best grid dimensions and scale at most 1.5x', () => {
   const count = 500
   const forest = [node('root', Array.from({ length: count }, (_, index) => node(`leaf-${index}`)))]
   const root = tilesForForest(forest).find((tile) => tile.id === 'root')
-  const childWidth = 152
+  const childWidth = 198
   const childHeight = 106
   const aspect = (CARD_WIDTH - 14) / (CARD_HEIGHT - 47)
   let best = null
@@ -1111,8 +1117,48 @@ test('uniform wide sibling layouts choose the same best grid dimensions', () => 
     if (!best || score < best.score) best = { score, columns, rows, width, height }
   }
 
-  assert.equal(root.width, Math.max(best.width, best.height * aspect))
-  assert.equal(root.height, Math.max(best.height, root.width / aspect))
+  const baseArea = Math.max(best.width, best.height * aspect) * Math.max(best.height, Math.max(best.width, best.height * aspect) / aspect)
+  const scale = Math.sqrt(root.width * root.height / baseArea)
+  assert.ok(scale >= 0.99 && scale <= 1.5 + 0.001, `scale ${scale}`)
+})
+
+function assertMinimumSizes(tiles) {
+  for (const tile of tiles) {
+    assert.ok(tile.width >= (tile.hasChildren ? 177 : 198) - 0.5, `${tile.id} width ${tile.width}`)
+    assert.ok(tile.height >= (tile.hasChildren ? 60 : 106) - 0.5, `${tile.id} height ${tile.height}`)
+  }
+}
+
+test('treemap tiles satisfy the minimum size by trying other aspects before scaling', () => {
+  const leaves = (prefix, count) => Array.from({ length: count }, (_, index) => node(`${prefix}${index}`))
+  const forests = {
+    four: [node('four', leaves('f', 4))],
+    twenty: [node('twenty', leaves('t', 20))],
+    nested: [node('n', [
+      node('n1', [node('n11', leaves('a', 3)), node('n12'), node('n13')]),
+      node('n2', leaves('b', 3)), node('n3', leaves('c', 3)), node('n4'),
+    ])],
+  }
+  for (const forest of Object.values(forests)) assertMinimumSizes(tilesForForest(forest))
+  const aspect = (CARD_WIDTH - 14) / (CARD_HEIGHT - 47)
+  const four = tilesForForest(forests.four).find((tile) => tile.id === 'four')
+  // The golden-ratio squarify at the version aspect needs a 2x scale; the square-ratio attempt fits without any scaling.
+  assert.ok(four.width * four.height < 400 * 400)
+  assert.ok(Math.abs(four.width / four.height - aspect) > 0.05)
+})
+
+test('treemap scale is capped at 1.5 and violations beyond that are accepted', () => {
+  const leaves = (prefix, count) => Array.from({ length: count }, (_, index) => node(`${prefix}${index}`))
+  const forest = [node('root', [
+    node('small', [node('only')]),
+    node('big', [node('g1', leaves('x', 6)), node('g2', leaves('y', 6)), node('g3', leaves('z', 6))]),
+    node('solo'),
+  ])]
+  const tiles = tilesForForest(forest)
+  assert.equal(tiles.length, 26)
+  assert.deepEqual(tilesFor(forest[0], forest, 0).map((tile) => tile.id), tiles.map((tile) => tile.id))
+  assert.ok(tiles.some((tile) => tile.width < (tile.hasChildren ? 177 : 198) - 0.5
+    || tile.height < (tile.hasChildren ? 60 : 106) - 0.5))
 })
 
 test('default positions retain their grid for uneven treemap sizes', () => {
@@ -1369,4 +1415,150 @@ test('bulk deletion keeps unselected descendants even when selected nodes are ne
     assert.deepEqual(selected.value, [])
   })
   scope.stop()
+})
+
+test('tree helpers find, detach and count nodes at any depth', () => {
+  const tree = [node('a', [node('b', [node('c')])]), node('d')]
+  assert.equal(findTreeNode(tree, 'c').id, 'c')
+  assert.equal(findParent(tree, 'c').id, 'b')
+  assert.equal(findParent(tree, 'a'), null)
+  assert.equal(findParent(tree, 'missing'), undefined)
+  assert.deepEqual(descendants(tree[0]), ['a', 'b', 'c'])
+  assert.equal(countNodes(tree), 4)
+  assert.equal(removeNode(tree, 'b').id, 'b')
+  assert.equal(countNodes(tree), 2)
+  assert.equal(removeNode(tree, 'missing'), undefined)
+})
+
+test('validation guards accept well-formed values and reject malformed ones', () => {
+  assert.equal(isRevision({ clock: 1, actor: 'a' }), true)
+  assert.equal(isRevision({ clock: -1, actor: 'a' }), false)
+  assert.equal(isRevision({ clock: 1, actor: '' }), false)
+  assert.equal(revisionIsNewer({ clock: 2, actor: 'a' }, { clock: 1, actor: 'z' }), true)
+  assert.equal(revisionIsNewer({ clock: 1, actor: 'b' }, { clock: 1, actor: 'a' }), true)
+  assert.equal(revisionIsNewer({ clock: 1, actor: 'a' }, { clock: 1, actor: 'a' }), false)
+  assert.equal(revisionIsNewer(undefined, { clock: 1, actor: 'a' }), false)
+  assert.equal(revisionIsNewer({ clock: 0, actor: 'a' }, undefined), true)
+  assert.equal(hasRootEntries({ versions: [version('v0', [node('x')])] }), true)
+  assert.equal(hasRootEntries({ versions: [version('v0', [])] }), false)
+  assert.equal(new RootNotEmptyError().name, 'RootNotEmptyError')
+  assert.equal(isCopyLink({ sourceVersionId: 'a', sourceNodeId: 'b', targetVersionId: 'c', targetNodeId: 'd' }), true)
+  assert.equal(isCopyLink({ sourceVersionId: 'a' }), false)
+  const revision = { clock: 1, actor: 'a' }
+  assert.equal(isCollaborationMetadata({ clock: 1, versions: { v1: revision }, removed: {}, active: revision, copyLinks: revision }), true)
+  assert.equal(isCollaborationMetadata({ clock: 1.5, versions: {}, removed: {}, active: revision, copyLinks: revision }), false)
+  const parent = version('v1', [], 'v0', 1)
+  assert.equal(hasValidVersionStep(version('v2', [], 'v1', 2), parent), true)
+  assert.equal(hasValidVersionStep(version('v2', [], 'v1', 5), parent), false)
+  assert.equal(hasValidVersionStep({ ...version('v2', [], 'v1', 2), mergeSourceId: 'missing' }, parent), false)
+})
+
+test('version helpers compare structure, copy links and labels deterministically', () => {
+  assert.equal(structureSignature([node('a', [node('b')])]), structureSignature([node('a', [node('b')])]))
+  assert.notEqual(structureSignature([node('a')]), structureSignature([node('b')]))
+  const link = (sourceNodeId) => ({ sourceVersionId: 'v1', sourceNodeId, targetVersionId: 'v1', targetNodeId: 'z' })
+  assert.deepEqual([link('b'), link('a')].sort(compareCopyLinks).map((item) => item.sourceNodeId), ['a', 'b'])
+  assert.equal(displayVersionId(version('v0', [])), '00.00.000')
+  assert.equal(displayVersionId(version('v7', [])), 'v7')
+  assert.equal(displayVersionId({ ...version('v7', []), number: { origin: 'o', step: 3, branch: 1, subbranch: 2 } }), '03.01.002')
+})
+
+test('user and branch colors are stable and distinct', () => {
+  assert.equal(userColor('alice'), userColor('alice'))
+  assert.notEqual(userColor('alice'), userColor('bob'))
+  assert.equal(selectionColor('alice'), userColor('alice'))
+  assert.notEqual(selectionColor('alice', true), userColor('alice'))
+  assert.equal(versionColor(version('v0', [])), 'var(--theme-branch-root)')
+  assert.equal(versionColor({ ...version('v1', []), branch: 'branch-2' }), 'var(--theme-branch-2)')
+})
+
+test('room storage keeps room lists, compresses large snapshots and drops dangling copy links', () => {
+  const store = new Map()
+  const previous = { localStorage: globalThis.localStorage, location: globalThis.location }
+  globalThis.localStorage = { getItem: (key) => store.get(key) ?? null, setItem: (key, value) => store.set(key, String(value)),
+    removeItem: (key) => store.delete(key) }
+  globalThis.location = { search: '?room=Alpha' }
+  try {
+    const storage = createRoomStorage()
+    const initial = storage.initializeLocalRooms()
+    assert.equal(initial.currentRoom, 'Alpha')
+    assert.deepEqual(initial.rooms, ['Alpha'])
+    assert.equal(initial.canMigrateLegacy, false)
+    assert.equal(storage.roomDataKey('A b'), 'canopy-room-data-v1-A%20b')
+    store.set('canopy-local-rooms-v1', JSON.stringify(['Alpha', 'Alpha', '', 5, 'Beta']))
+    assert.deepEqual(storage.initializeLocalRooms().rooms, ['Alpha', 'Beta'])
+    assert.deepEqual(storage.readRoomState('Unknown'), storage.seed)
+    const big = { ...structuredClone(storage.seed), versions: [{ ...storage.seed.versions[0],
+      data: [], change: 'x'.repeat(600_000) }] }
+    writeRoomSnapshot(storage.roomDataKey('Alpha'), JSON.stringify(big))
+    assert.match(store.get(storage.roomDataKey('Alpha')), /^canopy-gzip-v1:/)
+    assert.equal(storage.readRoomState('Alpha').versions[0].change.length, 600_000)
+    writeRoomSnapshot(storage.roomDataKey('Beta'), JSON.stringify(storage.seed))
+    assert.doesNotMatch(store.get(storage.roomDataKey('Beta')), /^canopy-gzip-v1:/)
+    const normalized = storage.normalizeState({ ...structuredClone(storage.seed),
+      copyLinks: [{ sourceVersionId: 'v0', sourceNodeId: 'gone', targetVersionId: 'v0', targetNodeId: 'gone' }] })
+    assert.deepEqual(normalized.copyLinks, [])
+    store.set(storage.roomDataKey('Broken'), 'canopy-gzip-v1:not-base64!')
+    assert.throws(() => storage.readRoomState('Broken'), /Could not load saved data/)
+  } finally {
+    globalThis.localStorage = previous.localStorage
+    globalThis.location = previous.location
+  }
+})
+
+test('compacted treemap positions give every root a position', () => {
+  const roots = [node('a', [node('a1')]), node('b'), node('c')]
+  const positions = compactTreemapPositions(roots, { width: 1200, height: 800 })
+  assert.deepEqual(Object.keys(positions).sort(), ['a', 'b', 'c'])
+  for (const position of Object.values(positions)) {
+    assert.ok(Number.isFinite(position.x) && Number.isFinite(position.y))
+  }
+})
+
+test('replay reports elapsed time and total duration of the selected actor', () => {
+  const previousRequest = globalThis.requestAnimationFrame
+  const previousCancel = globalThis.cancelAnimationFrame
+  globalThis.requestAnimationFrame = () => 1
+  globalThis.cancelAnimationFrame = () => {}
+  const scope = effectScope()
+  try {
+    const actor = { id: 'alice', name: 'Alice', color: '#123456' }
+    const event = (id, changeTime) => ({ id, actor, action: id, category: 'input', method: 'mouse',
+      inputTime: changeTime, changeTime, cursor: { x: changeTime / 1000, y: 0 } })
+    const replay = scope.run(() => useInteractionReplay({ reset: () => {}, initialize: () => {},
+      apply: () => {}, setScreen: () => {} }))
+    replay.load({ format: 'canopy-interaction-log', version: 1, room: 'Room', initialState: {},
+      initialViewport: { zoom: 1, panX: 0, panY: 0 }, events: [event('a', 1000), event('b', 4000), event('c', 3_661_000)] })
+    assert.equal(replay.duration.value, 3_660_000)
+    replay.seek(2)
+    assert.equal(replay.elapsed.value, 3000)
+    replay.end()
+    assert.equal(replay.elapsed.value, 3_660_000)
+    replay.beginning()
+    assert.equal(replay.elapsed.value, 0)
+    replay.seek(2)
+    replay.next()
+    assert.equal(replay.elapsed.value, 3_660_000)
+    replay.pause()
+  } finally {
+    scope.stop()
+    globalThis.requestAnimationFrame = previousRequest
+    globalThis.cancelAnimationFrame = previousCancel
+  }
+})
+
+test('observation patches from other participants add versions without touching the active version', () => {
+  const root = version('v0', [])
+  const initial = { versions: [root], activeId: 'v0', nextNode: 1, nextVersion: 1, nextLane: 1, copyLinks: [] }
+  const created = version('v1', [node('n1')], 'v0', 1)
+  const observation = { versions: [created], removed: [], activeId: 'v0', nextNode: 2, nextVersion: 2, nextLane: 1 }
+  const result = applyInteractionPatch(initial, observation)
+  assert.deepEqual(result.versions.map((item) => item.id), ['v0', 'v1'])
+  assert.equal(result.activeId, 'v0')
+  const actor = { id: 'bob', name: 'Bob', color: '#123456' }
+  const log = { format: 'canopy-interaction-log', version: 1, room: 'Room', initialState: initial,
+    initialViewport: { zoom: 1, panX: 0, panY: 0 }, events: [{ id: 'seen', actor, action: 'Observed change',
+      category: 'state', method: 'system', inputTime: 1, changeTime: 1, parameters: { localObservation: true },
+      patch: observation }] }
+  assert.equal(parseInteractionLog(log).events[0].parameters.localObservation, true)
 })
