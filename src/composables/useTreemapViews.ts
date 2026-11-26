@@ -84,8 +84,8 @@ export function useTreemapViews(options: {
     const scale = Math.max(MAP_ZOOM_MIN, fit)
     return {
       zoom: scale,
-      panX: (viewport.width - geometry.width * scale) / 2 - geometry.minX * scale,
-      panY: (viewport.height - geometry.height * scale) / 2 - geometry.minY * scale,
+      panX: viewport.width / 2 - geometry.centerX * scale,
+      panY: viewport.height / 2 - geometry.centerY * scale,
       manual: false,
     }
   }

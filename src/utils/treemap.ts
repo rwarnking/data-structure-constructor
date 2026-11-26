@@ -131,8 +131,8 @@ export const TREE_MAP_HEIGHT = CARD_HEIGHT - 40
 const LEAF_FONT_SIZE = 36
 const PARENT_FONT_SIZE = 32
 const LABEL_PADDING = 10
-// Minimum width: 2 letters at the label width estimate plus the label padding.
-const minimumWidth = (fontSize: number) => Math.ceil(fontSize * 0.65 * 2 + LABEL_PADDING)
+// Minimum width: 6 letters at the label width estimate plus the label padding.
+const minimumWidth = (fontSize: number) => Math.ceil(fontSize * 0.65 * 6 + LABEL_PADDING)
 const LEAF_TILE_WIDTH = minimumWidth(LEAF_FONT_SIZE)
 const LEAF_TILE_HEIGHT = 106
 const PARENT_TILE_WIDTH = minimumWidth(PARENT_FONT_SIZE)
@@ -485,7 +485,9 @@ export function mapGeometry(
   const maxY = Math.max(minY + minHeight, ...extents.map((item) => item.bottom + MAP_PADDING))
   const width = maxX - minX
   const height = maxY - minY
-  return { minX, minY, width, height, viewBox: `${minX} ${minY} ${width} ${height}` }
+  const centerX = extents.length ? (Math.min(...extents.map((item) => item.left)) + Math.max(...extents.map((item) => item.right))) / 2 : minX + width / 2
+  const centerY = extents.length ? (Math.min(...extents.map((item) => item.top)) + Math.max(...extents.map((item) => item.bottom))) / 2 : minY + height / 2
+  return { minX, minY, width, height, centerX, centerY, viewBox: `${minX} ${minY} ${width} ${height}` }
 }
 export function defaultPositions(
   data: TreeNode[],

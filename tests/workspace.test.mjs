@@ -1126,8 +1126,8 @@ test('squarified sibling subtrees fill their parent without overlapping', () => 
   assert.ok(area / ((root.width - 16) * (root.height - 60)) > 0.95)
 })
 
-const MIN_LEAF_WIDTH = Math.ceil(36 * 0.65 * 2 + 10)
-const MIN_PARENT_WIDTH = Math.ceil(32 * 0.65 * 2 + 10)
+const MIN_LEAF_WIDTH = Math.ceil(36 * 0.65 * 6 + 10)
+const MIN_PARENT_WIDTH = Math.ceil(32 * 0.65 * 6 + 10)
 
 test('uniform wide sibling layouts start from the best grid dimensions and scale at most 1.5x', () => {
   const count = 500
