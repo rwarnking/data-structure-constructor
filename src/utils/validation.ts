@@ -1,5 +1,5 @@
 import type { CollaborationMetadata, CopyLink, RetiredVersionNumber, Revision, StoredState, TreeNode, Version, VersionNumber } from '../types/workspace'
-import type { InteractionEntry } from '../types/collaboration'
+import type { InteractionEntry, PingLocation } from '../types/collaboration'
 
 export function isRevision(value: unknown): value is Revision {
   if (!value || typeof value !== 'object') return false
@@ -29,6 +29,15 @@ export function hasRootEntries(value: unknown): boolean {
     isRecord(version) && version.id === 'v0' && Array.isArray(version.data) && version.data.length > 0)
 }
 
+export function isPingLocation(value: unknown): value is PingLocation {
+  return isRecord(value) && Number.isFinite(value.x) && Number.isFinite(value.y)
+    && (value.coordinateSpace === undefined || value.coordinateSpace === 'global'
+      || value.coordinateSpace === 'viewport' || value.coordinateSpace === 'graph'
+      || value.coordinateSpace === 'version' && typeof value.versionId === 'string'
+        && !!value.versionId && (value.region === 'header-left' || value.region === 'header-right'
+          || value.region === 'body' || value.region === 'map'))
+}
+
 export function isInteractionEntry(value: unknown): value is InteractionEntry {
   if (!isRecord(value) || typeof value.id !== 'string' || typeof value.actorId !== 'string'
     || typeof value.actorName !== 'string' || typeof value.action !== 'string'
@@ -37,10 +46,7 @@ export function isInteractionEntry(value: unknown): value is InteractionEntry {
     || (value.versionId !== undefined && typeof value.versionId !== 'string')
     || (value.nodeId !== undefined && typeof value.nodeId !== 'string')
     || (value.nodeLabel !== undefined && typeof value.nodeLabel !== 'string')) return false
-  return value.ping === undefined || (isRecord(value.ping)
-    && Number.isFinite(value.ping.x) && Number.isFinite(value.ping.y)
-    && (value.ping.coordinateSpace === undefined
-      || value.ping.coordinateSpace === 'global' || value.ping.coordinateSpace === 'viewport'))
+  return value.ping === undefined || isPingLocation(value.ping)
 }
 
 function isTreeNode(value: unknown): value is TreeNode {

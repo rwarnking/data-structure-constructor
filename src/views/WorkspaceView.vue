@@ -4,7 +4,7 @@ import { ChartNoAxesCombined as AnalysisIcon, ChevronsLeft as FirstIcon, Chevron
   Download as DownloadIcon, Pause as PauseIcon, Play as PlayIcon, SkipForward as NextIcon, X as ExitIcon } from '@lucide/vue'
 import { getClientId } from '../collaboration'
 import { useCollaboration } from '../composables/useCollaboration'
-import type { InteractionEntry, Ping } from '../types/collaboration'
+import type { InteractionEntry, Ping, PingLocation } from '../types/collaboration'
 import { useVersionComparison } from '../composables/useVersionComparison'
 import { useGraphCamera } from '../composables/useGraphCamera'
 import { useTreemapViews } from '../composables/useTreemapViews'
@@ -278,6 +278,8 @@ const {
   expireRemoteUsers, connectAutomatically, resetRoomTracking, setObservedState, finishRoomSwitch, setBranching,
 } = useCollaboration({
   clientId: CLIENT_ID, state, active, selectedNodes, currentRoomName, graphCanvas, pan, zoom,
+  graphBounds: () => graphBounds.value,
+  pingLocation: versionPingLocation,
   normalizeState, roomDataKey, reflowLayout, fitGraph, notify, playPing,
   onLocalChanges: (before, after, delta) => recorder?.recordState(before, after, delta),
   onRemoteChanges: (before, after) => recorder?.recordRemoteState(before, after),
@@ -420,9 +422,17 @@ const replay = useInteractionReplay({
     } }
     if (parameters?.meaningful === true) {
       const coordinateSpace = parameters.coordinateSpace === 'global' || parameters.coordinateSpace === 'viewport'
+        || parameters.coordinateSpace === 'graph' || parameters.coordinateSpace === 'version'
         ? parameters.coordinateSpace : undefined
       const ping: InteractionEntry['ping'] = typeof parameters.x === 'number' && typeof parameters.y === 'number'
-        ? { x: parameters.x, y: parameters.y, ...(coordinateSpace ? { coordinateSpace } : {}) } : undefined
+        && (coordinateSpace !== 'version' || typeof parameters.pingVersionId === 'string'
+          && (parameters.pingRegion === 'header-left' || parameters.pingRegion === 'header-right'
+            || parameters.pingRegion === 'body' || parameters.pingRegion === 'map'))
+        ? { x: parameters.x, y: parameters.y, ...(coordinateSpace ? { coordinateSpace } : {}),
+          ...(coordinateSpace === 'version' && typeof parameters.pingVersionId === 'string'
+            && (parameters.pingRegion === 'header-left' || parameters.pingRegion === 'header-right'
+              || parameters.pingRegion === 'body' || parameters.pingRegion === 'map')
+            ? { versionId: parameters.pingVersionId, region: parameters.pingRegion } : {}) } : undefined
       addReplayInteraction({ id: event.id, actorId: event.actor.id, actorName: event.actor.name,
         actorColor: event.actor.color, action: event.action, createdAt: event.changeTime,
         ...(typeof parameters.versionId === 'string' ? { versionId: parameters.versionId } : {}),
@@ -660,26 +670,80 @@ function focusCollaborator(userId: string) {
   if (version) { playSound('focus'); focusVersion(version) }
 }
 
-function focusPingLocation(location: { x: number; y: number; coordinateSpace?: 'global' | 'viewport' }) {
+const VERSION_HEADER_HEIGHT = 39
+function versionPingLocation(clientX: number, clientY: number): PingLocation | undefined {
+  const hit = document.elementFromPoint(clientX, clientY)
+  let card = hit?.closest<HTMLElement>('.version-card')
+  if (!card || card.dataset.version === 'v0') {
+    const cards = graphCanvas.value?.querySelectorAll<HTMLElement>('.version-card:not(.root-version)')
+    card = cards && Array.from(cards).reverse().find((element) => {
+      const bounds = element.getBoundingClientRect()
+      return clientX >= bounds.left && clientX <= bounds.right && clientY >= bounds.top && clientY <= bounds.bottom
+    }) || card
+  }
+  const version = card?.dataset.version ? versionsById.value.get(card.dataset.version) : undefined
+  if (!card || !version) return undefined
+  const tile = hit?.closest<SVGGraphicsElement>('.tree-tile')
+  const transform = tile?.getScreenCTM()
+  if (tile && transform && card.contains(tile)) {
+    const point = new DOMPoint(clientX, clientY).matrixTransform(transform.inverse())
+    return { coordinateSpace: 'version', versionId: version.id, region: 'map', x: point.x, y: point.y }
+  }
+  const bounds = card.getBoundingClientRect()
+  if (!bounds.width || !bounds.height) return undefined
+  const height = cardHeight(version)
+  const width = cardWidth(version)
+  const localX = (clientX - bounds.left) / bounds.width * width
+  const localY = (clientY - bounds.top) / bounds.height * height
+  const header = version.id === 'v0' ? 0 : Math.min(VERSION_HEADER_HEIGHT, height)
+  const region = header && localY < header ? (localX < width / 2 ? 'header-left' : 'header-right') : 'body'
+  return {
+    coordinateSpace: 'version', versionId: version.id, region,
+    x: region === 'header-left' ? localX : region === 'header-right' ? width - localX : localX / width,
+    y: region === 'body' ? (localY - header) / Math.max(1, height - header) : localY / header,
+  }
+}
+function pingWorldLocation(location: PingLocation) {
+  if (location.coordinateSpace === 'version') {
+    const version = location.versionId ? versionsById.value.get(location.versionId) : undefined
+    if (!version) return null
+    const position = displayCardPosition(version)
+    const height = cardHeight(version)
+    const header = version.id === 'v0' ? 0 : Math.min(VERSION_HEADER_HEIGHT, height)
+    const width = cardWidth(version)
+    if (location.region === 'map') {
+      const viewport = mapViewport(version)
+      const view = mapViewFor(version)
+      // Match the card border, header, and map margins used by VersionCard.
+      return { x: position.x + 7 + (view.panX + location.x * view.zoom) * (width - 14) / viewport.width,
+        y: position.y + 40 + (view.panY + location.y * view.zoom) * (height - 47) / viewport.height }
+    }
+    return { x: position.x + (location.region === 'header-left' ? location.x
+      : location.region === 'header-right' ? width - location.x : location.x * width),
+      y: position.y + (location.region === 'body' ? header + location.y * (height - header) : location.y * header) }
+  }
+  if (location.coordinateSpace === 'viewport') {
+    return { x: (location.x * canvasSize.value.width - pan.value.x) / zoom.value,
+      y: (location.y * canvasSize.value.height - pan.value.y) / zoom.value }
+  }
+  return location.coordinateSpace === 'graph'
+    ? { x: location.x * graphBounds.value.width, y: location.y * graphBounds.value.height }
+    : { x: location.x, y: location.y }
+}
+function focusPingLocation(location: PingLocation) {
+  const point = pingWorldLocation(location)
+  if (!point) { notify('The version for this ping is no longer available', true); return }
   const targetZoom = Math.min(focusZoom.value, Math.max(1, zoom.value))
-  const screenX = location.coordinateSpace === 'viewport'
-    ? location.x * canvasSize.value.width
-    : pan.value.x + location.x * zoom.value
-  const screenY = location.coordinateSpace === 'viewport'
-    ? location.y * canvasSize.value.height
-    : pan.value.y + location.y * zoom.value
-  const worldX = (screenX - pan.value.x) / zoom.value
-  const worldY = (screenY - pan.value.y) / zoom.value
   animateCamera(targetZoom, {
-    x: canvasSize.value.width / 2 - worldX * targetZoom,
-    y: canvasSize.value.height / 2 - worldY * targetZoom,
+    x: canvasSize.value.width / 2 - point.x * targetZoom,
+    y: canvasSize.value.height / 2 - point.y * targetZoom,
   })
 }
 function pingStyle(ping: Ping) {
-  const x = ping.coordinateSpace === 'viewport' ? ping.x * 100
-    : (pan.value.x + ping.x * zoom.value) / canvasSize.value.width * 100
-  const y = ping.coordinateSpace === 'viewport' ? ping.y * 100
-    : (pan.value.y + ping.y * zoom.value) / canvasSize.value.height * 100
+  const point = pingWorldLocation(ping)
+  if (!point) return { display: 'none' }
+  const x = (pan.value.x + point.x * zoom.value) / canvasSize.value.width * 100
+  const y = (pan.value.y + point.y * zoom.value) / canvasSize.value.height * 100
   return { left: `${x}%`, top: `${y}%`, '--ping-color': colorForUser(ping.userId) }
 }
 
@@ -948,6 +1012,7 @@ async function exportInteractionLog() {
 }
 function exitReplay() {
   if (!roomBeforeReplay) return
+  replay.close()
   tagsOpen.value = false
   tagVersionId.value = null
   replayScreen.value = undefined
@@ -1657,27 +1722,25 @@ function onKeydown(event: KeyboardEvent) {
 }
 let centerAllTimer = 0
 let centerAllFrame = 0
-// Re-tiling every version is expensive, so wait for resizing to settle and work through the versions in short frame slices.
 function runCenterAll() {
+  if (sessionRecorder.replaying.value) return
   const ids = [active.value, ...versions.value.filter((version) => version.id !== active.value.id)].map((version) => version.id)
   let index = 0
   const step = () => {
+    if (sessionRecorder.replaying.value) { centerAllFrame = 0; return }
     const started = performance.now()
     while (index < ids.length && performance.now() - started < 8) centerVersionTreemaps(ids[index++]!, false)
     centerAllFrame = index < ids.length ? requestAnimationFrame(step) : 0
   }
   centerAllFrame = requestAnimationFrame(step)
 }
-function scheduleCenterAll() {
-  window.clearTimeout(centerAllTimer)
-  cancelAnimationFrame(centerAllFrame)
-  centerAllTimer = window.setTimeout(runCenterAll, 250)
-}
 let measuredCanvasSize = ''
 watch(() => `${canvasSize.value.width}x${canvasSize.value.height}`, (size) => {
   if (size === measuredCanvasSize || sessionRecorder.replaying.value) return
   measuredCanvasSize = size
-  scheduleCenterAll()
+  window.clearTimeout(centerAllTimer)
+  cancelAnimationFrame(centerAllFrame)
+  centerAllTimer = window.setTimeout(runCenterAll, 250)
 })
 function measureCanvas() {
   browserSize.value = { width: window.innerWidth, height: window.innerHeight }

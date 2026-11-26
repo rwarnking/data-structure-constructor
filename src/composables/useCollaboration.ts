@@ -1,8 +1,8 @@
 import { computed, nextTick, ref, toRaw, watch, type ComputedRef, type Ref } from 'vue'
 import { PeerRoom, type RoomStatus } from '../collaboration'
 import type { CollaborationMetadata, Revision, StoredState, Version } from '../types/workspace'
-import type { InteractionEntry, Ping, RemoteUser, SyncDelta, SyncSnapshot, VersionChange, VersionRemoval } from '../types/collaboration'
-import { hasValidVersionStep, isCollaborationMetadata, isCopyLink, isInteractionEntry, isRecord, isRetiredVersionNumber, isRevision, isStoredState, isVersion, revisionIsNewer } from '../utils/validation'
+import type { InteractionEntry, Ping, PingLocation, RemoteUser, SyncDelta, SyncSnapshot, VersionChange, VersionRemoval } from '../types/collaboration'
+import { hasValidVersionStep, isCollaborationMetadata, isCopyLink, isInteractionEntry, isPingLocation, isRecord, isRetiredVersionNumber, isRevision, isStoredState, isVersion, revisionIsNewer } from '../utils/validation'
 import { findNode } from '../utils/tree'
 import { assignMissingVersionNumbers, assignVersionSuffixes, compareCopyLinks, retireVersionNumbers } from '../utils/versions'
 import { collaboratorColors, userColor } from '../utils/colors'
@@ -17,6 +17,8 @@ export function useCollaboration(options: {
   graphCanvas: Ref<HTMLElement | null>
   pan: Ref<{ x: number; y: number }>
   zoom: Ref<number>
+  graphBounds: () => { width: number; height: number }
+  pingLocation: (clientX: number, clientY: number) => PingLocation | undefined
   normalizeState: (state: Partial<StoredState>) => StoredState
   roomDataKey: (room: string) => string
   reflowLayout: () => void
@@ -138,7 +140,7 @@ export function useCollaboration(options: {
 
   function logInteraction(
     action: string,
-    reference: { versionId?: string; nodeId?: string; nodeLabel?: string; ping?: { x: number; y: number; coordinateSpace?: 'global' | 'viewport' } } = {},
+    reference: { versionId?: string; nodeId?: string; nodeLabel?: string; ping?: PingLocation } = {},
   ) {
     const entry: InteractionEntry = {
       id: `${CLIENT_ID}-${Date.now()}-${++interactionSequence}`,
@@ -592,12 +594,13 @@ export function useCollaboration(options: {
         remoteUsers.value = remainingUsers
       }
     } else if (packet.type === 'ping') {
-      const ping = message as { id?: unknown; userId?: unknown; x?: unknown; y?: unknown; coordinateSpace?: unknown }
+      const ping = message as { id?: unknown; userId?: unknown }
       if (typeof ping.id !== 'string' || typeof ping.userId !== 'string' || ping.userId === CLIENT_ID
-        || !Number.isFinite(ping.x) || !Number.isFinite(ping.y)
-        || (ping.coordinateSpace !== undefined && ping.coordinateSpace !== 'global' && ping.coordinateSpace !== 'viewport')) return
-      const entry = { id: ping.id, userId: ping.userId, x: ping.x as number, y: ping.y as number,
-        ...(ping.coordinateSpace ? { coordinateSpace: ping.coordinateSpace as 'global' | 'viewport' } : {}), createdAt: Date.now() }
+        || !isPingLocation(ping)) return
+      const entry = { id: ping.id, userId: ping.userId, x: ping.x, y: ping.y,
+        ...(ping.coordinateSpace ? { coordinateSpace: ping.coordinateSpace } : {}),
+        ...(ping.coordinateSpace === 'version' ? { versionId: ping.versionId, region: ping.region } : {}),
+        createdAt: Date.now() }
       showPing(entry)
     } else if (packet.type === 'interaction') {
       const entry = (message as { entry?: unknown }).entry
@@ -644,18 +647,21 @@ export function useCollaboration(options: {
   }
   function sendPingAt(clientX: number, clientY: number) {
     const rect = graphCanvas.value?.getBoundingClientRect()
-    if (!rect || !rect.width || !rect.height) return
+    const bounds = options.graphBounds()
+    if (!rect || !rect.width || !rect.height || !bounds.width || !bounds.height) return
+    const worldX = (clientX - rect.left - options.pan.value.x) / options.zoom.value
+    const worldY = (clientY - rect.top - options.pan.value.y) / options.zoom.value
+    const location = options.pingLocation(clientX, clientY)
+      ?? { x: worldX / bounds.width, y: worldY / bounds.height, coordinateSpace: 'graph' as const }
     const ping = {
       id: `${CLIENT_ID}-${Date.now()}-${++pingSequence}`,
       userId: CLIENT_ID,
-      x: (clientX - rect.left - options.pan.value.x) / options.zoom.value,
-      y: (clientY - rect.top - options.pan.value.y) / options.zoom.value,
-      coordinateSpace: 'global' as const,
+      ...location,
       createdAt: Date.now(),
     }
     showPing(ping)
     peerRoom.send({ type: 'ping', ...ping })
-    logInteraction('Ping', { ping: { x: ping.x, y: ping.y, coordinateSpace: ping.coordinateSpace } })
+    logInteraction('Ping', { ping: location })
   }
 
   function onRoomStatus(status: RoomStatus) {

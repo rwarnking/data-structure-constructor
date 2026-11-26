@@ -65,8 +65,7 @@ async function fillEntries(page, names) {
   }
   await page.getByRole('button', { name: `Add ${names.length} ${names.length === 1 ? 'entry' : 'entries'}` }).click()
   await expect(page.getByPlaceholder('Entry name')).toHaveCount(0)
-  const label = names[0].split(/\s+/).map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s*')
-  await expect(page.locator('.version-card.active')).toContainText(new RegExp(label))
+  await expect(page.locator(`.version-card.active rect.tree-tile[aria-label=${JSON.stringify(names[0])}]`).first()).toBeAttached()
 }
 
 async function focusActive(page) {
@@ -863,6 +862,24 @@ test('focus zoom is the wheel limit and focused cards show later versions', asyn
   await expect(indicator()).toHaveText('1 later version')
 })
 
+test('focused version indicators remain fully visible at wide resolutions', async ({ page }) => {
+  await page.setViewportSize({ width: 2560, height: 720 })
+  const room = await openRoom(page)
+  await addEntries(page, ['Indicator'])
+  const versionId = (await state(page, room)).activeId
+  await focusActive(page)
+  await expectCentered(page, versionId)
+  const indicator = page.locator('.version-card.active .version-position-indicator')
+  await expect(indicator).toHaveText('Latest version')
+  await expect.poll(() => indicator.evaluate((element) => {
+    const rect = element.getBoundingClientRect()
+    const canvas = element.closest('.graph-canvas').getBoundingClientRect()
+    return rect.left >= canvas.left && rect.right <= canvas.right
+      && rect.top >= canvas.top && rect.bottom <= canvas.bottom
+      && element.scrollWidth <= element.clientWidth && element.scrollHeight <= element.clientHeight
+  })).toBe(true)
+})
+
 test('neighborhood focus frames the adjacent versions at each end', async ({ page }) => {
   const room = await openRoom(page)
   const ids = []
@@ -1044,6 +1061,9 @@ test('interaction logs export, replay, reset, and show analysis without changing
   const room = await openRoom(page)
   await addEntries(page, ['Recorded entry'], true)
   await focusActive(page)
+  await page.locator('.action-sidebar-item[title^="Ping ·"]').click()
+  await page.locator('.version-card.active .version-header-id').click()
+  await page.locator('.action-sidebar-item[title^="Ping ·"]').click()
   await page.keyboard.press('Control+z')
   await page.keyboard.press('Control+y')
   await expect.poll(async () => (await activeData(page, room)).some((entry) => entry.value === 'Recorded entry')).toBe(true)
@@ -1061,6 +1081,8 @@ test('interaction logs export, replay, reset, and show analysis without changing
   expect(log.events.some((event) => event.method === 'hotkey' && event.action === 'undo')).toBe(true)
   expect(log.events.some((event) => event.method === 'hotkey' && event.action === 'redo')).toBe(true)
   expect(log.events.some((event) => event.category === 'viewport')).toBe(true)
+  expect(log.events.some((event) => event.action === 'Ping' && event.parameters?.coordinateSpace === 'version'
+    && event.parameters?.pingVersionId && event.parameters?.pingRegion === 'header-left')).toBe(true)
   expect(log.events.every((event) => event.actor.id && event.actor.name && event.inputTime <= event.changeTime)).toBe(true)
   expect(log.events[0].action).toBe('Login')
   expect(log.sessions).toHaveLength(1)
@@ -1085,6 +1107,13 @@ test('interaction logs export, replay, reset, and show analysis without changing
   await page.getByRole('button', { name: 'Jump to end' }).click()
   await expect.poll(async () => (await activeData(page, 'Interaction Log Replay')).some((entry) => entry.value === 'Recorded entry')).toBe(true)
   await expect(page.locator('.interaction-section')).toContainText('Recorded entry')
+  await page.locator('.interaction-reference[title^="Focus ping by"]').last().click()
+  await expect.poll(() => page.locator('.version-card.active .version-header-id').evaluate((element) => {
+    const rect = element.getBoundingClientRect()
+    const canvas = element.closest('.graph-canvas').getBoundingClientRect()
+    return Math.max(Math.abs((rect.left + rect.right - canvas.left - canvas.right) / 2),
+      Math.abs((rect.top + rect.bottom - canvas.top - canvas.bottom) / 2))
+  })).toBeLessThan(3)
   expect((await state(page, 'Interaction Log Replay')).versions.map((version) => version.id)).toEqual(original.versions.map((version) => version.id))
   await page.getByRole('button', { name: 'Analyze Interaction Log' }).click()
   const analysis = page.getByRole('dialog', { name: 'Interaction log analysis' })
@@ -2571,7 +2600,7 @@ for (const count of [1, 2]) {
     ], {
       positions: {
         source0: { x: -0.75, y: 0 }, source1: { x: -1.5, y: 0 },
-        target: { x: 0, y: 0 }, blocker: { x: 0.62, y: 0 },
+        target: { x: 0, y: 0 }, blocker: { x: 0.55, y: 0 },
         'manual-a': { x: 1.8, y: 1.6 }, 'manual-b': { x: 2, y: 1.6 },
       },
       mapView: { zoom: 0.17, panX: 80, panY: 20, manual: true },
@@ -3756,10 +3785,10 @@ test('undo and redo synchronize versions and copy connectors with peers', async 
   }
 })
 
-test('collaborative pings keep the same global position across window sizes', async ({ browser }) => {
+test('collaborative pings match version corners, number and entries across window sizes', async ({ browser }) => {
   const contexts = await Promise.all([
-    browser.newContext({ viewport: { width: 1280, height: 900 } }),
-    browser.newContext({ viewport: { width: 980, height: 720 } }),
+    browser.newContext({ viewport: { width: 1280, height: 720 } }),
+    browser.newContext({ viewport: { width: 2560, height: 720 } }),
   ])
   const [host, guest] = await Promise.all(contexts.map((context) => context.newPage()))
   try {
@@ -3767,23 +3796,75 @@ test('collaborative pings keep the same global position across window sizes', as
     await guest.goto(`/?room=${room}`)
     await expect(guest.getByRole('status').first()).toHaveText('Connected', { timeout: 20000 })
 
+    await addEntries(host, ['Shared version'])
+    const versionId = (await state(host, room)).activeId
+    await expect.poll(async () => (await state(guest, room)).activeId).toBe(versionId)
+    await Promise.all([focusActive(host), focusActive(guest)])
+    await Promise.all([expectCentered(host, versionId), expectCentered(guest, versionId)])
+    const hostCard = host.locator(`.version-card[data-version="${versionId}"]`)
+    const guestCard = guest.locator(`.version-card[data-version="${versionId}"]`)
     await host.locator('.action-sidebar-item[title^="Ping ·"]').click()
-    const canvasBounds = await host.locator('.graph-canvas').boundingBox()
-    const clickX = canvasBounds.width * 0.37
-    const clickY = canvasBounds.height * 0.71
-    await host.mouse.click(canvasBounds.x + clickX, canvasBounds.y + clickY)
-    await expect(host.locator('.ping-origin')).toHaveCount(1)
-    await expect(guest.locator('.ping-origin')).toHaveCount(1)
-
     const recordedPing = async (page) => page.evaluate((name) => {
       const entries = JSON.parse(localStorage.getItem(`canopy-interactions-${encodeURIComponent(name)}`))
       return entries.findLast((entry) => entry.action === 'Ping').ping
     }, room)
-    await expect.poll(async () => recordedPing(host)).toMatchObject({ coordinateSpace: 'global' })
-    expect(await recordedPing(guest)).toMatchObject(await recordedPing(host))
-    const guestCanvas = await guest.locator('.graph-canvas').boundingBox()
-    expect(guestCanvas.width).not.toBe(canvasBounds.width)
-    expect(guestCanvas.height).not.toBe(canvasBounds.height)
+    for (const [x, y] of [[0.003, 0.003], [0.997, 0.003], [0.003, 0.997], [0.997, 0.997], ['number', 'number'], ['entry', 'entry']]) {
+      const selector = x === 'number' ? '.version-header-id' : x === 'entry' ? '.tree-tile' : null
+      const source = await (selector ? hostCard.locator(selector).first() : hostCard).boundingBox()
+      const target = await (selector ? guestCard.locator(selector).first() : guestCard).boundingBox()
+      const sourceX = source.x + source.width * (selector ? 0.5 : x)
+      const sourceY = source.y + source.height * (selector ? 0.5 : y)
+      const targetX = target.x + target.width * (selector ? 0.5 : x)
+      const targetY = target.y + target.height * (selector ? 0.5 : y)
+      const previous = await guest.locator('.ping-origin').count()
+      await host.mouse.click(sourceX, sourceY)
+      await expect.poll(() => guest.locator('.ping-origin').count()).toBeGreaterThan(previous)
+      const point = await guest.locator('.ping-origin').last().evaluate((element) => {
+        const rect = element.getBoundingClientRect()
+        return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }
+      })
+      await expect.poll(() => recordedPing(guest)).toMatchObject({ coordinateSpace: 'version', versionId })
+      expect(await recordedPing(guest)).toMatchObject(await recordedPing(host))
+      const details = JSON.stringify({ x, y, point, targetX, targetY, ping: await recordedPing(guest) })
+      expect(Math.abs(point.x - targetX), details).toBeLessThan(3)
+      expect(Math.abs(point.y - targetY), details).toBeLessThan(3)
+    }
+  } finally {
+    await Promise.all(contexts.map((context) => context.close()))
+  }
+})
+
+test('resizing centers treemaps in all versions', async ({ page }) => {
+  const room = await openTreemapRoom(page, [
+    { id: 'n1', value: 'First', children: [] }, { id: 'n2', value: 'Second', children: [] },
+  ], { positions: { n1: { x: 4, y: 3 }, n2: { x: 5, y: 4 } }, mapView: { zoom: 1, panX: 20, panY: 30, manual: true } })
+  await addEntries(page, ['New version'])
+  const before = (await state(page, room)).versions.filter((version) => version.id !== 'v0')
+  await page.setViewportSize({ width: 2560, height: 720 })
+  await expect.poll(async () => (await state(page, room)).versions.filter((version) => version.id !== 'v0')
+    .every((version) => version.mapView?.manual === false
+      && JSON.stringify(version.positions) !== JSON.stringify(before.find((item) => item.id === version.id).positions))).toBe(true)
+  const after = (await state(page, room)).versions.find((version) => version.id === 'v1')
+  expect(after.positions.n2.x - after.positions.n1.x).toBeCloseTo(1)
+  expect(after.positions.n2.y - after.positions.n1.y).toBeCloseTo(1)
+})
+
+test("creates a branch from another collaborator's version without a warning", async ({ browser }) => {
+  const contexts = await Promise.all([browser.newContext(), browser.newContext()])
+  const [host, guest] = await Promise.all(contexts.map((context) => context.newPage()))
+  try {
+    const room = await openRoom(host)
+    await guest.goto(`/?room=${room}`)
+    await expect(guest.getByRole('status').first()).toHaveText('Connected', { timeout: 20000 })
+    await addEntries(host, ['Host branch'])
+    await expect.poll(async () => (await state(guest, room)).versions.length).toBe(2)
+    await guest.keyboard.press('ArrowLeft')
+    await expect.poll(async () => (await state(guest, room)).activeId).toBe('v0')
+    const dialogs = []
+    guest.on('dialog', async (dialog) => { dialogs.push(dialog.message()); await dialog.dismiss() })
+    await addEntries(guest, ['Guest branch'])
+    expect(dialogs).toEqual([])
+    await expect.poll(async () => (await state(host, room)).versions.some((version) => !!findNode(version.data, 'Guest branch'))).toBe(true)
   } finally {
     await Promise.all(contexts.map((context) => context.close()))
   }
@@ -3894,6 +3975,8 @@ test('a burst of map wheel events is rendered together and fully persisted', asy
   const before = await state(page, room)
   const version = before.versions.find((item) => item.id === before.activeId)
   const map = page.locator('.version-card.active .mini-map')
+  const initialTransform = await map.locator('svg > g').getAttribute('transform')
+  const initialZoom = Number(initialTransform.match(/scale\(([^)]+)\)/)[1])
   const rendered = await map.evaluate(async (element) => {
     const bounds = element.getBoundingClientRect()
     const group = element.querySelector('svg > g')
@@ -3910,7 +3993,7 @@ test('a burst of map wheel events is rendered together and fully persisted', asy
   })
   expect(rendered).toBe(1)
   await expect.poll(async () => (await state(page, room)).versions.find((item) => item.id === version.id).mapView.zoom)
-    .toBeCloseTo(version.mapView.zoom * Math.exp(300 * 0.0012), 5)
+    .toBeCloseTo(initialZoom * Math.exp(300 * 0.0012), 5)
 })
 
 test('regular wheel zooms the graph while shift wheel zooms the version map', async ({ page }) => {
@@ -4117,7 +4200,7 @@ test('pasting into an existing treemap moves conflicting treemaps without overla
     { id: 'source', value: 'Source', children: [] },
     { id: 'other', value: 'Other', children: [] },
   ]
-  const positions = { target: { x: 0, y: 0 }, source: { x: 0.78, y: 0 }, other: { x: 1.6, y: 0 } }
+  const positions = { target: { x: 0, y: 0 }, source: { x: 0.6, y: 0 }, other: { x: 1.6, y: 0 } }
   const room = await openTreemapRoom(page, data, { positions })
   await (await activeTile(page, room, 'Source')).click({ position: { x: 8, y: 8 } })
   await expect(page.locator('.version-card.active .tree-tile.is-selected')).toHaveCount(1)
@@ -4605,6 +4688,7 @@ test('low-zoom treemap tooltips do not cover their source version', async ({ pag
   const card = page.locator(`.version-card[data-version="${activeVersion}"]`)
   await expect(card).toHaveClass(/compact/)
   await expect(card).toHaveClass(/lod-overview/)
+  await page.waitForTimeout(500)
   await card.hover({ force: true })
   const tooltip = page.locator('.overview-preview')
   await expect(tooltip).toBeVisible()

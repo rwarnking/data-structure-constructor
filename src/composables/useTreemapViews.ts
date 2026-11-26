@@ -2,6 +2,8 @@ import { computed, nextTick, ref, watch, type ComputedRef, type Ref } from 'vue'
 import type { MapView, StoredState, TreeNode, Version } from '../types/workspace'
 import { CARD_HEIGHT, CARD_WIDTH, TREE_MAP_HEIGHT, MAP_PADDING, MAP_ZOOM_MIN, MAP_ZOOM_MAX, compactTreemapPositions, defaultPositions, mapGeometry, outerTreemapDimensions, tilesForForest } from '../utils/treemap'
 
+const SHARED_LAYOUT_VIEWPORT = { width: CARD_WIDTH - 14, height: CARD_HEIGHT - 47 }
+
 export function useTreemapViews(options: {
   state: Ref<StoredState>
   versions: ComputedRef<Version[]>
@@ -75,7 +77,7 @@ export function useTreemapViews(options: {
     if (pending) return pending
     const transient = transientMapViews.value[version.id]
     if (transient) return transient
-    if (version.mapView && (version.id !== 'v0' || version.mapView.manual)) return version.mapView
+    if (version.mapView?.manual) return version.mapView
     const viewport = mapViewport(version)
     const geometry = mapGeometries.value.get(version.id) ?? mapGeometry(version.data, version.positions, viewport.width, viewport.height)
     const fit = Math.min(1, (viewport.width - MAP_PADDING * 2) / geometry.width, (viewport.height - MAP_PADDING * 2) / geometry.height)
@@ -91,13 +93,7 @@ export function useTreemapViews(options: {
     const version = versions.value.find((item) => item.id === versionId)
     if (!version) return
     if (!version.data.length) {
-      const viewport = mapViewport(version)
-      version.mapView = {
-        zoom: 1,
-        panX: viewport.width / 2,
-        panY: viewport.height / 2,
-        manual: true,
-      }
+      version.mapView = { zoom: 1, panX: 0, panY: 0, manual: false }
       if (notifyUser) notify('Treemaps centered and fitted')
       return
     }
@@ -116,7 +112,7 @@ export function useTreemapViews(options: {
     const top = Math.min(...extents.map((item) => item.top))
     const right = Math.max(...extents.map((item) => item.right))
     const bottom = Math.max(...extents.map((item) => item.bottom))
-    const viewport = mapViewport(version)
+    const viewport = SHARED_LAYOUT_VIEWPORT
     const width = Math.max(1, right - left)
     const height = Math.max(1, bottom - top)
     const targetZoom = Math.max(MAP_ZOOM_MIN, Math.min(
@@ -133,14 +129,14 @@ export function useTreemapViews(options: {
         y: (position.y * TREE_MAP_HEIGHT + offsetY) / TREE_MAP_HEIGHT,
       }]
     }))
-    version.mapView = { zoom: targetZoom, panX: 0, panY: 0, manual: true }
+    version.mapView = { zoom: targetZoom, panX: 0, panY: 0, manual: false }
     if (notifyUser) notify('Treemaps centered and fitted')
   }
   function compactVersionTreemaps(versionId: string, notifyUser = true) {
     const version = versions.value.find((item) => item.id === versionId)
     if (!version || !version.data.length) return
     version.compact = true
-    version.positions = compactTreemapPositions(version.data, mapViewport(version))
+    version.positions = compactTreemapPositions(version.data, SHARED_LAYOUT_VIEWPORT)
     centerVersionTreemaps(version.id, false)
     if (notifyUser) notify('Treemap layout compacted')
   }

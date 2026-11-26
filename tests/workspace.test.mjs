@@ -24,7 +24,7 @@ const { duplicateLinks } = await vite.ssrLoadModule('/src/utils/duplicateLinks.t
 const { nodeParentIds, flattenNodes, flattenPaths } = await vite.ssrLoadModule('/src/utils/tree.ts')
 const { useGraphCamera } = await vite.ssrLoadModule('/src/composables/useGraphCamera.ts')
 const { parseDataset } = await vite.ssrLoadModule('/src/services/dataset.ts')
-const { isStoredState, isVersion } = await vite.ssrLoadModule('/src/utils/validation.ts')
+const { isStoredState, isVersion, isPingLocation } = await vite.ssrLoadModule('/src/utils/validation.ts')
 const { shortcutAction, shortcuts } = await vite.ssrLoadModule('/src/config/hotkeys.ts')
 const { actionIcons, actionSymbols } = await vite.ssrLoadModule('/src/config/icons.ts')
 const { collaboratorColors } = await vite.ssrLoadModule('/src/utils/colors.ts')
@@ -213,6 +213,33 @@ test('tag dialog events retain independent drafts and are suppressed during repl
     assert.equal(events[0].tagDialog.title, '')
     assert.deepEqual(events[1].tagDialog, draft)
     assert.equal(events[2].tagDialog, null)
+  } finally {
+    scope.stop()
+    globalThis.window = previousWindow
+  }
+})
+
+test('version-relative pings are validated and retained in interaction recordings', () => {
+  const ping = { coordinateSpace: 'version', versionId: 'v1', region: 'map', x: 45, y: 60 }
+  assert.equal(isPingLocation(ping), true)
+  assert.equal(isPingLocation({ ...ping, versionId: '' }), false)
+  assert.equal(isPingLocation({ ...ping, region: 'invalid' }), false)
+  assert.equal(isPingLocation({ ...ping, x: Infinity }), false)
+  assert.equal(isPingLocation({ coordinateSpace: 'graph', x: 0.5, y: 0.5 }), true)
+  const previousWindow = globalThis.window
+  globalThis.window = { clearTimeout, setTimeout }
+  const scope = effectScope()
+  try {
+    const initial = { versions: [version('v0', [])], activeId: 'v0', nextNode: 1, nextVersion: 1, nextLane: 1, copyLinks: [] }
+    const recorder = scope.run(() => useInteractionRecorder({
+      state: ref(initial), room: ref('Room'), zoom: ref(1), pan: ref({ x: 0, y: 0 }), selectedNodes: ref([]),
+      screen: () => ({ width: 1440, height: 900 }), actor: () => ({ id: 'alice', name: 'Alice', color: '#123456' }),
+      send: () => {}, notify: () => {},
+    }))
+    recorder.startRoom('Room')
+    recorder.recordAction({ id: 'ping', actorId: 'alice', actorName: 'Alice', action: 'Ping', createdAt: 1, ping })
+    const event = parseInteractionLog(JSON.parse(JSON.stringify(recorder.current.value))).events.find((item) => item.action === 'Ping')
+    assert.deepEqual(event.parameters, { meaningful: true, x: 45, y: 60, coordinateSpace: 'version', pingVersionId: 'v1', pingRegion: 'map' })
   } finally {
     scope.stop()
     globalThis.window = previousWindow
@@ -1099,11 +1126,14 @@ test('squarified sibling subtrees fill their parent without overlapping', () => 
   assert.ok(area / ((root.width - 16) * (root.height - 60)) > 0.95)
 })
 
+const MIN_LEAF_WIDTH = Math.ceil(36 * 0.65 * 2 + 10)
+const MIN_PARENT_WIDTH = Math.ceil(32 * 0.65 * 2 + 10)
+
 test('uniform wide sibling layouts start from the best grid dimensions and scale at most 1.5x', () => {
   const count = 500
   const forest = [node('root', Array.from({ length: count }, (_, index) => node(`leaf-${index}`)))]
   const root = tilesForForest(forest).find((tile) => tile.id === 'root')
-  const childWidth = 198
+  const childWidth = MIN_LEAF_WIDTH
   const childHeight = 106
   const aspect = (CARD_WIDTH - 14) / (CARD_HEIGHT - 47)
   let best = null
@@ -1124,7 +1154,7 @@ test('uniform wide sibling layouts start from the best grid dimensions and scale
 
 function assertMinimumSizes(tiles) {
   for (const tile of tiles) {
-    assert.ok(tile.width >= (tile.hasChildren ? 177 : 198) - 0.5, `${tile.id} width ${tile.width}`)
+    assert.ok(tile.width >= (tile.hasChildren ? MIN_PARENT_WIDTH : MIN_LEAF_WIDTH) - 0.5, `${tile.id} width ${tile.width}`)
     assert.ok(tile.height >= (tile.hasChildren ? 60 : 106) - 0.5, `${tile.id} height ${tile.height}`)
   }
 }
@@ -1157,7 +1187,7 @@ test('treemap scale is capped at 1.5 and violations beyond that are accepted', (
   const tiles = tilesForForest(forest)
   assert.equal(tiles.length, 26)
   assert.deepEqual(tilesFor(forest[0], forest, 0).map((tile) => tile.id), tiles.map((tile) => tile.id))
-  assert.ok(tiles.some((tile) => tile.width < (tile.hasChildren ? 177 : 198) - 0.5
+  assert.ok(tiles.some((tile) => tile.width < (tile.hasChildren ? MIN_PARENT_WIDTH : MIN_LEAF_WIDTH) - 0.5
     || tile.height < (tile.hasChildren ? 60 : 106) - 0.5))
 })
 
@@ -1212,13 +1242,15 @@ test('deep treemap nodes retain at least 30 by 30 layout dimensions', () => {
   }
 })
 
-test('treemap entries have at least the width of a free-floating leaf', () => {
+test('treemap entries meet their respective minimum widths', () => {
   const forest = [node('free'), node('root', [
     node('a'), node('b', [node('b1'), node('b2'), node('b3')]), node('c'), node('d'), node('e'),
   ])]
   const tiles = tilesForForest(forest)
-  const freeWidth = tiles.find((tile) => tile.id === 'free').width
-  for (const tile of tiles) assert.ok(tile.width >= freeWidth, `${tile.id} width was ${tile.width}`)
+  for (const tile of tiles) {
+    const minimumWidth = tile.hasChildren ? MIN_PARENT_WIDTH : MIN_LEAF_WIDTH
+    assert.ok(tile.width >= minimumWidth - 0.5, `${tile.id} width was ${tile.width}`)
+  }
 })
 
 test('duplicate connectors retain the original choices across ties and nested duplicate groups', () => {
@@ -1539,6 +1571,42 @@ test('replay reports elapsed time and total duration of the selected actor', () 
     replay.seek(2)
     replay.next()
     assert.equal(replay.elapsed.value, 3_660_000)
+    replay.pause()
+  } finally {
+    scope.stop()
+    globalThis.requestAnimationFrame = previousRequest
+    globalThis.cancelAnimationFrame = previousCancel
+  }
+})
+
+test('replay yields between large bursts of events with the same timestamp', () => {
+  const previousRequest = globalThis.requestAnimationFrame
+  const previousCancel = globalThis.cancelAnimationFrame
+  const callbacks = []
+  globalThis.requestAnimationFrame = (callback) => { callbacks.push(callback); return callbacks.length }
+  globalThis.cancelAnimationFrame = () => {}
+  const scope = effectScope()
+  try {
+    const actor = { id: 'alice', name: 'Alice', color: '#123456' }
+    let applied = 0
+    const replay = scope.run(() => useInteractionReplay({ reset: () => {}, initialize: () => {},
+      apply: () => { applied++ }, setScreen: () => {} }))
+    replay.load({ format: 'canopy-interaction-log', version: 1, room: 'Room',
+      initialState: {}, initialViewport: { zoom: 1, panX: 0, panY: 0 },
+      sessions: [{ id: 'session', actor, startedAt: 1000, initialState: {},
+        initialViewport: { zoom: 1, panX: 0, panY: 0 }, eventIds: [] }],
+      events: Array.from({ length: 250 }, (_, index) => ({ id: `event-${index}`, sessionId: 'session',
+        actor, action: 'Edit', category: 'input', method: 'mouse', inputTime: 1000, changeTime: 1000 })) })
+    replay.play()
+    callbacks.shift()(100)
+    assert.ok(applied > 0 && applied < 250)
+    assert.equal(replay.index.value, applied)
+    while (applied < 250) {
+      const previous = applied
+      callbacks.shift()(116 + applied)
+      assert.ok(applied > previous && applied - previous <= 100)
+    }
+    assert.equal(replay.index.value, 250)
     replay.pause()
   } finally {
     scope.stop()

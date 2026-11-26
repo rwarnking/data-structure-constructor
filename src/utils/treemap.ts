@@ -131,8 +131,8 @@ export const TREE_MAP_HEIGHT = CARD_HEIGHT - 40
 const LEAF_FONT_SIZE = 36
 const PARENT_FONT_SIZE = 32
 const LABEL_PADDING = 10
-// Minimum width: 8 letters at the label width estimate plus the label padding.
-const minimumWidth = (fontSize: number) => Math.ceil(fontSize * 0.65 * 8 + LABEL_PADDING)
+// Minimum width: 2 letters at the label width estimate plus the label padding.
+const minimumWidth = (fontSize: number) => Math.ceil(fontSize * 0.65 * 2 + LABEL_PADDING)
 const LEAF_TILE_WIDTH = minimumWidth(LEAF_FONT_SIZE)
 const LEAF_TILE_HEIGHT = 106
 const PARENT_TILE_WIDTH = minimumWidth(PARENT_FONT_SIZE)

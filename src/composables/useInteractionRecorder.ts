@@ -115,7 +115,9 @@ export function useInteractionRecorder(options: {
       ...(entry.nodeId ? { nodeId: entry.nodeId } : {}),
       ...(entry.nodeLabel ? { nodeLabel: entry.nodeLabel } : {}),
       ...(entry.ping ? { x: entry.ping.x, y: entry.ping.y,
-        ...(entry.ping.coordinateSpace ? { coordinateSpace: entry.ping.coordinateSpace } : {}) } : {}),
+        ...(entry.ping.coordinateSpace ? { coordinateSpace: entry.ping.coordinateSpace } : {}),
+        ...(entry.ping.versionId ? { pingVersionId: entry.ping.versionId } : {}),
+        ...(entry.ping.region ? { pingRegion: entry.ping.region } : {}) } : {}),
     }
   }
   function recordState(before: StoredState, after: StoredState, delta?: SyncDelta) {

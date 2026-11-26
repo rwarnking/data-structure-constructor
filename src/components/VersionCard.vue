@@ -101,7 +101,11 @@ const dropTarget = computed(() => props.version.id === active.value.id
     <span v-for="(user, index) in activeUsersFor(version.id)" :key="`active-${user.id}`"
       class="version-user-outline" :style="{ borderColor: user.color, borderWidth: `${2 / Math.min(1, zoom)}px`, inset: `${(-2 - index * 3) / Math.min(1, zoom)}px` }"></span>
     <span v-if="focusedVersionId === version.id" class="version-position-indicator"
-      :style="version.id === 'v0' ? { top: `${rootLabelOffset()}px` } : undefined">
+      :style="{ top: version.id === 'v0' ? `${rootLabelOffset()}px` : `${-Math.min(6, 6 / zoom)}px`,
+        fontSize: `${Math.min(11, 24 / zoom)}px`,
+        padding: `${Math.min(3, 5 / zoom)}px ${Math.min(7, 10 / zoom)}px`,
+        ...(version.id === 'v0' ? { left: `${rootLabelX()}px`, right: 'auto',
+          maxWidth: `${rootLabelWidth()}px`, transform: 'translate(-50%, -100%)' } : {}) }">
       {{ laterVersionCount(version) ? `${laterVersionCount(version)} later ${laterVersionCount(version) === 1 ? 'version' : 'versions'}` : 'Latest version' }}
     </span>
     <span v-if="version.id === 'v0' && version.tag" class="version-tag-indicator" :title="`${version.tag.title}\n${version.tag.description}`"

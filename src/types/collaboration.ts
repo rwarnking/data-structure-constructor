@@ -24,6 +24,13 @@ export type SyncSnapshot = {
   interactions?: InteractionEntry[]
   clock: number
 }
+export type PingLocation = {
+  x: number
+  y: number
+  coordinateSpace?: 'global' | 'viewport' | 'graph' | 'version'
+  versionId?: string
+  region?: 'header-left' | 'header-right' | 'body' | 'map'
+}
 export type InteractionEntry = {
   id: string
   actorId: string
@@ -34,8 +41,8 @@ export type InteractionEntry = {
   versionId?: string
   nodeId?: string
   nodeLabel?: string
-  ping?: { x: number; y: number; coordinateSpace?: 'global' | 'viewport' }
+  ping?: PingLocation
 }
 export type RemoteUser = { name: string; color: string; activeVersionId: string | null; selectedNodeIds: string[]; lastSeen: number }
-export type Ping = { id: string; userId: string; x: number; y: number; coordinateSpace?: 'global' | 'viewport'; createdAt: number }
+export type Ping = { id: string; userId: string; createdAt: number } & PingLocation
 

@@ -3,7 +3,7 @@ import { ref } from 'vue'
 import { actionIcons, actionSymbols } from '../config/icons'
 import { shortcutLabel } from '../config/hotkeys'
 import type { RoomStatus } from '../collaboration'
-import type { InteractionEntry } from '../types/collaboration'
+import type { InteractionEntry, PingLocation } from '../types/collaboration'
 import type { Version } from '../types/workspace'
 import { versionColor } from '../utils/colors'
 import { findNode } from '../utils/tree'
@@ -69,7 +69,7 @@ function focusInteraction(entry: InteractionEntry) {
 }
 const emit = defineEmits<{
   'toggle-sidebar': []; 'toggle-theme': []; 'change-room': []; 'copy-invite': []
-  'focus-collaborator': [id: string]; 'focus-ping': [location: { x: number; y: number }]
+  'focus-collaborator': [id: string]; 'focus-ping': [location: PingLocation]
   navigate: [entry: InteractionEntry, kind: 'node' | 'version']; 'focus-active': []
   'import-data': [file: File]; 'export-data': []; 'show-tags': []
   'export-log': []; 'replay-file': [file: File]

@@ -1,6 +1,8 @@
 import { computed, onUnmounted, ref, shallowRef } from 'vue'
 import type { InteractionActor, InteractionEvent, InteractionLog, InteractionScreen } from '../utils/interactionLog'
 
+const MAX_REPLAY_EVENTS_PER_FRAME = 100
+
 export function useInteractionReplay(options: {
   reset: () => void
   initialize: (log: InteractionLog) => void
@@ -125,9 +127,13 @@ export function useInteractionReplay(options: {
     lastFrame = now
     const sequence = events.value
     const first = sequence[0]?.changeTime ?? 0
-    while (index.value < sequence.length && sequence[index.value]!.changeTime - first <= time) {
+    const startedAt = performance.now()
+    let processed = 0
+    while (index.value < sequence.length && sequence[index.value]!.changeTime - first <= time
+      && processed < MAX_REPLAY_EVENTS_PER_FRAME && performance.now() - startedAt < 8) {
       execute(sequence[index.value]!)
       index.value++
+      processed++
     }
     updateCursors(time)
     if (index.value >= sequence.length) { pause(); return }
